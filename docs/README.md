@@ -1,14 +1,16 @@
 # 文档索引
 
-本目录收录 KM-11 及关联任务已交付的 Markdown 文档。原附件正文保持不变；本索引区分当前版本、评审依据和历史版本。文档版本不是软件发布版本。
+本目录收录 KM-11 及关联任务已交付的 Markdown 文档。首次入库保留了原附件；2026-09-20 按用户截图同步修订需求与当前架构的 Agent 支持范围，历史版本和评审原文保留。本索引区分当前版本、评审依据和历史版本。文档版本不是软件发布版本。
 
 ## 当前阅读顺序
 
-1. [MVP spec v0.1](agent-fleet-mvp-spec.md)：需求基准。
+1. [MVP spec v0.1 + Agent 范围补充](agent-fleet-mvp-spec.md)：需求基准。
 2. [中文架构 v1.1.1](agent-fleet-architecture-v1.1.1.md)：最新完整架构，含用户确认的 CA 备份决定。
 3. [人工 CA 备份恢复手册](manual-ca-backup-recovery.md)：人工备份、恢复和演练方案。
 4. [v1.1 评审问题处置与文档验证](architecture-revision-resolution.md)：两轮评审的修订落点。
 5. [v1.1.1 决策补充表](architecture-revision-resolution-v1.1.1-supplement.md)：与上一份配套，记录 CA 决策落地及待验证事项。
+
+[Agent 支持矩阵与验收要求](agent-support-matrix.md)：截图七种 Agent 加原有 OpenCode，共八个支持目标；包含待验证身份与能力边界。
 
 ## 评审依据
 

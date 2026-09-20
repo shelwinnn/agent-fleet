@@ -1,7 +1,7 @@
 # agent-fleet MVP Specification
 
 **Status:** Proposed / implementation-ready after owner review  
-**Version:** v0.1  
+**Version:** v0.1 + Agent scope amendment (2026-09-20)
 **Date:** 2026-09-10  
 **Primary goal:** Centrally manage Agent CLI versions, model/provider configuration, MCP configuration, Skills, rules, and drift across multiple developer machines through a Web UI, with `agentd` as the continuous management channel and SSH as a first-class bootstrap / fallback / SSH-only management channel.
 
@@ -15,13 +15,20 @@ It treats the state of developer Agents as desired state instead of as a collect
 
 The MVP deliberately does **not** try to become an Agent task scheduler, remote shell product, secret manager, general-purpose configuration management system, or Kubernetes replacement. It manages the **Agent development environment**, not Agent workloads.
 
-The MVP must support these three Agent families through adapters:
+The MVP support target includes eight Agent families through adapters, following the owner’s 2026-09-20 screenshot supplement:
 
+- Claude (exact runtime identity to be verified; do not assume Claude Code)
 - Codex
-- OMP / oh-my-pi Agent
-- OpenCode
+- DeepSeek Harness
+- Grok
+- Hermes
+- Oh-My-Pi (OMP / oh-my-pi; one family, not two)
+- ZCode
+- OpenCode (retained from the original scope)
 
-The architecture must make adding Claude Code, Gemini CLI, or other Agents possible without changing control-plane core logic.
+These are required support targets, not claims of implemented or verified compatibility. See [Agent support scope and acceptance](agent-support-matrix.md) for identity, capability, and per-family validation requirements. Screenshot labels such as built-in, public, online, and run count do not define Fleet capabilities.
+
+The architecture must make adding Gemini CLI or other future Agents possible without changing control-plane core logic.
 
 ---
 
@@ -124,7 +131,7 @@ MVP targets an individual developer or small trusted lab environment. Multi-tena
 - Persistent outbound `agentd` connection over mTLS.
 - SSH-only machine mode using `agentd oneshot`.
 - Inventory for OS, architecture, hostname, Agent versions, Skills, and managed configuration hashes.
-- Agent adapters for Codex, OMP, and OpenCode.
+- Agent adapters for all eight families listed in §1, with per-family acceptance defined in `agent-support-matrix.md`.
 - Desired Agent version management.
 - Normalized model/provider configuration without secret values.
 - MCP configuration management.
@@ -950,7 +957,7 @@ MVP responsibilities:
 
 Exact paths and current schema must be encapsulated inside the adapter and covered by fixtures/tests. They must not leak into core packages.
 
-### 15.2 OMP adapter
+### 15.2 Oh-My-Pi (OMP) adapter
 
 Same contract. OMP-specific config and Skill locations remain local to the adapter.
 
@@ -959,6 +966,12 @@ Because OMP installation patterns may differ by environment, installer command m
 ### 15.3 OpenCode adapter
 
 Same contract, including normalized MCP and Skills.
+
+### 15.4 Additional required families and capability boundaries
+
+Claude, DeepSeek Harness, Grok, Hermes, and ZCode must use the same adapter boundary. Resolve their exact executable/package/repository identity before choosing paths, installers, or configuration schemas. Do not substitute a similarly named model, API provider, or CLI.
+
+Each family declares version/OS compatibility and support for configuration, model/provider settings, MCP, Skills, and rules. Unknown capability is unverified, not supported. An explicitly requested unsupported or unverified capability must fail validation before mutation with an actionable reason, never silently skip or report success. Both daemon and one-shot paths use the same declaration and adapter. Per-family fixtures and acceptance cases are specified in [the support matrix](agent-support-matrix.md).
 
 ---
 

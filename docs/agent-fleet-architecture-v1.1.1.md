@@ -1,3 +1,5 @@
+> **2026-09-20 Agent 范围补充**：本文件在 v1.1.1 基线上同步用户截图要求；新增口径见 [Agent 支持矩阵](agent-support-matrix.md)，下文 v1.1.1 增量说明保留为 CA 修订历史。支持目标不代表实现或兼容性验收已完成。
+
 > **修订与来源说明（v1.1）**：v1.1 在 v1.0 原稿（完整保留于 KM-11/KM-13 附件）基础上完成整体修订，不是补丁。修订由资深架构专家起草（KM-13 第一次执行因供应商额度中断，其五段草稿经首席调度官从运行记录恢复拼接为未验收草稿 `recovered-architecture-v1.1-draft.md`）；资深后端工程师接续完成（KM-13 第二次执行）：对恢复稿做了全篇一致性校验与必要修订（需求统计校正、错误码分组校正、apply 后验证失败路径补全、悬挂引用修复），并产出《architecture-revision-resolution.md》（问题处置表 + 文档验证记录）。草稿原稿保留备查，来源与分工如实记录。
 
 > **v1.1.1 增量说明（KM-14，2026-09-20）**：本版**不是**一次新的架构评审或重写，只落实一项已确认的用户决策：**MVP 不新增内置 CA 备份导出产品功能；但必须提供人工安全备份、恢复与演练方案**（来源：KM-11 评论 `01a0bceb-5547-7531-b625-9957ad171b81`，用户在 KM-14 任务中再次确认为已定决定）。因此本版同步修正 v1.1 中把"不备份 CA""CA 丢失＝全机群重建"写成**已接受风险**的残留表述，改为"人工备份/恢复为必须运维动作 + 内置导出为明确非目标"，并区分**CA 丢失（有可用备份）**、**CA 丢失且无可用备份**、**CA 泄露（必须重建信任，恢复旧备份不能消除）**三个分支。除与本决策直接相关的位置外，v1.1 的全部技术契约、FR 编号与统计口径**一律不改**。人工操作细节见配套文档 `manual-ca-backup-recovery.md`。本版为文档修订版（文档修订号 v1.1.1），**不是软件版本**。
@@ -147,7 +149,7 @@
 | 单操作者（唯一人类角色） | 通过 Web UI 声明期望、审批变更、处理 drift 与故障 |
 | 控制面宿主机 | 承载 `agent-fleet-server`（默认 loopback HTTP + 0.0.0.0 agent gRPC） |
 | 受管开发机 | Linux amd64/arm64、macOS amd64/arm64、WSL（视同 Linux）；能被操作者本机 OpenSSH 客户端非交互访问 |
-| Agent 生态 | Codex、OMP（oh-my-pi）、OpenCode 三个 MVP 家族；后续 Claude Code、Gemini CLI 等 |
+| Agent 生态 | Claude、Codex、DeepSeek Harness、Grok、Hermes、Oh-My-Pi（OMP）、ZCode、OpenCode 八个 MVP 支持目标；身份和能力验证见 Agent 支持矩阵；Gemini CLI 仍为后续扩展 |
 
 **运行假设**（来自 spec，违反则功能退化）：
 
@@ -224,7 +226,7 @@
 | 编号 | 需求 | 优先级 | spec 出处 |
 |---|---|---|---|
 | FR-4.1 | 归一化 MCP 条目：`command`、`args`、`envRefs`（配置键 → 环境变量名映射，值永不出现在期望状态中） | P0 | §19 |
-| FR-4.2 | 适配器翻译为 Codex/OMP/OpenCode 原生 MCP 配置；同一归一化条目至少渲染进 Codex 与 OpenCode（验收 F） | P0 | §34.F |
+| FR-4.2 | 适配器按各家族已验证能力翻译原生 MCP 配置；同一归一化条目至少渲染进 Codex 与 OpenCode（验收 F）；八家族还需逐项执行支持矩阵验收，未支持/未验证能力不得静默跳过 | P0 | §34.F |
 | FR-4.3 | 保留未托管的既有 MCP 条目（在原生格式允许的部分所有权范围内）；适配器健康检查只验证语法/注册，不验证外部服务可用性 | P0 | §19、§34.F |
 
 #### FR-5 Rules / 指令文件管理
@@ -1004,7 +1006,9 @@ type Adapter interface {
    - 二者使用**同一个** `canonicalizationVersion`，并在 `AgentObservedState` 中一并返回；
 2. **投影必须可复现**：同一份 `canonicalizationVersion` + 同一输入，必须产出同一摘要（由 fixture 测试锁定，§13.1）。
 
-新家族（Claude Code、Gemini CLI…）接入 = 新增 `adapter/<family>` 包并注册：实现上述接口 + 提供 fixture home 测试，不改控制面核心（§1 的扩展性要求由此满足）。
+新增目标家族（Claude、DeepSeek Harness、Grok、Hermes、ZCode）及后续家族（如 Gemini CLI）接入 = 新增 `adapter/<family>` 包并注册：实现上述接口 + 提供 fixture home 测试，不改控制面核心（§1 的扩展性要求由此满足）。
+
+**2026-09-20 补充契约**：八家族范围、截图名称映射、能力声明与逐家族验收以 [Agent 支持矩阵](agent-support-matrix.md) 为准。适配器必须声明已验证版本/OS 和各受管能力；未知能力不得当作支持。计划阶段发现 profile 请求未支持或未验证能力时，须在写入前返回明确错误；daemon 与 one-shot 采用同一判定。安装命令、配置路径、凭据格式只在确认对应运行时后进入适配器，不得从截图或同名模型推断。原验收 F 的双家族示例不等于八家族验收完成。
 
 ### 5.5 配置合并与所有权（§16）
 
