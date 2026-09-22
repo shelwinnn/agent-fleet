@@ -1,0 +1,183 @@
+// agent.proto — agent 通道与 enrollment 的 gRPC 契约（架构 v1.1.2 §8.2、spec §11）。
+// 生成代码入库；再生成方式见 api/proto/gen.sh。
+syntax = "proto3";
+
+package fleet.v1;
+
+import "fleet/v1/state.proto";
+
+option go_package = "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1;fleetv1";
+
+// FleetAgentService 是 agentd 常驻通道（出站 mTLS gRPC，节点主动连接）。
+// 本片实现 Connect；FetchArtifact（Skill 工件流式下载）随适配器切片引入。
+service FleetAgentService {
+  // Connect 是唯一的逻辑长连接：重连必以 Hello + 全量 ObservedState 开始（§5.2）。
+  // 同一 machineId 已有活跃流时第二条流被拒绝并产生告警（§4.6）。
+  rpc Connect(stream AgentToServer) returns (stream ServerToAgent);
+}
+
+// FleetEnrollmentService 承载 bootstrap 签发与证书续期（§7.5）。
+service FleetEnrollmentService {
+  // Enroll：必须经 TLS 且校验服务端证书；token 是唯一身份证明（§7.5）。
+  // 服务端在单事务内校验（存在/未过期/未用/machineId 匹配/CSR 指纹匹配）并作废 token。
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // RenewCertificate：仅接受既有有效 mTLS 通道上的续期请求（§4.6）。
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+}
+
+// ===== agent → server 双向流消息 union（§8.2）=====
+
+message AgentToServer {
+  oneof payload {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    ObservedState observed_state = 3;
+    OperationStarted operation_started = 4;
+    OperationProgress operation_progress = 5;
+    OperationResult operation_result = 6;
+    LogEvent log_event = 7;
+  }
+}
+
+// ===== server → agent 双向流消息 union（§8.2）=====
+
+message ServerToAgent {
+  oneof payload {
+    Welcome welcome = 1;
+    DesiredStateChanged desired_state_changed = 2;
+    ExecuteOperation execute_operation = 3;
+    CancelOperation cancel_operation = 4;
+    OperationResultAck operation_result_ack = 5;
+    RequestInventory request_inventory = 6;
+  }
+}
+
+message Hello {
+  // machine_id 必须与客户端证书身份一致（§7.5 身份绑定）。
+  string machine_id = 1;
+  string agentd_version = 2;
+  string protocol_version = 3;
+  // 支持的 adapter 家族与投影规范化版本（§7.6 版本协商）。
+  repeated string adapters = 4;
+  string canonicalization_version = 5;
+  int64 last_inventory_seq = 6;
+}
+
+message Welcome {
+  string protocol_version = 1;
+  // 服务端配置回传：心跳与全量 inventory 的期望周期（秒）。
+  int32 heartbeat_interval_seconds = 2;
+  int32 inventory_interval_seconds = 3;
+}
+
+message Heartbeat {
+  int64 sequence = 1;
+  // 节点发送时刻（unix 秒）。节点时钟不被信任，仅作诊断；服务端以接收时间为准。
+  int64 sent_at_unix = 2;
+}
+
+// ObservedState 定义于 state.proto（全量观测）。
+
+message DesiredStateChanged {
+  int64 generation = 1;
+}
+
+// DesiredStateSnapshot 自包含下发（FR-13.6：ExecuteOperation 一律携带完整快照；
+// 节点冷启动无本地缓存也能执行）。
+message DesiredStateSnapshot {
+  int64 generation = 1;
+  // 规范化 JSON 的确定性 SHA-256（snapshotDigest，§4.8）。
+  string digest = 2;
+  bytes snapshot_json = 3;
+}
+
+// ExecuteOperation 携带完整快照（随第 3 片派发；本片仅定义消息）。
+message ExecuteOperation {
+  string operation_id = 1;
+  int64 desired_generation = 2;
+  DesiredStateSnapshot snapshot = 3;
+}
+
+// OperationStarted / OperationProgress / OperationResult 为变更流水线上报
+// （本片仅定义消息并做幂等接收；执行流水线随第 3 片实现）。
+message OperationStarted {
+  string operation_id = 1;
+}
+
+message OperationProgress {
+  string operation_id = 1;
+  string step = 2;
+  string phase = 3;
+  string message = 4;
+}
+
+message OperationResult {
+  string operation_id = 1;
+  // 终态 phase（§6.4）；服务端按 operationId 幂等去重（spec §11.5）。
+  string phase = 2;
+  string reason = 3;
+  string message = 4;
+  int64 desired_generation = 5;
+  VerifyEvidence verify = 6;
+  int64 started_at_unix = 7;
+  int64 finished_at_unix = 8;
+}
+
+// VerifyEvidence 是绑定 operationId 的门禁与审计证据（§6.4）。
+message VerifyEvidence {
+  string desired_projection_digest = 1;
+  string observed_projection_digest = 2;
+  string canonicalization_version = 3;
+  int64 inventory_seq = 4;
+  string adapter_health = 5; // passed | failed | skipped
+}
+
+// CancelOperation 语义见 §9.7（随第 3 片派发）。
+message CancelOperation {
+  string operation_id = 1;
+}
+
+// OperationResultAck 是 outbox 淘汰依据（§5.2）。
+message OperationResultAck {
+  string operation_id = 1;
+}
+
+message RequestInventory {
+  bool full = 1;
+}
+
+// LogEvent 仅运维日志，禁止携带 Agent 会话内容（spec §11.3）。
+message LogEvent {
+  string level = 1;
+  string message = 2;
+  int64 sent_at_unix = 3;
+}
+
+// ===== enrollment =====
+
+message EnrollRequest {
+  // machine_id 为 Machine 名称（沿用库中 machines.name 键约定）。
+  string machine_id = 1;
+  // enrollment token（一次性、短时效、熵 ≥128-bit；绑定 machineId 与 CSR 指纹）。
+  string token = 2;
+  // PEM 编码的 PKCS#10 CSR。
+  bytes csr_pem = 3;
+}
+
+message EnrollResponse {
+  // PEM 编码的客户端证书（Fleet CA 签发）。
+  bytes cert_pem = 1;
+  // PEM 编码的 Fleet CA 证书（冗余下发，节点 bootstrap 时已持有）。
+  bytes ca_pem = 2;
+  // 证书到期时刻（unix 秒），供 agentd 规划续期窗口。
+  int64 not_after_unix = 3;
+}
+
+message RenewCertificateRequest {
+  bytes csr_pem = 1;
+}
+
+message RenewCertificateResponse {
+  bytes cert_pem = 1;
+  int64 not_after_unix = 2;
+}

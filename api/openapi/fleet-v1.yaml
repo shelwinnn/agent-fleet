@@ -1,10 +1,13 @@
-# agent-fleet REST 契约（切片 1 最小可用版）
+# agent-fleet REST 契约
 #
 # 依据：架构 v1.1.2 §8.1（REST API）与 §6.4（错误模型）。
 # machines / profiles 为完整 CRUD；skills / providers / deployments 为骨架路由，
 # 一律返回 501 NotImplemented（实现归属后续切片）。
-# 动作端点（probe/reconcile/…）、SSE 与 gRPC 不在本切片范围。
-openapi: 3.0.3
+# KM-22 新增：POST /api/v1/machines/{name}/enroll-token（一次性 enrollment token）。
+# 其余动作端点（probe/reconcile/…）、SSE 与 gRPC 不在已实现范围。
+# 声明版本为 3.1.0（KM-21 核查发现 #1：本文件使用了 3.1 才有的
+# components.pathItems；3.0.3 声明与内容不符会卡严格校验器）。
+openapi: 3.1.0
 info:
   title: agent-fleet control plane
   version: 0.1.0
@@ -190,6 +193,32 @@ paths:
         "204":
           description: 已删除
         "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/enroll-token:
+    post:
+      tags: [machines]
+      summary: 签发一次性 enrollment token（KM-22）
+      description: |
+        为既有 Machine 签发 enrollment token（短时效、一次性、熵 ≥128-bit），
+        并绑定 machineId 与 CSR 公钥指纹（§4.6）。token 明文仅在响应中出现一次，
+        服务端只存 SHA-256 哈希；并发/重放的 enroll 消费在数据库层原子化，
+        至多一个请求成功（FR-11.5）。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollTokenRequest"
+      responses:
+        "201":
+          description: 已签发（含一次性明文 token）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollToken"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/skills:
     $ref: "#/components/pathItems/Skeleton"
   /api/v1/skills/{name}:
@@ -211,6 +240,33 @@ components:
       schema:
         type: string
         pattern: "^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"
+  schemas:
+    EnrollTokenRequest:
+      type: object
+      required: [csrPubKeySha256]
+      properties:
+        csrPubKeySha256:
+          type: string
+          description: agentd 生成的 CSR 公钥指纹（enroll 输出）；token 与其绑定
+          pattern: "^sha256:[0-9a-f]{64}$"
+          examples: ["sha256:1f38..."]
+        ttlSeconds:
+          type: integer
+          description: 可选有效期（秒）；默认 600（§4.6 默认 10 分钟）
+    EnrollToken:
+      type: object
+      required: [machineId, token, expiresAt]
+      properties:
+        machineId:
+          type: string
+        token:
+          type: string
+          description: 一次性明文 token；仅出现一次
+        expiresAt:
+          type: string
+          format: date-time
+        note:
+          type: string
   pathItems:
     Skeleton:
       get:

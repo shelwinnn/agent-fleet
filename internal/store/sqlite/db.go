@@ -25,8 +25,11 @@ func Open(path string) (*DB, error) {
 			return nil, fmt.Errorf("sqlite: create data dir: %w", err)
 		}
 	}
-	// pragma 经 DSN 逐连接生效：busy_timeout 5s（§12.1 建议）、WAL（§4.9）。
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", path)
+	// pragma 经 DSN 逐连接生效：busy_timeout 5s（§12.1 建议）、WAL（§4.9）、
+	// 事务以 IMMEDIATE 起始——写锁在事务开始即取得，避免"读事务升级写事务"
+	// 时 busy_timeout 不生效的 SQLITE_BUSY_SNAPSHOT（KM-21 核查发现 #2；
+	// §12.1：写串行化，避免多连接互相制造 SQLITE_BUSY）。
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate", path)
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
