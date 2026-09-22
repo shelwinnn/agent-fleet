@@ -1,0 +1,337 @@
+# agent-fleet REST 契约（切片 1 最小可用版）
+#
+# 依据：架构 v1.1.2 §8.1（REST API）与 §6.4（错误模型）。
+# machines / profiles 为完整 CRUD；skills / providers / deployments 为骨架路由，
+# 一律返回 501 NotImplemented（实现归属后续切片）。
+# 动作端点（probe/reconcile/…）、SSE 与 gRPC 不在本切片范围。
+openapi: 3.0.3
+info:
+  title: agent-fleet control plane
+  version: 0.1.0
+  description: |
+    面向单操作者的 Agent 工作站机群管理器控制面。
+    资源统一 K8s 风格 `metadata/spec/status` JSON 形态；名称在类型内唯一。
+    spec 由操作者读写；status 由控制器维护——创建时初始化为 `{}`，更新时不接受改写。
+servers:
+  - url: http://127.0.0.1:7788
+tags:
+  - name: system
+  - name: machines
+  - name: profiles
+  - name: skeleton
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: 存活探针
+      responses:
+        "200":
+          description: 进程存活
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /readyz:
+    get:
+      tags: [system]
+      summary: 就绪探针（存储可用性）
+      responses:
+        "200":
+          description: 就绪
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+        "503":
+          $ref: "#/components/responses/Error"
+  /api/v1/machines:
+    get:
+      tags: [machines]
+      summary: 列出 Machine（支持 ?name= 过滤）
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Machine 列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MachineList"
+    post:
+      tags: [machines]
+      summary: 创建 Machine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Machine"
+      responses:
+        "201":
+          description: 已创建（服务端补齐 metadata，status 置 {}）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Machine"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceName"
+    get:
+      tags: [machines]
+      summary: 读取 Machine
+      responses:
+        "200":
+          description: Machine
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Machine"
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [machines]
+      summary: 更新 Machine spec（metadata 与 status 以存储现值为准）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Machine"
+      responses:
+        "200":
+          description: 更新后的 Machine
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Machine"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [machines]
+      summary: 删除 Machine
+      responses:
+        "204":
+          description: 已删除
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/profiles:
+    get:
+      tags: [profiles]
+      summary: 列出 AgentProfile（支持 ?name= 过滤）
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: AgentProfile 列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfileList"
+    post:
+      tags: [profiles]
+      summary: 创建 AgentProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentProfile"
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfile"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/profiles/{name}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceName"
+    get:
+      tags: [profiles]
+      summary: 读取 AgentProfile
+      responses:
+        "200":
+          description: AgentProfile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfile"
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [profiles]
+      summary: 更新 AgentProfile spec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentProfile"
+      responses:
+        "200":
+          description: 更新后的 AgentProfile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentProfile"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [profiles]
+      summary: 删除 AgentProfile
+      responses:
+        "204":
+          description: 已删除
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/skills:
+    $ref: "#/components/pathItems/Skeleton"
+  /api/v1/skills/{name}:
+    $ref: "#/components/pathItems/Skeleton"
+  /api/v1/providers:
+    $ref: "#/components/pathItems/Skeleton"
+  /api/v1/providers/{name}:
+    $ref: "#/components/pathItems/Skeleton"
+  /api/v1/deployments:
+    $ref: "#/components/pathItems/Skeleton"
+  /api/v1/deployments/{name}:
+    $ref: "#/components/pathItems/Skeleton"
+components:
+  parameters:
+    ResourceName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"
+  pathItems:
+    Skeleton:
+      get:
+        tags: [skeleton]
+        summary: 骨架路由（未实现）
+        responses:
+          "501": { $ref: "#/components/responses/Error" }
+      post:
+        tags: [skeleton]
+        summary: 骨架路由（未实现）
+        responses:
+          "501": { $ref: "#/components/responses/Error" }
+      put:
+        tags: [skeleton]
+        summary: 骨架路由（未实现）
+        responses:
+          "501": { $ref: "#/components/responses/Error" }
+      delete:
+        tags: [skeleton]
+        summary: 骨架路由（未实现）
+        responses:
+          "501": { $ref: "#/components/responses/Error" }
+  responses:
+    Error:
+      description: 统一错误体
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready]
+    ObjectMeta:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        uid:
+          type: string
+          description: 服务端分配，请求携带的值被忽略
+        resourceVersion:
+          type: integer
+          format: int64
+          description: 服务端管理，每次更新递增
+        creationTimestamp:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      description: §6.4 五要素错误体（operationId 由动作类端点填充）
+      required: [reason, message, timestamp]
+      properties:
+        reason:
+          type: string
+          description: 本切片取值 NotFound | AlreadyExists | Invalid | NotImplemented | Internal | MachineBusy | Unauthorized | NotReady | MethodNotAllowed
+        message:
+          type: string
+        operationId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        diagnostics:
+          type: object
+          additionalProperties:
+            type: string
+    Machine:
+      type: object
+      required: [metadata]
+      properties:
+        metadata:
+          $ref: "#/components/schemas/ObjectMeta"
+        spec:
+          type: object
+          description: |
+            Machine 规格（JSON 对象透传存储）。已知字段：
+            managementMode（agentd|ssh，缺省 agentd）、profileRef、ssh。
+          properties:
+            managementMode:
+              type: string
+              enum: [agentd, ssh]
+            profileRef:
+              type: string
+          additionalProperties: true
+        status:
+          type: object
+          description: 控制器维护（conditions 等）；API 创建/更新时不接受改写
+          additionalProperties: true
+    MachineList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Machine"
+    AgentProfile:
+      type: object
+      required: [metadata]
+      properties:
+        metadata:
+          $ref: "#/components/schemas/ObjectMeta"
+        spec:
+          type: object
+          description: AgentProfile 规格（JSON 对象透传存储）
+          additionalProperties: true
+        status:
+          type: object
+          description: 无控制器，恒为 {}
+          additionalProperties: true
+    AgentProfileList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentProfile"
