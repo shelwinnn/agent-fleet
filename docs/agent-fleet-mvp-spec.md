@@ -1,7 +1,7 @@
 # agent-fleet MVP Specification
 
 **Status:** Proposed / implementation-ready after owner review  
-**Version:** v0.1 + Agent scope amendment (2026-09-20)
+**Version:** v0.1 + Agent scope amendment (2026-09-20) + frontend stack amendment (2026-09-20)
 **Date:** 2026-09-10  
 **Primary goal:** Centrally manage Agent CLI versions, model/provider configuration, MCP configuration, Skills, rules, and drift across multiple developer machines through a Web UI, with `agentd` as the continuous management channel and SSH as a first-class bootstrap / fallback / SSH-only management channel.
 
@@ -1292,7 +1292,9 @@ SSE events contain resource type/id plus a revision so the UI can selectively re
 
 ## 24. Web UI
 
-Use a conventional SPA. React + TypeScript + Vite is recommended for MVP, but the API contract must not depend on the frontend framework.
+Use a conventional SPA. **Svelte + TypeScript + Vite is recommended for MVP, with page components taken from shadcn-svelte as needed**, but the API contract must not depend on the frontend framework.
+
+> **Frontend stack amendment (owner decision, 2026-09-20).** The owner selected **Svelte + shadcn-svelte** for the Web UI (source: owner comment `01a0bec5-3837-75bc-b322-1a6140fd8a83` on 2026-09-20; recorded as KM-15, re-confirmed as an explicit exception in KM-19 on 2026-09-21). This supersedes the earlier React recommendation **in this section only**. It is recorded here because the architecture document must write back to the spec when it changes a spec statement (architecture v1.1 §1.1). Scope: **recommendation-level change only** — no new UI functionality, no change to "the API contract must not depend on the frontend framework", and no change to any other section of this specification. The architecture document records the corresponding rewrite of FR-14.4 as an **owner-authorized explicit FR exception** (architecture v1.1.2 §14.5, `architecture-revision-resolution-v1.1.2-supplement.md` §3 (frontend stack and explicit FR exception register)).
 
 Required pages:
 
