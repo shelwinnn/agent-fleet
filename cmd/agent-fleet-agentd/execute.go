@@ -16,9 +16,9 @@ import (
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/reconciler"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
-	"github.com/shelwinnn/agent-fleet/internal/reconciler"
 )
 
 // outboxLimit 是节点持久化的最近终态结果条数上限（FR-13.7：最近 N 条）。
@@ -35,6 +35,18 @@ type queuedOp struct {
 type workerMsg struct {
 	progress *fleetv1.OperationProgress
 	result   *fleetv1.OperationResult
+	// observation 是**与该操作绑定的** apply 后观测（§4.4 门禁条件 2/3/4 的
+	// 唯一证据形态）：必须在 OperationResult 之前上报，服务端才能先落证据、
+	// 再按终态评估门禁。
+	observation *fleetv1.ObservedState
+}
+
+// observations 是执行宿主依赖的节点观测能力（由 inventory.Collector 实现）：
+// 持久化最近一次期望快照（周期 inventory 的期望侧输入）与产出操作绑定观测。
+type observations interface {
+	NextSeq() (int64, error)
+	SaveDesired(snapshotJSON []byte) error
+	CollectForOperation(opID string, ev *domain.VerifyEvidence) domain.ObservedState
 }
 
 // executor 是 daemon 的操作执行宿主。
@@ -42,6 +54,7 @@ type executor struct {
 	home    string
 	dataDir string
 	reg     *adapter.Registry
+	obs     observations
 	exec    *reconciler.Executor
 	lock    *reconciler.ExecutionLock
 	log     logger
@@ -61,12 +74,13 @@ type logger interface {
 	Error(msg string, args ...any)
 }
 
-func newExecutor(home, dataDir string, reg *adapter.Registry, seq func() (int64, error), log logger) *executor {
+func newExecutor(home, dataDir string, reg *adapter.Registry, obs observations, log logger) *executor {
 	return &executor{
 		home:    home,
 		dataDir: dataDir,
 		reg:     reg,
-		exec:    reconciler.New(reconciler.Options{Registry: reg, Seq: seq}),
+		obs:     obs,
+		exec:    reconciler.New(reconciler.Options{Registry: reg, Seq: obs.NextSeq, Now: time.Now}),
 		lock:    reconciler.NewExecutionLock(dataDir),
 		log:     log,
 		cancels: map[string]chan struct{}{},
@@ -96,6 +110,11 @@ func (x *executor) Enqueue(op *fleetv1.ExecuteOperation) *reconciler.Result {
 	if res, ok := x.outboxGet(id); ok {
 		x.log.Info("duplicate execute; replaying terminal result from outbox", "operation_id", id)
 		return &res
+	}
+	// 期望快照是周期 inventory 的期望侧输入（§7.1）：随操作持久化，
+	// 使周期上报的投影基于"当前快照"而非陈旧内容。
+	if err := x.obs.SaveDesired(op.GetSnapshot().GetSnapshotJson()); err != nil {
+		x.log.Warn("persist desired snapshot failed", "operation_id", id, "err", err)
 	}
 	x.mu.Lock()
 	x.queue = append(x.queue, queuedOp{
@@ -238,6 +257,16 @@ func (x *executor) runOne(ctx context.Context, q queuedOp, cancelCh chan struct{
 	}
 	if res.FinishedAt.IsZero() {
 		res.FinishedAt = time.Now().UTC()
+	}
+	// 与该操作绑定的 apply 后观测先上行（§4.4：门禁条件 2/3/4 只接受同一
+	// operationId 的观测；周期 inventory 不构成门禁证据）。
+	if x.obs != nil && res.Verify != nil {
+		bound := x.obs.CollectForOperation(q.OperationID, res.Verify)
+		select {
+		case msgs <- workerMsg{observation: observedToProto(bound)}:
+		case <-ctx.Done():
+			return nil
+		}
 	}
 	// 终态落 outbox（§5.2：Ack 之后方可淘汰）。
 	x.outboxPut(q.OperationID, res)

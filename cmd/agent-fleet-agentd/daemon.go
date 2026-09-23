@@ -7,9 +7,12 @@ import (
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
-	"github.com/shelwinnn/agent-fleet/internal/adapter/fixture"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/opencode"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
+	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
@@ -56,18 +59,28 @@ func runDaemon(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	}
 	defer conn.Close()
 
-	collector := &inventory.Collector{DataDir: cfg.DataDir, AgentdVersion: agentdVersion}
-	maybeRenewCertificate(cfg, conn, log)
-
-	// 适配器注册表与执行宿主（本片注册 fixture 适配器验证语义；真实家族适配器
-	// 随第 4 片接入）。HOME 根可注入（护栏 #12）。
+	// HOME 根可注入（护栏 #12）。
 	home := cfg.Home
 	if home == "" {
 		home = defaultHome()
 	}
+	// 批次一家族适配器注册表（§5.4：新家族 = 新增 adapter/<family> + 注册，
+	// 控制面零改动）。ZCode 未注册：运行时来源为第三方非官方分发，等待范围决策
+	// （见 docs/adapters-batch-1.md「ZCode 范围决策」）——未注册的家族会在
+	// 流水线阶段 1 显式失败，不会被静默跳过。
 	reg := adapter.NewRegistry()
-	reg.Register(fixture.New())
-	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, log)
+	reg.Register(codex.New())
+	reg.Register(omp.New())
+	reg.Register(opencode.New())
+
+	collector := &inventory.Collector{
+		DataDir:       cfg.DataDir,
+		AgentdVersion: agentdVersion,
+		Registry:      reg,
+		Home:          home,
+	}
+	maybeRenewCertificate(cfg, conn, log)
+	exec := newExecutor(home, cfg.DataDir, reg, collector, log)
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
 
@@ -110,14 +123,15 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 			MachineId:       cfg.MachineID,
 			AgentdVersion:   agentdVersion,
 			ProtocolVersion: "1",
-			Adapters:        []string{}, // 家族适配器随第 4 片注册
+			Adapters:        collector.AdapterFamilies(),                  // 能力协商：已注册家族（FR-13.4）
+			Capabilities:    capabilityDecls(collector.AdapterRegistry()), // 能力声明（矩阵）
 		},
 	}}); err != nil {
 		return err
 	}
 
 	// 2) 全量 ObservedState（§5.2：紧随 Hello）。
-	if err := sendInventory(stream, collector, log); err != nil {
+	if err := sendInventory(streamCtx, stream, collector, log); err != nil {
 		return err
 	}
 
@@ -216,7 +230,7 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 				heartbeatEvery, inventoryEvery = applyWelcome(w, cfg, heartbeatEvery, inventoryEvery, heartbeat, full, log)
 			}
 			if ev.wantInventory {
-				if err := sendInventory(stream, collector, log); err != nil {
+				if err := sendInventory(streamCtx, stream, collector, log); err != nil {
 					return err
 				}
 			}
@@ -247,7 +261,10 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 		case wm := <-workerMsgs:
 			// worker 上行（进度/终态）同样只在主循环发送（单写者）。
 			var out *fleetv1.AgentToServer
-			if wm.progress != nil {
+			if wm.observation != nil {
+				out = &fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_ObservedState{
+					ObservedState: wm.observation}}
+			} else if wm.progress != nil {
 				out = &fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationProgress{
 					OperationProgress: wm.progress}}
 			} else if wm.result != nil {
@@ -268,7 +285,7 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 			}
 			log.Debug("heartbeat sent", "sequence", hbSeq)
 		case <-full.C:
-			if err := sendInventory(stream, collector, log); err != nil {
+			if err := sendInventory(streamCtx, stream, collector, log); err != nil {
 				return err
 			}
 		case <-streamCtx.Done():
@@ -299,16 +316,58 @@ func applyWelcome(w *fleetv1.Welcome, cfg *Config, hbEvery, invEvery time.Durati
 	return hbEvery, invEvery
 }
 
-func sendInventory(stream grpc.BidiStreamingClient[fleetv1.AgentToServer, fleetv1.ServerToAgent],
+func sendInventory(ctx context.Context, stream grpc.BidiStreamingClient[fleetv1.AgentToServer, fleetv1.ServerToAgent],
 	collector *inventory.Collector, log *slog.Logger) error {
-	obs, err := collector.Collect()
+	obs, err := collector.Collect(ctx)
 	if err != nil {
 		return err
 	}
+	if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_ObservedState{
+		ObservedState: observedToProto(obs),
+	}}); err != nil {
+		return err
+	}
+	log.Info("observed state reported", "inventory_seq", obs.InventorySeq, "full", obs.Full,
+		"canonicalization_version", obs.CanonicalizationVersion)
+	return nil
+}
+
+// capabilityDecls 汇总已注册家族的逐能力声明（矩阵「统一适配契约」：
+// 支持/不支持/未验证都必须上行，控制面只读取声明）。
+func capabilityDecls(reg *adapter.Registry) []*fleetv1.AdapterCapability {
+	if reg == nil {
+		return nil
+	}
+	var out []*fleetv1.AdapterCapability
+	for _, family := range reg.Families() {
+		ad, err := reg.Get(family)
+		if err != nil {
+			continue
+		}
+		for _, d := range ad.Capabilities() {
+			out = append(out, &fleetv1.AdapterCapability{
+				Family:           family,
+				Capability:       string(d.Capability),
+				State:            string(d.State),
+				VerifiedVersions: d.VerifiedVersions,
+				Reason:           d.Reason,
+			})
+		}
+	}
+	return out
+}
+
+// observedToProto 映射观测状态（含 ADR-1 双侧投影摘要、绑定 operationId 与
+// 适配器健康；规范版本随每次上报携带，§7.1）。
+func observedToProto(obs domain.ObservedState) *fleetv1.ObservedState {
 	m := &fleetv1.ObservedState{
-		InventorySeq:            obs.InventorySeq,
-		Full:                    obs.Full,
-		CanonicalizationVersion: obs.CanonicalizationVersion,
+		InventorySeq:             obs.InventorySeq,
+		Full:                     obs.Full,
+		OperationId:              obs.OperationID,
+		CanonicalizationVersion:  obs.CanonicalizationVersion,
+		DesiredProjectionDigest:  obs.DesiredProjectionDigest,
+		ObservedProjectionDigest: obs.ObservedProjectionDigest,
+		AdapterHealth:            obs.AdapterHealth,
 	}
 	if obs.Machine != nil {
 		m.Machine = &fleetv1.MachineInfo{
@@ -324,15 +383,10 @@ func sendInventory(stream grpc.BidiStreamingClient[fleetv1.AgentToServer, fleetv
 	for _, a := range obs.Agents {
 		m.Agents = append(m.Agents, &fleetv1.AgentInstance{
 			Family: a.Family, Version: a.Version, Enabled: a.Enabled, ConfigPath: a.ConfigPath,
+			Installed: a.Installed, VersionError: a.VersionError,
 		})
 	}
-	if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_ObservedState{
-		ObservedState: m,
-	}}); err != nil {
-		return err
-	}
-	log.Info("observed state reported", "inventory_seq", obs.InventorySeq, "full", obs.Full)
-	return nil
+	return m
 }
 
 // maybeRenewCertificate 在证书进入续期窗口时经既有 mTLS 通道续期（spec §12.2），

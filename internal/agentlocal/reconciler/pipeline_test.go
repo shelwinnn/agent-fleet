@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
-	"github.com/shelwinnn/agent-fleet/internal/adapter/fixture"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/fixture"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 )
 
@@ -558,4 +559,92 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// declOnly 包装 fixture 适配器并覆写能力声明（矩阵验收：未验证能力必须拒绝）。
+type declOnly struct {
+	*fixture.Adapter
+	decls []adapter.CapabilityDecl
+}
+
+func (d *declOnly) Capabilities() []adapter.CapabilityDecl { return d.decls }
+
+func (d *declOnly) Validate(_ context.Context, _ string, desired adapter.AgentDesiredState) error {
+	return adapter.CheckCapabilities(fixture.ID, d.decls, desired)
+}
+
+// KM-24 / 支持矩阵：profile 请求未验证能力时，必须在**任何写入之前**失败
+// （阶段 1），且不得创建备份目录、不得改动配置——"不静默跳过或写入后才报成功"。
+func TestPipelineRejectsUnverifiedCapabilityBeforeWrite(t *testing.T) {
+	n := newNode(t)
+	decls := n.fx.Capabilities()
+	for i := range decls {
+		if decls[i].Capability == adapter.CapabilityMCP {
+			decls[i].State = adapter.SupportUnverified
+			decls[i].Reason = "docs 未覆盖该版本"
+		}
+	}
+	reg := adapter.NewRegistry()
+	reg.Register(&declOnly{Adapter: n.fx, decls: decls})
+	exec := New(Options{Registry: reg, Seq: func() (int64, error) { n.seq++; return n.seq, nil }})
+
+	snap := domain.DesiredStateSnapshot{
+		Machine: "ws-1", Generation: 1, Digest: "sha256:snap",
+		Protocol: domain.SnapshotProtocolVersion, CanonicalizationVersion: "snapshot-json-v1",
+		Desired: domain.DesiredState{
+			SchemaVersion: "fixture/v1",
+			Agents: map[string]domain.AgentDesired{fixture.ID: {
+				Version: "1.0.0", Config: json.RawMessage(`{"model":"m1"}`),
+			}},
+			MCP: map[string]json.RawMessage{"needs-doc": json.RawMessage(`{"command":"mcp-server"}`)},
+		},
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := exec.Run(context.Background(), n.home, Execution{
+		OperationID: "op-unverified", Generation: 1, SnapshotJSON: raw,
+	})
+	if res.Phase != domain.OperationPhaseFailed || res.Reason != domain.ReasonDesiredStateInvalid {
+		t.Fatalf("result = %s(%s): %s", res.Phase, res.Reason, res.Message)
+	}
+	if !strings.Contains(res.Message, "mcp") || !strings.Contains(res.Message, "unverified") {
+		t.Fatalf("rejection must name the family/capability/reason: %q", res.Message)
+	}
+	if _, err := os.Stat(filepath.Join(n.home, ".local", "share", "agent-fleet", "backups", "op-unverified")); !os.IsNotExist(err) {
+		t.Fatal("no backup may be created when validation fails (rejection happens before any write)")
+	}
+	if cfg := n.config(t); len(cfg) != 0 {
+		t.Fatalf("config must not be touched when validation fails: %+v", cfg)
+	}
+}
+
+// KM-24 范围决策的可验证后果：未注册家族（本片 = ZCode）必须显式失败，
+// 绝不静默跳过或写成成功。
+func TestPipelineFailsOnUnregisteredFamily(t *testing.T) {
+	n := newNode(t)
+	snap := domain.DesiredStateSnapshot{
+		Machine: "ws-1", Generation: 1, Digest: "sha256:snap",
+		Protocol: domain.SnapshotProtocolVersion, CanonicalizationVersion: "snapshot-json-v1",
+		Desired: domain.DesiredState{
+			SchemaVersion: "fixture/v1",
+			Agents: map[string]domain.AgentDesired{"zcode": {
+				Version: "3.11.2", Config: json.RawMessage(`{}`),
+			}},
+		},
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := n.executor().Run(context.Background(), n.home, Execution{
+		OperationID: "op-zcode", Generation: 1, SnapshotJSON: raw,
+	})
+	if res.Phase != domain.OperationPhaseFailed || res.Reason != domain.ReasonDesiredStateInvalid {
+		t.Fatalf("result = %s(%s): %s", res.Phase, res.Reason, res.Message)
+	}
+	if !strings.Contains(res.Message, "zcode") {
+		t.Fatalf("message must name the unregistered family: %q", res.Message)
+	}
 }

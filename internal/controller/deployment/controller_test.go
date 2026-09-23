@@ -433,8 +433,82 @@ func TestGateCausalBinding(t *testing.T) {
 	if r := EvaluateGate(in(unhealthy, obs("op-1", digest, "v1"))); r.Passed || r.FailedCondition != 4 {
 		t.Fatalf("failed health accepted: %+v", r)
 	}
+	// 条件 4（KM-24 补齐）：观测侧健康结果。
+	//  (a) 观测未上报健康 → 退回该操作的 verify 证据；
+	noHealthObs := obs("op-1", digest, "v1")
+	noHealthObs.AdapterHealth = ""
+	if r := EvaluateGate(in(op(""), noHealthObs)); !r.Passed {
+		t.Fatalf("verify health must be the fallback when the observation carries none: %+v", r)
+	}
+	//  (b) 观测上报 passed 而 verify 未带健康 → 观测即证据（healthFromObservation）；
+	obsOnly := obs("op-1", digest, "v1")
+	opNoHealth := op("")
+	opNoHealth.Status.Verify.AdapterHealth = ""
+	if r := EvaluateGate(in(opNoHealth, obsOnly)); !r.Passed {
+		t.Fatalf("observation-carried health must satisfy condition 4: %+v", r)
+	}
+	//  (c) 两侧冲突（观测 failed / verify passed）→ 取严，不通过。
+	conflict := obs("op-1", digest, "v1")
+	conflict.AdapterHealth = domain.AdapterHealthFailed
+	if r := EvaluateGate(in(op(""), conflict)); r.Passed || r.FailedCondition != 4 {
+		t.Fatalf("conflicting health evidence must fail closed: %+v", r)
+	}
 	// 无操作记录（如仅凭机器 status 历史 phase）不通过。
 	if r := EvaluateGate(GateInput{MachineID: machine, TargetGeneration: 7}); r.Passed || r.FailedCondition != 1 {
 		t.Fatalf("no-op evidence accepted: %+v", r)
+	}
+}
+
+// KM-24 回归：门禁证据必须来自**与操作绑定**的观测，且不得被更高 seq 的
+// 周期 inventory 覆盖（§4.4 条件 2）。修复前 observed_states 单行 UPSERT 会
+// 让一份无 operationId 的周期报文在数秒内清空绑定，门禁必然以
+// `gate condition 2 failed` 收尾。
+func TestPeriodicInventoryDoesNotClobberGateBinding(t *testing.T) {
+	f := newDepFixture(t)
+	f.seedMachine("ws-1")
+	f.setProfile(`{"agents":{"fixture":{"enabled":true,"version":"1.0.0"}}}`)
+	f.materialize("ws-1")
+	snap, err := f.snap.Get(f.ctx, "ws-1", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "dep-binding"
+	dep := &domain.Deployment{Metadata: domain.ObjectMeta{Name: name},
+		Spec: depSpec([]string{"ws-1"}, 1, 0)}
+	if err := f.dep.Create(f.ctx, dep); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.dep.Advance(f.ctx, name); err != nil {
+		t.Fatal(err)
+	}
+	tg := f.targets(name)["ws-1"]
+	if tg.Phase != domain.TargetPhaseRunning || tg.OperationID == "" {
+		t.Fatalf("target = %+v, want Running with an operation", tg)
+	}
+	f.applyObservation("ws-1", tg.OperationID, 1, snap.Digest, 5)
+
+	// 周期 inventory（无 operationId）以更高 seq 覆盖"每机最新观测"主行。
+	payload, err := json.Marshal(domain.ObservedState{
+		InventorySeq: 99, Full: true,
+		CanonicalizationVersion:  "fixture-projection-v1",
+		DesiredProjectionDigest:  snap.Digest,
+		ObservedProjectionDigest: snap.Digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &domain.ObservedStateRecord{Machine: "ws-1", InventorySeq: 99, Payload: payload}
+	f.rec.AssignObservationGeneration(f.ctx, rec)
+	if _, err := f.observed.Store(f.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.dep.Advance(f.ctx, name); err != nil {
+		t.Fatal(err)
+	}
+	got := f.targets(name)["ws-1"]
+	if got.Phase != domain.TargetPhaseSucceeded {
+		t.Fatalf("target = %s(%s), want Succeeded: periodic inventory must not clobber the bound observation",
+			got.Phase, got.Reason)
 	}
 }

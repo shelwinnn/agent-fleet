@@ -46,13 +46,13 @@ func TestMigrateIdempotent(t *testing.T) {
 		`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	// KM-23 起为三个迁移（+0003_desired_state）；重复执行后登记数不变。
-	if n != 3 {
-		t.Fatalf("applied versions = %d, want 3", n)
+	// KM-24 起为四个迁移（+0004_operation_observations）；重复执行后登记数不变。
+	if n != 4 {
+		t.Fatalf("applied versions = %d, want 4", n)
 	}
 	for _, table := range []string{"machines", "profiles", "providers", "skills", "deployments", "operations",
 		"enrollment_tokens", "agent_certificates", "observed_states", "desired_snapshots",
-		"operation_steps", "deployment_targets"} {
+		"operation_steps", "deployment_targets", "operation_observations"} {
 		var name string
 		err := db.sql.QueryRowContext(ctx,
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)

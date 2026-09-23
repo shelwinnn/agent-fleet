@@ -7,12 +7,14 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
-	"github.com/shelwinnn/agent-fleet/internal/adapter/fixture"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/fixture"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
 	"github.com/shelwinnn/agent-fleet/internal/desiredstate"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
@@ -71,6 +73,35 @@ type fakeAgentServer struct {
 	inventories chan *fleetv1.ObservedState
 	results     chan *fleetv1.OperationResult
 	dropped     int
+
+	// mu/order 记录上行消息的到达顺序（形如 "observation:op-1"、"result:op-1"），
+	// 供"绑定观测必须先于 OperationResult 到达"这类顺序断言使用。
+	mu    sync.Mutex
+	order []string
+	hello *fleetv1.Hello
+}
+
+func (f *fakeAgentServer) record(entry string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, entry)
+}
+
+// arrivalOrder 返回到达顺序的副本。
+func (f *fakeAgentServer) arrivalOrder() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.order...)
+}
+
+// indexOf 返回首个匹配前缀的序号（-1 表示未出现）。
+func (f *fakeAgentServer) indexOf(prefix string) int {
+	for i, e := range f.arrivalOrder() {
+		if strings.HasPrefix(e, prefix) {
+			return i
+		}
+	}
+	return -1
 }
 
 func (f *fakeAgentServer) Connect(stream grpc.BidiStreamingServer[fleetv1.AgentToServer, fleetv1.ServerToAgent]) error {
@@ -81,6 +112,10 @@ func (f *fakeAgentServer) Connect(stream grpc.BidiStreamingServer[fleetv1.AgentT
 	if first.GetHello() == nil {
 		return status.Error(codes.InvalidArgument, "first message must be Hello")
 	}
+	f.mu.Lock()
+	f.hello = first.GetHello()
+	f.mu.Unlock()
+	f.record("hello")
 	if err := stream.Send(&fleetv1.ServerToAgent{Payload: &fleetv1.ServerToAgent_Welcome{Welcome: f.welcome}}); err != nil {
 		return err
 	}
@@ -102,12 +137,14 @@ func (f *fakeAgentServer) Connect(stream grpc.BidiStreamingServer[fleetv1.AgentT
 				f.dropped++
 			}
 		case *fleetv1.AgentToServer_ObservedState:
+			f.record("observation:" + payload.ObservedState.GetOperationId())
 			select {
 			case f.inventories <- payload.ObservedState:
 			default:
 				f.dropped++
 			}
 		case *fleetv1.AgentToServer_OperationResult:
+			f.record("result:" + payload.OperationResult.GetOperationId())
 			if f.results != nil {
 				select {
 				case f.results <- payload.OperationResult:
@@ -158,7 +195,7 @@ func TestRunStreamRequestInventoryAndWelcomeHeartbeat(t *testing.T) {
 	home := t.TempDir()
 	reg := adapter.NewRegistry()
 	reg.Register(fixture.New())
-	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, quietLogger())
+	exec := newExecutor(home, cfg.DataDir, reg, collector, quietLogger())
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
 	done := make(chan error, 1)
@@ -230,7 +267,7 @@ func TestRunStreamReportsVerifyEvidence(t *testing.T) {
 	home := t.TempDir()
 	reg := adapter.NewRegistry()
 	reg.Register(fixture.New())
-	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, quietLogger())
+	exec := newExecutor(home, cfg.DataDir, reg, collector, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	workerMsgs := make(chan workerMsg, 32)
@@ -281,6 +318,37 @@ func TestRunStreamReportsVerifyEvidence(t *testing.T) {
 	}
 	if v.GetInventorySeq() <= 0 || v.GetAdapterHealth() != domain.AdapterHealthPassed {
 		t.Fatalf("verify evidence incomplete: %+v", v)
+	}
+
+	// KM-24：与该操作绑定的 apply 后观测必须先于 OperationResult 上线
+	// （§4.4 门禁条件 2/3/4 只接受同 operationId 的观测；先证据后终态，
+	// 服务端才能在评估门禁时读到它）。断言用假服务端记录的**到达顺序**，
+	// 而不是"先等到结果再回头找观测"——后者在顺序颠倒时同样会通过。
+	obsAt, resAt := fs.indexOf("observation:op-verify-1"), fs.indexOf("result:op-verify-1")
+	if obsAt < 0 {
+		t.Fatalf("no operation-bound observation was reported on the wire (order=%v)", fs.arrivalOrder())
+	}
+	if resAt < 0 || obsAt > resAt {
+		t.Fatalf("bound observation must arrive before the terminal result: order=%v", fs.arrivalOrder())
+	}
+	var bound *fleetv1.ObservedState
+	deadline := time.After(5 * time.Second)
+	for bound == nil {
+		select {
+		case o := <-fs.inventories:
+			if o.GetOperationId() == "op-verify-1" {
+				bound = o
+			}
+		case <-deadline:
+			t.Fatal("no operation-bound observation was reported on the wire")
+		}
+	}
+	if bound.GetInventorySeq() != v.GetInventorySeq() ||
+		bound.GetObservedProjectionDigest() != v.GetObservedProjectionDigest() ||
+		bound.GetDesiredProjectionDigest() != v.GetDesiredProjectionDigest() ||
+		bound.GetCanonicalizationVersion() != v.GetCanonicalizationVersion() ||
+		bound.GetAdapterHealth() != domain.AdapterHealthPassed {
+		t.Fatalf("bound observation must mirror the operation verify evidence: %+v vs %+v", bound, v)
 	}
 
 	// outbox 重发路径（服务端未 Ack → 条目仍在）必须携带同一份证据。

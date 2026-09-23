@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
@@ -9,11 +10,11 @@ import (
 func TestCollectIncrementsPersistedSeq(t *testing.T) {
 	c := &Collector{DataDir: t.TempDir(), AgentdVersion: "0.2.0"}
 
-	first, err := c.Collect()
+	first, err := c.Collect(context.Background())
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
-	second, err := c.Collect()
+	second, err := c.Collect(context.Background())
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
@@ -38,11 +39,11 @@ func TestCollectIncrementsPersistedSeq(t *testing.T) {
 func TestSeqSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	c1 := &Collector{DataDir: dir, AgentdVersion: "0.2.0"}
-	if _, err := c1.Collect(); err != nil {
+	if _, err := c1.Collect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	c2 := &Collector{DataDir: filepath.Join(dir), AgentdVersion: "0.2.0"}
-	obs, err := c2.Collect()
+	obs, err := c2.Collect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

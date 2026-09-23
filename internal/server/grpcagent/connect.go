@@ -68,6 +68,12 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[fleetv1.AgentToServer, 
 	if err := s.ctrl.OnConnected(ctx, machine, hello.GetAgentdVersion()); err != nil {
 		return mapStoreErr(err)
 	}
+	// 能力声明（矩阵）：随能力协商上行并落到 Machine status，供 REST/UI 读取。
+	if decls := capabilityDeclsFromProto(hello.GetCapabilities()); len(decls) > 0 {
+		if err := s.ctrl.SetAdapterCapabilities(ctx, machine, decls); err != nil {
+			s.log.Error("store adapter capabilities failed", "machine_id", machine, "err", err)
+		}
+	}
 	if err := stream.Send(&fleetv1.ServerToAgent{Payload: &fleetv1.ServerToAgent_Welcome{
 		Welcome: &fleetv1.Welcome{
 			ProtocolVersion:          ProtocolVersionV1,
@@ -237,6 +243,21 @@ func OperationResultFromProto(res *fleetv1.OperationResult) reconcile.OperationR
 }
 
 // observedFromProto 把 proto 观测转换为领域类型与入库记录。
+// capabilityDeclsFromProto 把能力声明转为领域类型（控制面只读，不做家族特判）。
+func capabilityDeclsFromProto(in []*fleetv1.AdapterCapability) []domain.AdapterCapability {
+	out := make([]domain.AdapterCapability, 0, len(in))
+	for _, c := range in {
+		out = append(out, domain.AdapterCapability{
+			Family:           c.GetFamily(),
+			Capability:       c.GetCapability(),
+			State:            c.GetState(),
+			VerifiedVersions: c.GetVerifiedVersions(),
+			Reason:           c.GetReason(),
+		})
+	}
+	return out
+}
+
 func observedFromProto(machine string, m *fleetv1.ObservedState) (domain.ObservedState, domain.ObservedStateRecord) {
 	obs := domain.ObservedState{
 		InventorySeq:             m.GetInventorySeq(),
@@ -245,6 +266,7 @@ func observedFromProto(machine string, m *fleetv1.ObservedState) (domain.Observe
 		CanonicalizationVersion:  m.GetCanonicalizationVersion(),
 		DesiredProjectionDigest:  m.GetDesiredProjectionDigest(),
 		ObservedProjectionDigest: m.GetObservedProjectionDigest(),
+		AdapterHealth:            m.GetAdapterHealth(),
 	}
 	if mi := m.GetMachine(); mi != nil {
 		obs.Machine = &domain.MachineObservation{
@@ -259,10 +281,12 @@ func observedFromProto(machine string, m *fleetv1.ObservedState) (domain.Observe
 	}
 	for _, a := range m.GetAgents() {
 		obs.Agents = append(obs.Agents, domain.AgentObservation{
-			Family:     a.GetFamily(),
-			Version:    a.GetVersion(),
-			Enabled:    a.GetEnabled(),
-			ConfigPath: a.GetConfigPath(),
+			Family:       a.GetFamily(),
+			Version:      a.GetVersion(),
+			Enabled:      a.GetEnabled(),
+			ConfigPath:   a.GetConfigPath(),
+			Installed:    a.GetInstalled(),
+			VersionError: a.GetVersionError(),
 		})
 	}
 	payload, _ := json.Marshal(obs)

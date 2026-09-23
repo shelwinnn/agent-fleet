@@ -1,6 +1,6 @@
 // state.proto — 观测状态消息（架构 v1.1.2 §8.2、§6.2；spec §11）。
-// 节点 inventory 的最小消息集：机器信息 + Agent 实例占位
-// （真实家族适配器与双侧投影摘要随第 4 片引入）。
+// 消息集：机器信息 + 家族实例 + ADR-1 双侧投影摘要 + 适配器健康
+// （第 4 片起由家族适配器产出）。
 syntax = "proto3";
 
 package fleet.v1;
@@ -11,17 +11,20 @@ option go_package = "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1;fleetv1
 // inventorySeq 是节点本地单调序，仅用于单机内比较、丢弃乱序旧报文（FR-8.7）。
 message ObservedState {
   int64 inventory_seq = 1;
-  // 全量/增量标志；本片恒为全量（true）。
+  // 全量/增量标志；MVP 恒为全量（true）。
   bool full = 2;
   // 若观测产生于某操作的 apply 之后，携带该 operationId（§4.4 门禁因果绑定）。
   string operation_id = 3;
   MachineInfo machine = 4;
   repeated AgentInstance agents = 5;
-  // 投影规范化版本（§7.1；本片占位，真实双侧投影摘要随第 4 片）。
+  // 投影规范化版本（§7.1：比较双方必须一致；多家族共用节点侧规则版本）。
   string canonicalization_version = 6;
-  // 期望侧/观测侧受管投影摘要（ADR-1 双侧投影；本片占位为空）。
+  // 期望侧/观测侧受管投影摘要（ADR-1 双侧投影；第 4 片起由家族适配器产出）。
   string desired_projection_digest = 7;
   string observed_projection_digest = 8;
+  // 适配器健康结果（passed | failed | skipped）。门禁条件 4 要求"同一份观测
+  // （或该操作 verify 证据）的健康结果"（§4.4），故随观测一并上报。
+  string adapter_health = 9;
 }
 
 // MachineInfo 是节点机器信息（写入 Machine status 的 os/arch/hostname/homeDir）。
@@ -35,11 +38,14 @@ message MachineInfo {
   int64 total_mem_bytes = 7;
 }
 
-// AgentInstance 是节点上一个 Agent 实例（本片为占位：仅上报 agentd 自身实例；
-// Codex/OMP/OpenCode/ZCode 家族实例随第 4 片适配器接入）。
+// AgentInstance 是节点上一个 Agent 实例（agentd 自身 + 各家族探测结果）。
 message AgentInstance {
   string family = 1;
   string version = 2;
   bool enabled = 3;
   string config_path = 4;
+  // installed 区分"未安装"与"已安装但版本不可解析"（支持矩阵验收 1）。
+  bool installed = 5;
+  // version_error 非空表示已安装但版本探测失败（如实呈现，不伪装成未安装）。
+  string version_error = 6;
 }

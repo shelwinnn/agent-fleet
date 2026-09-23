@@ -403,7 +403,10 @@ func (c *Controller) harvest(ctx context.Context, name string, targets []domain.
 // evaluateGate 组装门禁输入（§4.4）：操作记录 + 与该操作绑定的 apply 后观测。
 func (c *Controller) evaluateGate(ctx context.Context, t domain.DeploymentTargetStatus, op *domain.Operation) GateResult {
 	in := GateInput{MachineID: t.Machine, TargetGeneration: t.EffectiveGeneration, Op: op}
-	if rec, err := c.observed.Latest(ctx, t.Machine); err == nil && rec.OperationID == op.Metadata.Name {
+	// 门禁条件 2/3/4 的证据只接受与该操作绑定的观测（§4.4）：周期 inventory
+	// 会更新"每机最新观测"主行，故不得用 Latest（它可能已被更高 seq 的
+	// 周期报文覆盖）。
+	if rec, err := c.observed.LatestBound(ctx, t.Machine, op.Metadata.Name); err == nil {
 		var obs domain.ObservedState
 		if json.Unmarshal(rec.Payload, &obs) == nil {
 			in.PostApply = &BoundObservation{
@@ -419,9 +422,10 @@ func (c *Controller) evaluateGate(ctx context.Context, t domain.DeploymentTarget
 	return EvaluateGate(in)
 }
 
+// healthFromObservation 取同一份观测携带的适配器健康结果（§4.4 条件 4）。
+// 适配器未上报健康时返回空串，门禁退回该操作的 verify 证据（两者都缺即不通过）。
 func healthFromObservation(obs domain.ObservedState) string {
-	// 观测中适配器健康随第 4 片适配器上报；本片健康证据来自操作 verify。
-	return ""
+	return obs.AdapterHealth
 }
 
 func (c *Controller) finish(ctx context.Context, name string, core domain.DeploymentCoreSpec,

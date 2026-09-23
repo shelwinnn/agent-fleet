@@ -34,6 +34,20 @@ type MachineStatus struct {
 
 	// UnresolvedOperation 是当前未决操作（FR-1.10/§6.1：UI 呈现原因与处置入口）。
 	UnresolvedOperation *UnresolvedOperationRef `json:"unresolvedOperation,omitempty"`
+
+	// AdapterCapabilities 是节点上报的逐家族能力声明（支持矩阵：能力声明随
+	// 适配器/schema 版本登记，经能力协商暴露给控制面）。控制面只读取声明，
+	// 不据此调度，也不硬编码家族路径。
+	AdapterCapabilities []AdapterCapability `json:"adapterCapabilities,omitempty"`
+}
+
+// AdapterCapability 是一条家族能力声明。
+type AdapterCapability struct {
+	Family           string `json:"family"`
+	Capability       string `json:"capability"`
+	State            string `json:"state"`
+	VerifiedVersions string `json:"verifiedVersions,omitempty"`
+	Reason           string `json:"reason,omitempty"`
 }
 
 // UnresolvedOperationRef 指向占用机器级互斥的操作行（409 MachineBusy 的
