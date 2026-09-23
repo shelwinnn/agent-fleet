@@ -21,8 +21,11 @@ type MachineStatus struct {
 	KernelVersion      string     `json:"kernelVersion,omitempty"`
 	AgentdVersion      string     `json:"agentdVersion,omitempty"`
 	LastHeartbeatAt    *time.Time `json:"lastHeartbeatAt,omitempty"`
-	LastInventoryAt    *time.Time `json:"lastInventoryAt,omitempty"`
-	InventorySeq       int64      `json:"inventorySeq,omitempty"`
+	// LastProbeAt 是最近一次 SSH 探测时刻（§6.2 条件表：SSH 探测写 SSHReachable
+	// 的同时写 lastProbeAt；SSH-only 机器靠它展示"上次确认于 T"）。
+	LastProbeAt     *time.Time `json:"lastProbeAt,omitempty"`
+	LastInventoryAt *time.Time `json:"lastInventoryAt,omitempty"`
+	InventorySeq    int64      `json:"inventorySeq,omitempty"`
 
 	// 三类摘要各司其职（FR-8.6/§7.1）：desired/observedProjectionDigest 是 drift
 	// 判据两侧（展示与诊断）；摘要比较本身由 Reconcile 控制器按观测求值。

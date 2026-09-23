@@ -24,6 +24,9 @@ type ReconcileAPI interface {
 	Rollback(ctx context.Context, machine string, targetGeneration int64) (*domain.Operation, error)
 	UnresolvedRef(ctx context.Context, machine string) *domain.UnresolvedOperationRef
 	EvaluateDrift(ctx context.Context, machine string) (*domain.DriftEvaluation, error)
+	// RequestInventory 是 POST /machines/{name}/inventory（§8.1）：记录一条
+	// readOnly 操作并采集一次观测（SSH-only 机器只能经 SSH 采集）。
+	RequestInventory(ctx context.Context, machine string) (*domain.Operation, error)
 }
 
 // Config 为服务器装配参数。
@@ -47,6 +50,8 @@ type Server struct {
 	deployments   domain.DeploymentRepository
 	operations    domain.OperationRepository
 	reconcile     ReconcileAPI
+	ssh           SSHMachineAPI
+	include       IncludeAPI
 	deploys       DeploymentAPI
 	schemaVersion string
 	ping          func(ctx context.Context) error
@@ -71,6 +76,12 @@ func New(cfg Config, machines domain.MachineRepository, profiles domain.ProfileR
 	}
 }
 
+// SetSSH 装配 SSH-only 通道（probe/inventory）。nil 时端点返回 501。
+func (s *Server) SetSSH(api SSHMachineAPI) { s.ssh = api }
+
+// SetInclude 装配 OpenSSH include 导出。nil 时端点返回 501。
+func (s *Server) SetInclude(api IncludeAPI) { s.include = api }
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -94,6 +105,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/machines/{name}/operations/{opId}/skip", s.auth(http.HandlerFunc(s.handleSkipOperation)))
 	mux.Handle("GET /api/v1/machines/{name}/operations", s.auth(http.HandlerFunc(s.handleListOperations)))
 	mux.Handle("GET /api/v1/machines/{name}/drift", s.auth(http.HandlerFunc(s.handleDrift)))
+	// SSH-only 通道（§8.1；KM-26）：probe 与 inventory。bootstrap / repair-agentd
+	// 未在本片实现（见交付说明的遗留项），路由不注册 → 走 §6.4 JSON 404。
+	mux.Handle("POST /api/v1/machines/{name}/ssh/probe", s.auth(http.HandlerFunc(s.handleSSHProbe)))
+	mux.Handle("POST /api/v1/machines/{name}/ssh/inventory", s.auth(http.HandlerFunc(s.handleSSHInventory)))
+	// OpenSSH include 导出（FR-12.6）：preview / export(GET) / install(POST，须显式确认)。
+	mux.Handle("GET /api/v1/ssh/include", s.auth(http.HandlerFunc(s.handleSSHIncludePreview)))
+	mux.Handle("POST /api/v1/ssh/include", s.auth(http.HandlerFunc(s.handleSSHIncludeInstall)))
 
 	profiles := &resourceAPI[domain.AgentProfile, *domain.AgentProfile]{
 		resource: "profiles",

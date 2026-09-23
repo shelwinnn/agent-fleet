@@ -30,6 +30,9 @@ type Config struct {
 	PlanTimeout time.Duration
 	// FreshnessWindow 是观测新鲜度阈值（§6.2：默认 3×inventory 间隔 = 15min）。
 	FreshnessWindow time.Duration
+	// InventoryTimeout 是 SSH 手动 inventory 的整体超时（默认 2 分钟：含 scp 与
+	// 远端 agentd 启动；FR-9.5 的 <1s 指标不适用于 SSH 路径，这里给足余量）。
+	InventoryTimeout time.Duration
 }
 
 // Controller 是 Reconcile 控制器。
@@ -41,6 +44,7 @@ type Controller struct {
 	observed   domain.ObservedStateRepository
 	render     RenderFn
 	dispatcher Dispatcher
+	ssh        SSHPlanner
 	cfg        Config
 	log        *slog.Logger
 	now        func() time.Time
@@ -100,6 +104,9 @@ func NewController(machines domain.MachineRepository, status domain.MachineStatu
 	}
 	if cfg.FreshnessWindow <= 0 {
 		cfg.FreshnessWindow = 15 * time.Minute
+	}
+	if cfg.InventoryTimeout <= 0 {
+		cfg.InventoryTimeout = 2 * time.Minute
 	}
 	if log == nil {
 		log = slog.Default()
@@ -177,6 +184,11 @@ func (c *Controller) Reconcile(ctx context.Context, machine string, req Reconcil
 	c.log.Info("operation created", "event", "operation_created", "operation_id", op.Metadata.Name,
 		"machine_id", machine, "type", op.Spec.Type, "desired_generation", op.Spec.DesiredGeneration)
 
+	// SSH-only 通道（§9.3）：人发起的路径必须"产出计划 → 操作者按 planDigest 确认
+	// → apply 重算并比对基线"，因此这里先做 plan 并把操作置 AwaitingConfirmation。
+	if op.Spec.Transport == domain.TransportSSH {
+		return c.planOverSSH(ctx, machine, op, snap)
+	}
 	if err := c.dispatchExecute(ctx, machine, op, snap); err != nil {
 		if !errors.Is(err, domain.ErrAgentDisconnected) {
 			c.log.Error("execute dispatch failed", "operation_id", op.Metadata.Name, "err", err)
@@ -223,6 +235,9 @@ func (c *Controller) confirmPlan(ctx context.Context, machine, confirmDigest str
 	snap, err := c.snapshots.Get(ctx, machine, confirmed.Spec.DesiredGeneration)
 	if err != nil {
 		return nil, err
+	}
+	if confirmed.Spec.Transport == domain.TransportSSH {
+		return c.applyOverSSH(ctx, machine, confirmed, snap)
 	}
 	if err := c.dispatchExecute(ctx, machine, confirmed, snap); err != nil {
 		return c.failOperation(ctx, confirmed, domain.ReasonAgentDisconnected, err.Error())
@@ -299,6 +314,11 @@ func (c *Controller) ReconcileGeneration(ctx context.Context, machine string, ge
 	c.setUnresolvedRef(ctx, machine, op)
 	c.log.Info("operation created", "event", "operation_created", "operation_id", op.Metadata.Name,
 		"machine_id", machine, "type", op.Spec.Type, "desired_generation", generation)
+	if op.Spec.Transport == domain.TransportSSH {
+		// Deployment 驱动路径同样先产出计划；"按策略自动确认"本片未定义策略，
+		// 因此一律要求操作者确认（宁可停在确认窗口，也不静默应用）。
+		return c.planOverSSH(ctx, machine, op, snap)
+	}
 	if err := c.dispatchExecute(ctx, machine, op, snap); err != nil {
 		return c.failOperation(ctx, op, domain.ReasonAgentDisconnected, err.Error())
 	}
@@ -352,7 +372,14 @@ func (c *Controller) Cancel(ctx context.Context, machine, opID string) (*domain.
 		c.setUnresolvedRefPhase(ctx, machine, opID, domain.OperationPhaseCancelRequested)
 		c.log.Info("cancel requested", "event", "operation_cancel_requested",
 			"operation_id", opID, "machine_id", machine, "previous_phase", op.Status.Phase)
-		if c.dispatcher != nil {
+		if op.Spec.Transport == domain.TransportSSH && c.ssh != nil {
+			// SSH-only：没有 gRPC 通道，取消经 SSH 落标记文件，节点在阶段边界
+			// 观察（§5.1）。投递失败同样只保持 CancelRequested，绝不单方面终态。
+			if cerr := c.ssh.Cancel(ctx, machine, opID); cerr != nil {
+				c.log.Warn("ssh cancel delivery failed; waiting for node confirmation",
+					"operation_id", opID, "machine_id", machine, "err", cerr)
+			}
+		} else if c.dispatcher != nil {
 			if derr := c.dispatcher.CancelOperation(ctx, machine, opID); derr != nil {
 				// 节点不可达：保持 CancelRequested，等待节点重连后取消或重报
 				//（服务端不得单方面置 Cancelled，FR-13.9）。
@@ -589,8 +616,15 @@ func (c *Controller) channelState(ctx context.Context, machine string) (mode str
 		core.ManagementMode = domain.ManagementModeAgentd
 	}
 	if core.ManagementMode != domain.ManagementModeAgentd {
-		// SSH-only 路径属于第 6 片；本片对 ssh 机器如实报不可达。
-		return domain.TransportSSH, false, nil
+		// SSH-only（§9.3）：可达性来自 SSHReachable 条件（SSH 探测写入）。未探测过
+		// 时返回 false，但 SSH 路径仍会自行探测并把真实失败的 §30.1 reason 带回来
+		// ——比"未探测即拒绝派发"更诚实。
+		st, err := domain.ParseMachineStatus(m.StatusJSON())
+		if err != nil {
+			return "", false, err
+		}
+		cond, ok := st.GetCondition(domain.ConditionSSHReachable)
+		return domain.TransportSSH, ok && cond.Status == domain.ConditionTrue, nil
 	}
 	st, err := domain.ParseMachineStatus(m.StatusJSON())
 	if err != nil {
