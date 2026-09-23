@@ -111,6 +111,9 @@ func (s *deploymentTargetStore) List(ctx context.Context, deployment string) ([]
 	return out, rows.Err()
 }
 
+// Update 更新单个目标行。**内容无变化时不写库、不 bump 版本、不发事件**（KM-25
+// 核查建议 S1）：Deployment 控制器每轮扫描都会重写被阻塞目标的同一条 (phase, reason)，
+// 若照写就会每 2 秒产生一条 SSE 事件 + 一次 UI 重取。
 func (s *deploymentTargetStore) Update(ctx context.Context, deployment string, t domain.DeploymentTargetStatus) error {
 	if t.UpdatedAt.IsZero() {
 		t.UpdatedAt = time.Now().UTC()
@@ -121,16 +124,31 @@ func (s *deploymentTargetStore) Update(ctx context.Context, deployment string, t
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := tx.ExecContext(ctx,
+	var cur domain.DeploymentTargetStatus
+	var curUpdatedAt string
+	err = tx.QueryRowContext(ctx,
+		`SELECT phase, reason, operation_id, effective_generation, updated_at
+		 FROM deployment_targets WHERE deployment_id = ? AND machine_id = ?`,
+		deployment, t.Machine).
+		Scan(&cur.Phase, &cur.Reason, &cur.OperationID, &cur.EffectiveGeneration, &curUpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: deployment target %s/%s", domain.ErrNotFound, deployment, t.Machine)
+	}
+	if err != nil {
+		return fmt.Errorf("sqlite: read target %s/%s: %w", deployment, t.Machine, err)
+	}
+	if cur.Phase == t.Phase && cur.Reason == t.Reason &&
+		cur.OperationID == t.OperationID && cur.EffectiveGeneration == t.EffectiveGeneration {
+		// 无变化的重复写入：不落库、不发事件（updated_at 保持首次写入时刻）。
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE deployment_targets SET phase = ?, reason = ?, operation_id = ?, effective_generation = ?, updated_at = ?
 		 WHERE deployment_id = ? AND machine_id = ?`,
 		t.Phase, t.Reason, t.OperationID, t.EffectiveGeneration,
-		t.UpdatedAt.Format(time.RFC3339Nano), deployment, t.Machine)
-	if err != nil {
+		t.UpdatedAt.Format(time.RFC3339Nano), deployment, t.Machine); err != nil {
 		return fmt.Errorf("sqlite: update target %s/%s: %w", deployment, t.Machine, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: deployment target %s/%s", domain.ErrNotFound, deployment, t.Machine)
 	}
 	rv, err := bumpDeployment(ctx, tx, deployment)
 	if err != nil {

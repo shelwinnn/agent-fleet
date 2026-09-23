@@ -630,7 +630,15 @@ paths:
                 $ref: "#/components/schemas/DeploymentList"
     post:
       tags: [deployments]
-      summary: 创建 Deployment
+      summary: 创建 Deployment（经控制器创建路径，物化逐机目标行）
+      description: |
+        创建走 **Deployment 控制器**路径（FR-10.1/§4.4）：校验显式
+        `selector.machineNames` 与可解析的 `targetGeneration`，落库后立即物化
+        `deployment_targets` 并写入初始 `status`。因此响应体带 `status.targets`
+        （KM-25 核查必改 M2：此前 REST 直写仓储，0 个目标 → 控制器下一轮即判
+        `Failed / no target succeeded`，发布从入口就注定失败）。
+        校验失败在入口以 §6.4 错误体报出，不落库：缺 `machineNames` → 400 `Invalid`；
+        `targetGeneration` 在该机不可解析 → 409 `RollbackUnsupported`。
       requestBody:
         required: true
         content:
@@ -639,7 +647,7 @@ paths:
               $ref: "#/components/schemas/Deployment"
       responses:
         "201":
-          description: 已创建
+          description: 已创建（响应含物化后的 status.targets）
           content:
             application/json:
               schema:
@@ -699,7 +707,8 @@ paths:
         `event: <resource-type>` + `data: {"id","revision"}`：
         资源类型取 machines/profiles/skills/providers/deployments/operations，
         `id` 为资源名（operations 为操作 id，等于 metadata.name），
-        `revision` 为写入后的 metadata.resourceVersion。
+        `revision` 为写入后的 metadata.resourceVersion（**不变量**：事件版本必须等于
+        提交后落库的 resourceVersion，KM-25 核查必改 M1）。
         UI 据此按 (类型, id) 选择性重取，SSE 不承载资源正文（FR-14.2/NFR-9）。
 
         契约细节（§23.6 未规定、本实现取的最小自洽语义，KM-25 已登记）：

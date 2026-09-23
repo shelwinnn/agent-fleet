@@ -62,6 +62,8 @@ func run() error {
 		"观测新鲜度阈值（§6.2 默认 3×inventory 间隔 = 15min）")
 	deployScanEvery := fs.Duration("deploy-scan-every", 2*time.Second,
 		"Deployment 推进循环周期")
+	spaDir := fs.String("spa-dir", "web/dist",
+		"Web UI 静态产物目录（§3.6：控制面同时托管 SPA；目录不存在则只提供 API）")
 	adapterSchemaVersion := fs.String("adapter-schema-version", "fixture/v1",
 		"适配器 schema 版本（渲染输入五要素之一，§9；随适配器切片对齐）")
 	fs.Parse(os.Args[1:]) //nolint:errcheck // ExitOnError
@@ -190,6 +192,7 @@ func run() error {
 
 	api := httpapi.New(httpapi.Config{
 		AdminToken:        adminToken,
+		SPADir:            *spaDir,
 		Events:            events.Handler(),
 		DeploymentTargets: targetStore.List,
 		EnrollTokens:      &tokenIssuer{tokens: tokens, ttl: *tokenTTL},

@@ -437,6 +437,14 @@
             <Button size="sm" variant="outline" disabled={availability.actions[0].blocked || busy !== null} onclick={reconcile}>
               Reconcile（收敛）
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled
+              title="GET /machines/:name/drift 只返回漂移判定与两侧受管投影摘要，没有字段级 diff 端点（§9 流 2 的 Show Diff 尚无服务端契约）。按钮禁用并标注原因，界面不推断'哪些字段变了'。"
+            >
+              Show Diff（未实现：缺字段级 diff 端点）
+            </Button>
           </div>
           <p class="text-xs">{drift.detail}</p>
           <div class="grid gap-1 font-mono text-xs">
@@ -447,8 +455,9 @@
             <Alert.Root>
               <Alert.Title>逐字段 diff 未由 API 暴露</Alert.Title>
               <Alert.Description>
-                本片 REST 只提供漂移判定与两侧摘要（GET /machines/{name}/drift），没有字段级 diff 端点。
-                界面只呈现摘要与判定，不推断"哪些字段变了"；收敛入口为 Reconcile。
+                本片 REST 只提供漂移判定与两侧摘要（GET /machines/{name}/drift），没有字段级 diff 端点；
+                上方 Show Diff 入口因此禁用并标注原因（与其余未实现端点同一处理方式）。
+                界面只呈现摘要与判定，不推断"哪些字段变了"；当前收敛入口为 Reconcile。
               </Alert.Description>
             </Alert.Root>
           {/if}

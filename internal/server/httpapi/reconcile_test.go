@@ -73,6 +73,9 @@ type noopDeploymentAPI struct{}
 
 func newNoopDeploymentAPI() DeploymentAPI { return &noopDeploymentAPI{} }
 
+func (n *noopDeploymentAPI) Create(_ context.Context, _ *domain.Deployment) error {
+	return domain.ErrNotFound
+}
 func (n *noopDeploymentAPI) CreateRollback(_ context.Context, name string, gen int64) (*domain.Deployment, error) {
 	return nil, domain.ErrNotFound
 }

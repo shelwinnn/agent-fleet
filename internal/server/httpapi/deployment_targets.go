@@ -8,6 +8,16 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 )
 
+// createDeployment 把 REST 的 POST /api/v1/deployments 接到 Deployment 控制器创建路径。
+// 未装配控制器时（部分单元测试）退回直接落库，保持装配前的行为。
+func (s *Server) createDeployment(ctx context.Context, d *domain.Deployment) error {
+	if s.deploys == nil {
+		s.log.Warn("deployment controller not wired; creating deployment without targets")
+		return s.deployments.Create(ctx, d)
+	}
+	return s.deploys.Create(ctx, d)
+}
+
 // attachDeploymentTargets 把 deployment_targets 的逐机推进状态并入
 // Deployment.status.targets（§6.1 的 DeploymentStatus 定义、FR-14.5 第 3 组：
 // Superseded/Skipped 必须与 Failed 区分显示且各带原因）。

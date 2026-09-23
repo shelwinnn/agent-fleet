@@ -249,6 +249,20 @@ func (s *operationStore) ReplaceSteps(ctx context.Context, id string, steps []do
 			return fmt.Errorf("sqlite: begin replace steps %s: %w", id, err)
 		}
 		defer func() { _ = tx.Rollback() }()
+
+		// 步骤明细是操作行的一次可见变更，因此在同一事务里给 operations.resource_version
+		// +1：事件必须携带**落库后的真实版本**（KM-25 核查必改 M1——此前发的是
+		// "当前 rv + 1" 而这次写入并没有 bump 操作行，事件版本从未在库里出现过，
+		// 前端按 revision 判重时会把紧随其后的真实相位迁移当重复事件丢掉）。
+		var rv int64
+		err = tx.QueryRowContext(ctx, `SELECT resource_version FROM operations WHERE id = ?`, id).Scan(&rv)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: operation", domain.ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("sqlite: lock operation %s: %w", id, err)
+		}
+
 		if _, err := tx.ExecContext(ctx, `DELETE FROM operation_steps WHERE op_id = ?`, id); err != nil {
 			return fmt.Errorf("sqlite: clear steps %s: %w", id, err)
 		}
@@ -263,14 +277,15 @@ func (s *operationStore) ReplaceSteps(ctx context.Context, id string, steps []do
 				return fmt.Errorf("sqlite: insert step %s/%d: %w", id, st.Seq, err)
 			}
 		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE operations SET resource_version = ?, updated_at = ? WHERE id = ?`,
+			rv+1, nowStamp(), id); err != nil {
+			return fmt.Errorf("sqlite: bump operation %s: %w", id, err)
+		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		// 步骤明细随进度上报变化；事件版本用操作行当前 rv + 1（步骤表不单独计版本）。
-		var rv int64
-		if err := s.db.QueryRowContext(ctx, `SELECT resource_version FROM operations WHERE id = ?`, id).Scan(&rv); err == nil {
-			s.changes.emit(resourceOperations, id, rv+1)
-		}
+		s.changes.emit(resourceOperations, id, rv+1)
 		return nil
 	})
 }

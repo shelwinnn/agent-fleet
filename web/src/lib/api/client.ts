@@ -213,6 +213,8 @@ export class FleetClient {
     this.json<Deployment>('GET', `/api/v1/deployments/${encodeURIComponent(name)}`, undefined, opts);
   createDeployment = (deployment: Deployment, opts?: RequestOptions) =>
     this.json<Deployment>('POST', '/api/v1/deployments', deployment, opts);
+  deleteDeployment = (name: string, opts?: RequestOptions) =>
+    this.json<void>('DELETE', `/api/v1/deployments/${encodeURIComponent(name)}`, undefined, opts);
   rollbackDeployment = (name: string, targetGeneration?: number, opts?: RequestOptions) =>
     this.json<Deployment>(
       'POST',

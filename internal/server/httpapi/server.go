@@ -38,6 +38,9 @@ type Config struct {
 	// Events 是 SSE 事件枢纽处理器（KM-25：§8.1 `GET /api/v1/events`，格式见 §23.6）；
 	// nil 时该路由按骨架语义返回 501。
 	Events http.Handler
+	// SPADir 是 Web UI 静态产物目录（默认 web/dist，见 cmd/agent-fleet-server）。
+	// 目录不存在时不注册静态托管（Go 构建与前端产物解耦），只保留 API。
+	SPADir string
 	// DeploymentTargets 读取某 Deployment 的逐机推进状态（deployment_targets 表）。
 	// 非 nil 时，GET /api/v1/deployments 与 /{name} 会把结果并入 status.targets
 	// （§6.1 已规定的字段；FR-14.5 第 3 组的数据来源）。
@@ -141,15 +144,27 @@ func (s *Server) Handler() http.Handler {
 		repo:     s.deployments,
 		validate: func(d *domain.Deployment) error { return d.Validate() },
 		enrich:   s.attachDeploymentTargets,
+		onCreate: s.createDeployment,
 	}
 	mux.Handle("/api/v1/deployments", s.auth(deployments.collection()))
 	mux.Handle("/api/v1/deployments/{name}", s.auth(deployments.item()))
 	mux.Handle("POST /api/v1/deployments/{name}/rollback", s.auth(http.HandlerFunc(s.handleDeploymentRollback)))
 	mux.Handle("POST /api/v1/deployments/{name}/targets/{machine}/skip", s.auth(http.HandlerFunc(s.handleSkipDeploymentTarget)))
 
-	// catch-all：未匹配路径统一走 §6.4 错误体（KM-21 核查发现 #3：
-	// 不再回落 net/http 纯文本 "404 page not found"）。
+	// catch-all：/api 与探针命名空间未匹配时走 §6.4 错误体（KM-21 核查发现 #3：
+	// 不再回落 net/http 纯文本 "404 page not found"）；其余路径交给静态 SPA
+	// （§3.6/§4.1：控制面进程同时托管 Web UI），未配置或目录缺失时维持原 404 行为。
+	spa, spaEnabled := spaHandler(s.cfg.SPADir, s.log)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			writeError(w, http.StatusNotFound, domain.ReasonNotFound,
+				"no route for "+r.Method+" "+r.URL.Path, nil)
+			return
+		}
+		if spaEnabled {
+			spa.ServeHTTP(w, r)
+			return
+		}
 		writeError(w, http.StatusNotFound, domain.ReasonNotFound,
 			"no route for "+r.Method+" "+r.URL.Path, nil)
 	})
@@ -235,6 +250,13 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		status, reason = http.StatusConflict, domain.ReasonAlreadyExists
 	case errors.Is(err, domain.ErrMachineBusy):
 		status, reason = http.StatusConflict, domain.ReasonMachineBusy
+	case errors.Is(err, domain.ErrRollbackUnsupported):
+		// 创建发布时目标代不可解析（控制器创建路径的入参校验，FR-10.1）。
+		status, reason = http.StatusConflict, domain.ReasonRollbackUnsupported
+	case errors.Is(err, domain.ErrReplanRequired):
+		status, reason = http.StatusConflict, domain.ReasonReplanRequired
+	case errors.Is(err, domain.ErrOpState):
+		status, reason = http.StatusConflict, domain.ReasonInvalid
 	case errors.Is(err, domain.ErrInvalid):
 		status, reason = http.StatusBadRequest, domain.ReasonInvalid
 	default:

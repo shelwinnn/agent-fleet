@@ -212,6 +212,11 @@ describe('页面渲染（状态呈现证据）', () => {
     expect(body).toContain('已漂移');
     expect(body).toContain('逐字段 diff 未由 API 暴露');
     expect(body).toContain('不推断');
+    // 裁定 3：Show Diff 必须是"禁用 + 原因标注"的入口，而不是只留一句说明。
+    expect(body).toContain('Show Diff（未实现：缺字段级 diff 端点）');
+    expect(body).toContain('没有字段级 diff 端点');
+    const showDiff = body.slice(body.indexOf('Show Diff') - 1200, body.indexOf('Show Diff'));
+    expect(showDiff, 'Show Diff 必须是禁用按钮（disabled 属性在按钮上）').toContain('disabled');
   });
 
   it('Deployments 把 Superseded/Skipped 与 Failed 分开呈现并带原因', () => {

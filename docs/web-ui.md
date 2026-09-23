@@ -58,29 +58,48 @@ hash 路由：静态产物可被任意静态服务器托管，不需要服务端
 2. **删除事件与重放**：§23.6 只规定事件含"资源类型/ID + revision"。实现取最小自洽语义：
    删除事件携带"删除前版本 +1"（随后 REST 读取 404）；无 `Last-Event-ID` 重放，客户端重连后全量重取；
    订阅端缓冲溢出时服务端关闭连接（不静默丢事件）。
-3. **逐字段 drift diff 未暴露**：REST 只提供判定与两侧投影摘要，没有字段级 diff 端点，
-   因此 §7 区块只呈现摘要并在 UI 明示"不臆造 diff"。
+3. **逐字段 drift diff 未暴露**：REST 只提供判定与两侧投影摘要，没有字段级 diff 端点。
+   §9 流 2 的 "Show Diff" 一环因此以**禁用按钮 + 原因标注**呈现（与其余未实现端点同一处理），
+   界面不推断"哪些字段变了"。
 4. **无全局 operations 端点**：Overview 的"最近失败操作"由逐机 `GET /machines/{name}/operations`
    聚合（并发 6、10 秒内不重复取），规模是 MVP 数量级；若新增全局端点应替换该实现。
-5. **Deployment 逐机结果**：`deployment_targets` 是权威存储（§10.1），而 §6.1 规定它以
-   `status.targets` 出现在 Deployment 资源里。此前 REST 未暴露该字段——本片在读取/写入响应中补齐
-   （服务端从 `deployment_targets` 并入，不改存储模型、不开放 status 写入）。
-   **仍未闭环**：经 `POST /api/v1/deployments` 创建的发布不会初始化目标行（控制器只在自身创建路径写
-   `deployment_targets`），因此这类发布在推进时以 `Failed / no target succeeded` 终结且没有逐机行。
+5. **Deployment 逐机结果（已闭环）**：`deployment_targets` 是权威存储（§10.1），而 §6.1 规定它以
+   `status.targets` 出现在 Deployment 资源里。服务端在读取/写入响应中并入该字段（不改存储模型、
+   不开放 status 写入）；`POST /api/v1/deployments` 改走**控制器创建路径**（校验 `machineNames` 与
+   可解析的 `targetGeneration`、物化目标行、写初始 status），入口校验失败以 400 `Invalid` /
+   409 `RollbackUnsupported` 报出而不落库。
 6. **未注册端点**（属第 6 片/后续切片，UI 一律禁用并标注原因，不给假入口）：
    `POST /machines/{name}/ssh/probe|bootstrap|repair-agentd|inventory`、
    `POST /skills/{name}/resolve`、`GET /skills/{name}/revisions`、
-   `POST /deployments/{name}/pause|resume`，以及 Skill 的 spec 形态。
-7. **静态资源托管**：控制面进程尚未提供 SPA 静态目录（§3.6 的"Web UI 静态资源"），
-   本片以 dev/preview + proxy 联调；生产托管方式待定（属部署/第 6 片）。
+   `POST /deployments/{name}/pause|resume`、`GET /machines/{name}/drift` 的字段级 diff，
+   以及 Skill 的 spec 形态。
+7. **静态资源托管（已闭环）**：控制面进程以 `--spa-dir`（默认 `web/dist`）托管 Web UI
+   （§3.6/§4.1）。目录不存在时不注册静态托管、只保留 API（并打日志）——刻意**不用 `go:embed`**，
+   否则没有前端产物的干净树上 `go build ./...` 会直接失败。UI 用 hash 路由，深链接不需要 rewrite 回退；
+   `/api` 命名空间未匹配时仍是 §6.4 JSON 404（KM-21 既有行为，有测试锁定）。
 8. **凭据边界**：UI 不展示也不存储任何 secret（含 `POST /machines/{name}/enroll-token` 的一次性明文 token），
    因此不提供签发入口。
+
+## 核查必改与建议的闭环（KM-25 复核后）
+
+| 项 | 处置 | 锁定方式 |
+|---|---|---|
+| **M1** 事件版本必须等于落库 `resourceVersion` | `ReplaceSteps` 在同一事务内 bump `operations.resource_version` 并发新版本（此前发的是"当前 rv+1"而库里没变） | `internal/store/sqlite/change_invariant_test.go` 逐路径断言"事件 rv == 落库 rv"（机器/状态/spec/profile/操作 Create·ReplaceSteps·Transition/发布/目标行）；联调第 2 节断言真实后端上事件 rv == REST 读到的 rv |
+| **M2** REST 创建发布必须物化目标行 | `POST /api/v1/deployments` 经 `DeploymentAPI.Create` 走控制器创建路径（`resourceAPI.onCreate` 钩子）；入口校验失败 400 `Invalid` / 409 `RollbackUnsupported` | `internal/server/httpapi/stack_test.go`（全栈：真实控制器 + SQLite）：创建 → `status.targets` 非空 → 控制器推进 → 目标 Failed 且发布 reason 不为 `no target succeeded`；联调第 6 节用**真实创建**的发布复现同一链路 |
+| **M3** 控制面托管 SPA | `--spa-dir`（默认 `web/dist`）+ catch-all 拆分：`/api` → §6.4 JSON 404，其余 → 静态文件 | `TestSPAServing`（`/` 返回 index.html、`/assets/*.js` 200、`/api/v1/nope` 仍是 JSON 404、目录缺失时不托管） |
+| S1 阻塞目标每轮重写同一状态 | 目标行内容无变化时不写库、不 bump、不发事件（`deployment_target_store.Update` 先比后写） | `TestTargetUpdateWithoutChangeIsNoop`（重复 3 次无事件、版本不变；真变化时仍发事件且版本一致） |
+| S2 targets 的 N+1 与 `omitempty` | 登记在案：list 逐条并入（MVP 数量级可接受，新增全局端点时应替换）。`DeploymentStatus.Targets` 保留 `omitempty`——**空即缺省**，UI 侧 `?? []` 兜底 | 代码注释 + 本节 |
+| S3 联调证据强度 | 第 3/4/5 节改成对可达分支的**显式断言**；不可达分支用 `it.skip` 并在名称里写明原因（in-sync/drifted、未决操作、409 MachineBusy、Superseded/Skipped）；第 6 节改为真实创建发布并断言目标行与推进结果 | `web/tests/integration.test.ts`（7 passed / 4 explicitly skipped） |
+| 裁定 3 "Show Diff" | §7 增加禁用入口 + 原因标注（缺字段级 diff 端点） | `web/tests/render.test.ts` + 截图 |
 
 ## 未验证清单（不得当作已验证）
 
 - 真实浏览器中的交互路径只做了无头 Chromium 截图核对（页面渲染、SSE 连接状态、三态标签）；
   未做跨浏览器/小屏适配验证。
 - `AwaitingConfirmation` / `ReplanRequired` / `MachineBusy` 的**真实后端**触发需要 SSH 路径或在线 agentd
-  （第 6 片），本片以单元测试 + 渲染测试覆盖其呈现，联调环境只覆盖到 Failed/Unknown 分支。
+  （第 6 片），本片以单元测试 + 渲染测试覆盖其呈现；联调中这四条分支以 `it.skip` **显式标注为未覆盖**
+  （不是"通过"），联调实际覆盖的是 Failed / Unknown / 无未决 分支。
+- 发布的 `Superseded` / `Skipped` 目标行同样需要真实推进历史（节点在场 + 出现更新代），联调中以
+  `it.skip` 标注；其呈现由渲染测试（`web/tests/render.test.ts`）与 Go 侧 `deployment_targets_test.go` 覆盖。
 - 无头浏览器截图中的 `Superseded` / `Skipped` / `Blocked` 目标行为**演示数据**（直接写入本地演示库），
   用于核对呈现层；后端真实产生该状态需要节点在场。
