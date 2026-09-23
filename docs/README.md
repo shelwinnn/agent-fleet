@@ -11,6 +11,7 @@
 5. [v1.1.1 决策补充表](architecture-revision-resolution-v1.1.1-supplement.md)：记录 CA 备份决策落地及待验证事项。
 6. [v1.1.2 复核闭合处置表](architecture-revision-resolution-v1.1.2-supplement.md)：KM-17 发现 P-1～P-15 的逐项处置、用户决策清单、前端栈变更与 FR 例外登记、文档检查记录、待确认与未验证清单。
 7. [Agent 支持矩阵与验收要求](agent-support-matrix.md)：八个支持目标的身份与能力边界；本版补充**批次一 / 批次二**的接入顺序。
+8. [批次一适配器：接入前确认、逐家族验收与范围决策](adapters-batch-1.md)：KM-24 交付记录——Codex / OMP / OpenCode 的接入前确认与验收 5 项、ZCode 范围决策、未验证清单、契约缺口。
 
 统计断言脚本：[`tools/verify-architecture-stats.py`](tools/verify-architecture-stats.py)（文档级，无外部依赖）：校验 FR 计数（95 条 / P0 94 / P1 1）、§2.8 每行 15 列合计与逐列相加、§18 与附录声明一致、以及"96/70/+26"无现行残留。运行方式：`python3 docs/tools/verify-architecture-stats.py docs/agent-fleet-architecture-v1.1.2.md`。
 

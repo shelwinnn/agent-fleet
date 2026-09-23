@@ -669,3 +669,67 @@ func waitFor(t *testing.T, within time.Duration, cond func() bool, msg string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// 矩阵「统一适配契约」：能力声明（支持/不支持/未验证 + 版本范围 + 原因）必须
+// 随能力协商上行到控制面，落到 Machine status 供 REST/UI 读取；控制面只读，
+// 不做家族特判。
+func TestHelloCapabilityDeclarationsSurfacedToControlPlane(t *testing.T) {
+	h := newHarness(t, Config{OfflineAfter: time.Minute})
+	ctx := context.Background()
+	if err := h.machines.Create(ctx, &domain.Machine{Metadata: domain.ObjectMeta{Name: "ws-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	ac := newAgentCert(t, "ws-1")
+	resp, err := h.enroll("ws-1", h.enrollToken("ws-1", ac, time.Minute), ac)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	client, err := h.connectClient(resp.GetCertPem(), ac.priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := client.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.CloseSend()
+	if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_Hello{
+		Hello: &fleetv1.Hello{
+			MachineId: "ws-1", AgentdVersion: "0.2.0", ProtocolVersion: ProtocolVersionV1,
+			Adapters: []string{"codex", "omp"},
+			Capabilities: []*fleetv1.AdapterCapability{
+				{Family: "codex", Capability: "version", State: "supported", VerifiedVersions: "codex-cli 0.154.0"},
+				{Family: "codex", Capability: "mcp", State: "supported",
+					Reason: "envRefs 未验证：请求时在阶段 1 明确拒绝"},
+				{Family: "omp", Capability: "rules", State: "unverified", Reason: "docs 未覆盖该版本"},
+			},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GetWelcome() == nil {
+		t.Fatalf("first server message = %+v", first)
+	}
+
+	st := h.machineStatus("ws-1")
+	if len(st.AdapterCapabilities) != 3 {
+		t.Fatalf("capabilities = %+v", st.AdapterCapabilities)
+	}
+	byKey := map[string]domain.AdapterCapability{}
+	for _, d := range st.AdapterCapabilities {
+		byKey[d.Family+"/"+d.Capability] = d
+	}
+	if d := byKey["codex/version"]; d.State != "supported" || d.VerifiedVersions != "codex-cli 0.154.0" {
+		t.Fatalf("codex/version = %+v", d)
+	}
+	if d := byKey["codex/mcp"]; d.State != "supported" || d.Reason == "" {
+		t.Fatalf("codex/mcp = %+v", d)
+	}
+	if d := byKey["omp/rules"]; d.State != "unverified" || d.Reason != "docs 未覆盖该版本" {
+		t.Fatalf("omp/rules = %+v", d)
+	}
+}

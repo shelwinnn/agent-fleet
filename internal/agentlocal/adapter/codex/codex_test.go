@@ -249,6 +249,20 @@ func TestDesiredScopedProjection(t *testing.T) {
 	if inv.DesiredProjectionDigest != inv.ObservedProjectionDigest {
 		t.Fatal("nothing managed must never drift")
 	}
+	// 反向：一旦期望点名 model，同一个文件必须立刻被判 drift（证明上一条不是
+	// "两侧摘要都为空所以恒等"的空断言）。
+	scoped := adapter.AgentDesiredState{Family: ID, Version: "0.154.0",
+		Config: json.RawMessage(`{"model":"gpt-5.6"}`)}
+	drifted, err := a.Inventory(ctx, home, scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted.ObservedProjectionDigest == drifted.DesiredProjectionDigest {
+		t.Fatal("once model is managed, the same file must drift")
+	}
+	if drifted.DesiredProjectionDigest == inv.DesiredProjectionDigest {
+		t.Fatal("desired projection must differ between scoped and unscoped desired state")
+	}
 }
 
 // TestRulesManagedBlockPreservesUserContent：标记块只替换块内内容（FR-5.1/护栏 #3）。
@@ -384,8 +398,12 @@ func TestValidateRejectsUnverifiedBeforeWrite(t *testing.T) {
 		t.Fatal("unverified OS must be rejected")
 	}
 
-	if _, err := os.Stat(filepath.Join(home, ".codex", "skills", "needs-env")); !os.IsNotExist(err) {
-		t.Fatal("no writes may happen during validate")
+	// 校验失败不得留下任何写入产物（agentd 目录下只应有校验前存在的文件）。
+	if _, err := os.Stat(filepath.Join(home, ".codex", "skills")); !os.IsNotExist(err) {
+		t.Fatalf("validate must not create the skills dir: %v", err)
+	}
+	if got := readFile(t, path); got != before {
+		t.Fatal("validate must not modify the config")
 	}
 }
 
@@ -396,4 +414,124 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// 回归（核查缺陷 1）：MCP 条目省略 args 是常见 profile 写法，两侧投影必须同形，
+// 否则机器会永远停在 verify 失败 + 回滚。
+func TestMCPEntryWithoutArgsConverges(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	a := &Adapter{Probe: probeVersion("0.154.0")}
+	desired := adapter.AgentDesiredState{
+		Family:  ID,
+		Version: "0.154.0",
+		MCP: map[string]adapter.MCPEntry{
+			"no-args": {Command: "/usr/local/bin/my-mcp"},
+		},
+	}
+	inv, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, desired, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, desired, changes); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	inv2, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv2.DesiredProjectionDigest != inv2.ObservedProjectionDigest {
+		t.Fatalf("no-args MCP entry must converge: desired=%s observed=%s (%+v)",
+			inv2.DesiredProjectionDigest, inv2.ObservedProjectionDigest, inv2.ManagedProjection)
+	}
+	if cs, err := a.Plan(ctx, home, desired, inv2); err != nil || len(cs) != 0 {
+		t.Fatalf("second reconcile must be a no-op: %+v err=%v", cs, err)
+	}
+}
+
+// 回归（核查缺陷 3）：~/.codex/AGENTS.md 常是软链（本机真实布局）。原子写必须
+// 写穿链接，而不是把链接换成普通文件（护栏 #3）。
+func TestManagedBlockWritePreservesSymlink(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	target := filepath.Join(home, ".config", "plexus", "personal", "rules", "global.md")
+	writeFile(t, target, "# 全局规则\n\n用户正文\n")
+	link := filepath.Join(home, ".codex", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Adapter{Probe: probeVersion("0.154.0")}
+	desired := adapter.AgentDesiredState{Family: ID, Version: "0.154.0",
+		Rules: map[string]adapter.RulesEntry{"global": {Content: "Fleet 规则"}}}
+	inv, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, desired, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, desired, changes); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("AGENTS.md symlink was replaced by a regular file (mode=%v)", fi.Mode())
+	}
+	got := readFile(t, target)
+	if !strings.Contains(got, "# 全局规则") || !strings.Contains(got, "用户正文") {
+		t.Fatalf("user content lost:\n%s", got)
+	}
+	if !strings.Contains(got, kit.BlockBegin) || !strings.Contains(got, "Fleet 规则") {
+		t.Fatalf("managed block not written through the symlink:\n%s", got)
+	}
+	inv2, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv2.DesiredProjectionDigest != inv2.ObservedProjectionDigest {
+		t.Fatal("rules through symlink did not converge")
+	}
+}
+
+// 回归（核查缺陷 6）：config.toml 的受管键级回退（外部编辑场景）此前没有测试执行。
+func TestMergeManagedRestoresOnlyManagedTOMLKeys(t *testing.T) {
+	home := t.TempDir()
+	a := &Adapter{Probe: probeVersion("0.154.0")}
+	path := filepath.Join(home, ".codex", "config.toml")
+	// 模拟"备份时"的受管键：model=gpt-5.5、provider endpoint=A。
+	writeFile(t, path, sampleConfig)
+	if err := a.MergeManaged(home, filepath.Join(".codex", "config.toml"), map[string]any{
+		"model": "gpt-5.5",
+		"model_providers.fleet": map[string]any{
+			"name": "agent-fleet", "base_url": "https://a.example/v1", "wire_api": "responses",
+		},
+	}); err != nil {
+		t.Fatalf("merge managed: %v", err)
+	}
+	text := readFile(t, path)
+	if !strings.Contains(text, `model = "gpt-5.5"`) {
+		t.Fatalf("managed model key not restored:\n%s", text)
+	}
+	if !strings.Contains(text, "[model_providers.fleet]") || !strings.Contains(text, `base_url = "https://a.example/v1"`) {
+		t.Fatalf("managed provider table not restored:\n%s", text)
+	}
+	// 未托管键必须原样保留。
+	for _, keep := range []string{"# 用户注释必须保留", `approval_policy = "on-request"`, `[projects."/home/u/work"]`, `[mcp_servers.serena]`} {
+		if !strings.Contains(text, keep) {
+			t.Fatalf("unmanaged content lost in managed-key rollback: %q\n%s", keep, text)
+		}
+	}
 }

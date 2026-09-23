@@ -92,6 +92,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 		{
 			Capability: adapter.CapabilityVersion, State: adapter.SupportSupported,
 			VerifiedVersions: "omp 17.4.0 (linux/amd64)",
+			Reason:           "版本探测已验证；安装/升级（§20.2 command installer）不在本片，Apply(version) 在版本不匹配时显式失败",
 			Evidence:         "本机 `omp --version` → `omp/17.4.0`；npm `@oh-my-pi/pi-coding-agent` 17.4.0（published 2026-08-20）",
 			Paths:            []string{".local/bin/omp"},
 		},
@@ -104,6 +105,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 		{
 			Capability: adapter.CapabilityMCP, State: adapter.SupportSupported,
 			VerifiedVersions: "omp 17.4.0（文档证据：docs/mcp-config.md）",
+			Reason:           "command+args 支持；envRefs 未验证（文档只写字面 env 值）——请求 envRefs 时在阶段 1 由 Validate 明确拒绝",
 			Evidence:         "docs/mcp-config.md：~/.omp/agent/mcp.json 顶层 mcpServers.<name>.{type,command,args,env}",
 			Paths:            []string{".omp/agent/mcp.json"},
 		},
@@ -235,7 +237,8 @@ func (a *Adapter) desiredProjection(desired adapter.AgentDesiredState) (map[stri
 	if len(desired.MCP) != 0 {
 		mcp := map[string]any{}
 		for name, e := range desired.MCP {
-			mcp[name] = map[string]any{"type": "stdio", "command": e.Command, "args": e.Args}
+			// args 归一化为"总是切片"（同 Codex：省略 args 与无 args 必须同投影）。
+			mcp[name] = map[string]any{"type": "stdio", "command": e.Command, "args": normalizeArgs(e.Args)}
 		}
 		proj["mcp"] = mcp
 	}
@@ -353,8 +356,8 @@ func (a *Adapter) Plan(_ context.Context, _ string, desired adapter.AgentDesired
 		changes = append(changes, adapter.Change{Family: ID, Step: "config", Key: "config.provider",
 			From: observedProj["provider"], To: desiredProj["provider"]})
 	}
-	changes = append(changes, diffMapStep("mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
-	changes = append(changes, diffMapStep("skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
+	changes = append(changes, kit.DiffMapStep(ID, "mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
+	changes = append(changes, kit.DiffMapStep(ID, "skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
 	if !equal(desiredProj["rules"], observedProj["rules"]) {
 		changes = append(changes, adapter.Change{Family: ID, Step: "rules", Key: "rules.global",
 			From: observedProj["rules"], To: desiredProj["rules"]})
@@ -679,29 +682,12 @@ func readFileOrEmpty(path string) string {
 	return string(b)
 }
 
-func equal(a, b any) bool { return fmt.Sprintf("%#v", a) == fmt.Sprintf("%#v", b) }
-
-func diffMapStep(step, keyPrefix string, desiredRaw, observedRaw any) []adapter.Change {
-	desired, _ := desiredRaw.(map[string]any)
-	if len(desired) == 0 {
-		return nil
-	}
-	observed, _ := observedRaw.(map[string]any)
-	names := make([]string, 0, len(desired))
-	for n := range desired {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var out []adapter.Change
-	for _, n := range names {
-		if equal(desired[n], observed[n]) {
-			continue
-		}
-		out = append(out, adapter.Change{Family: ID, Step: step, Key: keyPrefix + n,
-			From: observed[n], To: desired[n]})
-	}
-	return out
+// normalizeArgs 把 nil 参数归一化为空切片（投影可比性）。
+func normalizeArgs(args []string) []string {
+	return append([]string{}, args...)
 }
+
+func equal(a, b any) bool { return kit.ValuesEqual(a, b) }
 
 func sortedKeys[T any](m map[string]T) []string {
 	out := make([]string, 0, len(m))

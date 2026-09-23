@@ -100,6 +100,22 @@ func TestDependencyGuardrails(t *testing.T) {
 	}
 }
 
+// TestControlPlaneBinariesDoNotImportFamilyAdapters：控制面二进制（server）
+// 同样不得 import 家族实现包或节点侧包（§3.6 护栏 #2 的二进制级表达）。
+func TestControlPlaneBinariesDoNotImportFamilyAdapters(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "cmd", "agent-fleet-server")
+	if _, err := os.Stat(root); err != nil {
+		t.Skipf("control-plane binary not present: %v", err)
+	}
+	for file, imports := range importsOf(t, root) {
+		for _, imp := range imports {
+			if strings.Contains(imp, "internal/agentlocal") {
+				t.Errorf("%s imports %s: 控制面二进制不得链接节点侧/家族适配器实现", file, imp)
+			}
+		}
+	}
+}
+
 // TestFamilyAdaptersAreMutuallyIndependent：适配器之间互不 import
 // （§3.6：新适配器 = 新增 adapter/<family> 包 + 注册）。
 func TestFamilyAdaptersAreMutuallyIndependent(t *testing.T) {

@@ -1,6 +1,7 @@
 package domain
 
-// ObservedState 是节点上报的观测状态（§8.2/§5.2；本片：机器信息 + Agent 实例占位）。
+// ObservedState 是节点上报的观测状态（§8.2/§5.2：机器信息 + 家族实例 +
+// ADR-1 双侧投影摘要 + 适配器健康）。
 // 领域层中性类型：由 server/grpcagent 从 fleetv1 proto 转换而来，
 // 以 JSON 存入 observed_states.payload 并驱动 Machine status 更新。
 type ObservedState struct {

@@ -119,8 +119,12 @@ func TestMergeWritePreservesUnmanagedAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc["theme"] != "tokyonight" || doc["$schema"] != "https://opencode.ai/config.json" {
+	if doc["theme"] != "tokyonight" {
 		t.Fatalf("unmanaged keys lost: %+v", doc)
+	}
+	// $schema 已在样例中：必须原样保留（而不是被改写）。
+	if doc["$schema"] != "https://opencode.ai/config.json" {
+		t.Fatalf("existing $schema must be preserved: %v", doc["$schema"])
 	}
 	if doc["model"] != "fleet/gpt-5.6" {
 		t.Fatalf("model = %v", doc["model"])
@@ -279,5 +283,194 @@ func TestSkillLinkRequiresMaterializedArtifact(t *testing.T) {
 	}
 	if inv2.DesiredProjectionDigest != inv2.ObservedProjectionDigest {
 		t.Fatal("skill link not converged")
+	}
+}
+
+// 新建配置（文件不存在）时必须补上官方 $schema，便于用户校验（docs/config）。
+func TestApplyOnMissingFileAddsSchema(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	a := &Adapter{Probe: probeVersion("1.18.32")}
+	d := adapter.AgentDesiredState{Family: ID, Version: "1.18.32", Config: json.RawMessage(`{"model":"gpt-5.6"}`)}
+	inv, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, d, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, d, changes); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := decodeJSONC([]byte(read(t, filepath.Join(home, ".config", "opencode", "opencode.json"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc["$schema"] != schemaURL || doc["model"] != "gpt-5.6" {
+		t.Fatalf("new config = %+v", doc)
+	}
+}
+
+// 回归（核查缺陷 1）：MCP 条目省略 args 必须收敛（OpenCode 侧把 command 与 args
+// 拼成一个切片，本条锁住该行为不被改坏）。
+func TestMCPEntryWithoutArgsConverges(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	a := &Adapter{Probe: probeVersion("1.18.32")}
+	d := adapter.AgentDesiredState{Family: ID, Version: "1.18.32",
+		MCP: map[string]adapter.MCPEntry{"no-args": {Command: "/usr/local/bin/my-mcp"}}}
+	inv, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, d, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, d, changes); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	inv2, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv2.DesiredProjectionDigest != inv2.ObservedProjectionDigest {
+		t.Fatalf("no-args MCP entry must converge: %+v", inv2.ManagedProjection)
+	}
+	if cs, err := a.Plan(ctx, home, d, inv2); err != nil || len(cs) != 0 {
+		t.Fatalf("second reconcile must be a no-op: %+v err=%v", cs, err)
+	}
+}
+
+// 回归（核查缺陷 5）：受管 MCP 的 environment 必须从**本机文件**读取，
+// 外部改动要产生 drift（用期望值回填会让 FR-8 判据失效）。
+func TestManagedMCPEnvironmentDriftIsDetected(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	path := filepath.Join(home, ".config", "opencode", "opencode.json")
+	write(t, path, sampleConfig)
+	a := &Adapter{Probe: probeVersion("1.18.32")}
+	d := adapter.AgentDesiredState{Family: ID, Version: "1.18.32",
+		MCP: map[string]adapter.MCPEntry{
+			"local-tools": {Command: "npx", Args: []string{"-y", "my-mcp"},
+				EnvRefs: map[string]string{"SERVICE_TOKEN": "SERVICE_TOKEN"}},
+		}}
+	inv, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, d, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, d, changes); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	converged, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converged.DesiredProjectionDigest != converged.ObservedProjectionDigest {
+		t.Fatalf("environment did not converge: %+v", converged.ManagedProjection)
+	}
+
+	// 外部把受管 env 从 {env:VAR} 改成字面量。
+	after := read(t, path)
+	write(t, path, strings.Replace(after, `"{env:SERVICE_TOKEN}"`, `"literal-secret-token"`, 1))
+	drifted, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted.ObservedProjectionDigest == drifted.DesiredProjectionDigest {
+		t.Fatalf("external edit of managed MCP environment must drift: %+v", drifted.ManagedProjection)
+	}
+	cs, err := a.Plan(ctx, home, d, drifted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cs) != 1 || cs[0].Step != "mcp" || cs[0].Key != "mcp.local-tools" {
+		t.Fatalf("expected a single mcp change, got %+v", cs)
+	}
+}
+
+// 覆盖（核查缺陷 6）：ManagedFiles / ExtractManaged / MergeManaged 的
+// opencode.json 与 AGENTS.md 两条回退分支此前零测试引用。
+func TestManagedFilesAndMergeManagedRollback(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	path := filepath.Join(home, ".config", "opencode", "opencode.json")
+	write(t, path, sampleConfig)
+	a := &Adapter{Probe: probeVersion("1.18.32")}
+	d := desired()
+	inv, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, d, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, d, changes); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := a.ManagedFiles(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(".config", "opencode", "opencode.json"), filepath.Join(".config", "opencode", "AGENTS.md")}
+	if len(files) != len(want) {
+		t.Fatalf("managed files = %v", files)
+	}
+	for i := range want {
+		if files[i] != want[i] {
+			t.Fatalf("managed files = %v, want %v", files, want)
+		}
+	}
+
+	// 受管键提取（备份粒度）：model 与 provider.fleet 必须在集合内。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := a.ExtractManaged(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managed["model"] != "fleet/gpt-5.6" {
+		t.Fatalf("extracted model = %v", managed["model"])
+	}
+	if _, ok := managed["provider."+providerID]; !ok {
+		t.Fatalf("extracted managed keys missing provider: %+v", managed)
+	}
+
+	// 外部编辑：改掉受管键 → 受管字段级回退只还原受管键，未托管键保留。
+	edited := strings.Replace(read(t, path), `"model": "fleet/gpt-5.6"`, `"model": "user/other"`, 1)
+	write(t, path, edited)
+	if err := a.MergeManaged(home, want[0], managed); err != nil {
+		t.Fatalf("merge managed: %v", err)
+	}
+	doc, err := decodeJSONC([]byte(read(t, path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc["model"] != "fleet/gpt-5.6" {
+		t.Fatalf("managed model not rolled back: %v", doc["model"])
+	}
+	if doc["theme"] != "tokyonight" {
+		t.Fatalf("unmanaged key lost in managed rollback: %+v", doc)
+	}
+
+	// AGENTS.md 分支：只还原受管块，块外内容保留。
+	rulesPath := filepath.Join(home, ".config", "opencode", "AGENTS.md")
+	write(t, rulesPath, "# 用户内容\n\n"+kit.RenderManagedBlock("旧规则"))
+	if err := a.MergeManaged(home, want[1], map[string]any{"agentFleetRules": "回退规则"}); err != nil {
+		t.Fatal(err)
+	}
+	rulesText := read(t, rulesPath)
+	if !strings.Contains(rulesText, "# 用户内容") || !strings.Contains(rulesText, "回退规则") ||
+		strings.Contains(rulesText, "旧规则") {
+		t.Fatalf("managed block rollback wrong:\n%s", rulesText)
 	}
 }

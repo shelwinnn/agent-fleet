@@ -102,11 +102,12 @@ func setPath(root *yaml.Node, path string, value any) error {
 		return fmt.Errorf("yaml: encode %s: %w", path, err)
 	}
 	if existing := mapValue(cur, leaf); existing != nil {
-		// 只替换值节点，保留该键上的注释。
-		existing.Kind = encoded.Kind
-		existing.Tag = encoded.Tag
-		existing.Value = encoded.Value
-		existing.Style = encoded.Style
+		// 整节点替换（含 Content）：只改 Kind/Tag/Value/Style 会把旧子节点
+		// 原样编码回去——写映射/序列时表现为"改不动"（换 endpoint/model 永不收敛）。
+		// 键节点上的注释（Head/Line/Foot）仍保留。
+		head, line, foot := existing.HeadComment, existing.LineComment, existing.FootComment
+		*existing = *encoded
+		existing.HeadComment, existing.LineComment, existing.FootComment = head, line, foot
 		return nil
 	}
 	cur.Content = append(cur.Content,

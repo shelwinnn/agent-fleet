@@ -61,6 +61,23 @@ message Hello {
   repeated string adapters = 4;
   string canonicalization_version = 5;
   int64 last_inventory_seq = 6;
+  // 能力声明（支持矩阵「统一适配契约」）：逐家族声明支持/不支持/未验证与
+  // 已验证版本范围，通过既有能力协商暴露给控制面；控制面只读取声明，
+  // 不硬编码各家族路径。
+  repeated AdapterCapability capabilities = 7;
+}
+
+// AdapterCapability 是一条家族能力声明（矩阵：未知能力不得当作支持）。
+message AdapterCapability {
+  string family = 1;
+  // version | modelProvider | mcp | skills | rules
+  string capability = 2;
+  // supported | unsupported | unverified
+  string state = 3;
+  // 结论成立的运行时版本范围（未验证时为空）。
+  string verified_versions = 4;
+  // unsupported/unverified 的具体原因（人读）。
+  string reason = 5;
 }
 
 message Welcome {

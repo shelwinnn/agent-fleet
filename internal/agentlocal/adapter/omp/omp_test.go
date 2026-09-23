@@ -293,3 +293,93 @@ func TestSkillLinkRequiresMaterializedArtifact(t *testing.T) {
 		t.Fatal("skill link not converged")
 	}
 }
+
+// 回归（核查缺陷 1）：MCP 条目省略 args 必须收敛。
+func TestMCPEntryWithoutArgsConverges(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	a := &Adapter{Probe: probeVersion("17.4.0")}
+	d := adapter.AgentDesiredState{Family: ID, Version: "17.4.0",
+		MCP: map[string]adapter.MCPEntry{"no-args": {Command: "/usr/local/bin/my-mcp"}}}
+	inv, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, d, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, d, changes); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	inv2, err := a.Inventory(ctx, home, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv2.DesiredProjectionDigest != inv2.ObservedProjectionDigest {
+		t.Fatalf("no-args MCP entry must converge: %+v", inv2.ManagedProjection)
+	}
+	if cs, err := a.Plan(ctx, home, d, inv2); err != nil || len(cs) != 0 {
+		t.Fatalf("second reconcile must be a no-op: %+v err=%v", cs, err)
+	}
+}
+
+// 回归（核查缺陷 2）：models.yml 已有 providers.fleet 映射时，改 endpoint/model
+// 必须真的写进去（旧实现只替换标量字段，映射子节点被原样编码回去 → 永不收敛）。
+func TestProviderChangeConvergesOnSecondApply(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	a := &Adapter{Probe: probeVersion("17.4.0")}
+
+	first := adapter.AgentDesiredState{Family: ID, Version: "17.4.0",
+		Config: json.RawMessage(`{"model":"glm-5.3","provider":{"endpoint":"https://a.example/v1","apiKeyEnv":"KEY_A"}}`)}
+	inv, err := a.Inventory(ctx, home, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, first, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, first, changes); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	// 第二次：换 endpoint 与 model（映射值必须被替换）。
+	second := adapter.AgentDesiredState{Family: ID, Version: "17.4.0",
+		Config: json.RawMessage(`{"model":"glm-5.4","provider":{"endpoint":"https://b.example/v1","apiKeyEnv":"KEY_B"}}`)}
+	inv2, err := a.Inventory(ctx, home, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes2, err := a.Plan(ctx, home, second, inv2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes2) == 0 {
+		t.Fatal("provider change must produce a plan")
+	}
+	if err := a.Apply(ctx, home, second, changes2); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	modelsText := read(t, filepath.Join(home, ".omp", "agent", "models.yml"))
+	for _, want := range []string{"https://b.example/v1", "id: glm-5.4", "apiKey: KEY_B"} {
+		if !strings.Contains(modelsText, want) {
+			t.Fatalf("models.yml not updated (%q missing):\n%s", want, modelsText)
+		}
+	}
+	if strings.Contains(modelsText, "https://a.example/v1") || strings.Contains(modelsText, "glm-5.3") {
+		t.Fatalf("stale provider values remain in models.yml:\n%s", modelsText)
+	}
+	configText := read(t, filepath.Join(home, ".omp", "agent", "config.yml"))
+	if !strings.Contains(configText, "default: fleet/glm-5.4") {
+		t.Fatalf("model selector not updated:\n%s", configText)
+	}
+	inv3, err := a.Inventory(ctx, home, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv3.DesiredProjectionDigest != inv3.ObservedProjectionDigest {
+		t.Fatalf("provider change did not converge: %+v", inv3.ManagedProjection)
+	}
+}

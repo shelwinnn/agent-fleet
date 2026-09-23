@@ -29,7 +29,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
@@ -97,8 +96,9 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 		{
 			Capability: adapter.CapabilityVersion, State: adapter.SupportSupported,
 			VerifiedVersions: "docs 对应 1.18.x（本机未安装，未实测）",
-			Reason: "`--version` 的**输出格式**未验证（官方只给 flag 语义、无示例输出）：" +
-				"解析器只接受裸 semver，形态不符即显式报错（不猜、不伪装成未安装）",
+			Reason: "`--version` flag 有文档，但输出格式未验证（官方无示例）→ 解析器只接受裸 semver，" +
+				"形态不符即显式报错；安装/升级（§20.2 command installer）不在本片，" +
+				"Apply(version) 在版本不匹配时显式失败",
 			Evidence: "https://opencode.ai/docs/cli/（`--version, -v  Print version number`）；" +
 				"npm opencode-ai latest 1.18.32 / bin `opencode`（https://registry.npmjs.org/opencode-ai）",
 		},
@@ -112,6 +112,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 		{
 			Capability: adapter.CapabilityMCP, State: adapter.SupportSupported,
 			VerifiedVersions: "文档对应 1.18.x（未在本机实测）",
+			Reason:           "local 类型 command/environment 支持；envRefs 按文档化的 {env:VAR} 间接引用渲染（不落明文）",
 			Evidence:         "https://opencode.ai/docs/mcp-servers/（mcp.<name>.type=local/command/environment）",
 			Paths:            []string{".config/opencode/opencode.json"},
 		},
@@ -333,7 +334,9 @@ func (a *Adapter) observedProjection(home string, desired adapter.AgentDesiredSt
 			}
 			observed := map[string]any{"type": typ, "command": command}
 			if len(d.EnvRefs) != 0 {
-				observed["environment"] = envRefsOf(d.EnvRefs)
+				// 必须读**文件里的** environment：用期望值回填会让外部改动
+				// 受管 env 不产生 drift（FR-8 判据失效）。
+				observed["environment"] = observedEnvRefs(entry["environment"], d.EnvRefs)
 			}
 			mcp[name] = observed
 		}
@@ -354,6 +357,23 @@ func (a *Adapter) observedProjection(home string, desired adapter.AgentDesiredSt
 		proj["rules"] = content
 	}
 	return proj, nil
+}
+
+// observedEnvRefs 从原生配置反向读取受管 env 键：只比较期望点名的键，
+// 未托管的 env 键不参与判据（§7.1 约束 1）。缺席或形态不再是 `{env:VAR}`
+// 都如实回填，从而产生 drift。
+func observedEnvRefs(raw any, desired map[string]string) map[string]any {
+	env, _ := raw.(map[string]any)
+	out := map[string]any{}
+	for key := range desired {
+		v, ok := env[key]
+		if !ok {
+			out[key] = ""
+			continue
+		}
+		out[key] = v
+	}
+	return out
 }
 
 // envRefName 反向解析 `{env:VAR}` → VAR（其它形态返回空，表示无 env 间接引用）。
@@ -389,8 +409,8 @@ func (a *Adapter) Plan(_ context.Context, _ string, desired adapter.AgentDesired
 		changes = append(changes, adapter.Change{Family: ID, Step: "config", Key: "config.provider",
 			From: observedProj["provider"], To: desiredProj["provider"]})
 	}
-	changes = append(changes, diffMapStep("mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
-	changes = append(changes, diffMapStep("skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
+	changes = append(changes, kit.DiffMapStep(ID, "mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
+	changes = append(changes, kit.DiffMapStep(ID, "skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
 	if !equal(desiredProj["rules"], observedProj["rules"]) {
 		changes = append(changes, adapter.Change{Family: ID, Step: "rules", Key: "rules.global",
 			From: observedProj["rules"], To: desiredProj["rules"]})
@@ -722,26 +742,4 @@ func stripJSONComments(raw []byte) []byte {
 	return out
 }
 
-func equal(a, b any) bool { return fmt.Sprintf("%#v", a) == fmt.Sprintf("%#v", b) }
-
-func diffMapStep(step, keyPrefix string, desiredRaw, observedRaw any) []adapter.Change {
-	desired, _ := desiredRaw.(map[string]any)
-	if len(desired) == 0 {
-		return nil
-	}
-	observed, _ := observedRaw.(map[string]any)
-	names := make([]string, 0, len(desired))
-	for n := range desired {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var out []adapter.Change
-	for _, n := range names {
-		if equal(desired[n], observed[n]) {
-			continue
-		}
-		out = append(out, adapter.Change{Family: ID, Step: step, Key: keyPrefix + n,
-			From: observed[n], To: desired[n]})
-	}
-	return out
-}
+func equal(a, b any) bool { return kit.ValuesEqual(a, b) }

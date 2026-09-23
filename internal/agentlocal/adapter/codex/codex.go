@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
@@ -94,6 +93,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 		{
 			Capability: adapter.CapabilityVersion, State: adapter.SupportSupported,
 			VerifiedVersions: "codex-cli 0.154.0 (linux/amd64)",
+			Reason:           "版本探测已验证；安装/升级（§20.2 command installer）不在本片，Apply(version) 在版本不匹配时显式失败",
 			Evidence:         "本机 `codex --version` → `codex-cli 0.154.0`；`~/.codex/packages/standalone/releases/0.154.0-x86_64-unknown-linux-musl`",
 			Paths:            []string{".codex/packages/standalone/releases"},
 		},
@@ -106,6 +106,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 		{
 			Capability: adapter.CapabilityMCP, State: adapter.SupportSupported,
 			VerifiedVersions: "codex-cli 0.154.0",
+			Reason:           "command+args 支持；envRefs 未验证（无 ${VAR} 展开证据）——请求 envRefs 时在阶段 1 由 Validate 明确拒绝",
 			Evidence:         "`codex mcp add --help`（--env/--url/--bearer-token-env-var）+ 本机 `[mcp_servers.*]` 既有条目",
 			Paths:            []string{".codex/config.toml"},
 		},
@@ -246,7 +247,9 @@ func (a *Adapter) desiredProjection(desired adapter.AgentDesiredState) (map[stri
 	if len(desired.MCP) != 0 {
 		mcp := map[string]any{}
 		for name, e := range desired.MCP {
-			mcp[name] = map[string]any{"command": e.Command, "args": e.Args}
+			// args 归一化为"总是切片"：期望侧省略 args 与观测侧无 args 必须同投影，
+			// 否则 {"command": "..."} 这种常见写法会永不收敛（两侧 [] vs null）。
+			mcp[name] = map[string]any{"command": e.Command, "args": normalizeArgs(e.Args)}
 		}
 		proj["mcp"] = mcp
 	}
@@ -343,8 +346,8 @@ func (a *Adapter) Plan(ctx context.Context, home string, desired adapter.AgentDe
 		changes = append(changes, adapter.Change{Family: ID, Step: "config", Key: "config.provider",
 			From: observedProj["provider"], To: desiredProj["provider"]})
 	}
-	changes = append(changes, diffMapStep("mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
-	changes = append(changes, diffMapStep("skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
+	changes = append(changes, kit.DiffMapStep(ID, "mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
+	changes = append(changes, kit.DiffMapStep(ID, "skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
 	if !projectionEqual(desiredProj["rules"], observedProj["rules"]) {
 		changes = append(changes, adapter.Change{Family: ID, Step: "rules", Key: "rules.global",
 			From: observedProj["rules"], To: desiredProj["rules"]})
@@ -572,6 +575,11 @@ func (a *Adapter) MergeManaged(home, relPath string, managed map[string]any) err
 
 func runtimeGOOS() string { return runtime.GOOS }
 
+// normalizeArgs 把 nil 参数归一化为空切片（投影可比性，不在别处再归一化）。
+func normalizeArgs(args []string) []string {
+	return append([]string{}, args...)
+}
+
 // readConfig 读并解析 config.toml；文件不存在视为空文档（首次纳管）。
 func (a *Adapter) readConfig(home string) (map[string]any, error) {
 	raw, err := os.ReadFile(a.configPath(home))
@@ -607,28 +615,4 @@ func tableOf(cfg map[string]any, path ...string) (map[string]any, bool) {
 	return nil, false
 }
 
-func projectionEqual(a, b any) bool {
-	return fmt.Sprintf("%#v", a) == fmt.Sprintf("%#v", b)
-}
-
-func diffMapStep(step, keyPrefix string, desiredRaw, observedRaw any) []adapter.Change {
-	desired, _ := desiredRaw.(map[string]any)
-	if len(desired) == 0 {
-		return nil
-	}
-	observed, _ := observedRaw.(map[string]any)
-	names := make([]string, 0, len(desired))
-	for n := range desired {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	var out []adapter.Change
-	for _, n := range names {
-		if projectionEqual(desired[n], observed[n]) {
-			continue
-		}
-		out = append(out, adapter.Change{Family: ID, Step: step, Key: keyPrefix + n,
-			From: observed[n], To: desired[n]})
-	}
-	return out
-}
+func projectionEqual(a, b any) bool { return kit.ValuesEqual(a, b) }

@@ -37,14 +37,14 @@
 | 受管字段与所有权 | 受管：`model`、`model_provider`、`[model_providers.fleet]`、期望点名的 `[mcp_servers.<name>]`、`AGENTS.md` 受管块、`skills/<name>` 软链。其余键（`approval_policy`、`projects`、`tui`、`plugins`、未点名的 MCP 条目…）不读不写 | fixture 断言（`codex_test.go`：注释、`approval_policy`、`[projects.*]`、未托管 `[mcp_servers.serena]` 全部保留） |
 | 健康检查方式 | 配置可解析 + 受管键到位 + 版本探测与期望一致；**不验证外部服务可用性**（FR-4.3） | `HealthCheck` + fixture 断言 |
 | Linux / macOS / WSL 支持组合 | **Linux：本机实测**。macOS / Windows / WSL：**未验证**（本机无该平台证据；github.com 在本环境不可达，无法取官方文档） | 无 → 适配器 `Validate` 对 `GOOS != linux` 明确拒绝 |
-| 能力声明 | version ✅ / modelProvider ✅ / MCP ✅（`command`+`args`）/ Skills ✅ / Rules ✅；**MCP `envRefs` 未验证**（没有证据表明 `${VAR}` 会在 `[mcp_servers.*].env` 展开，直接写入会把字面量交给服务进程） | `Capabilities()`；envRefs 请求在阶段 1 被拒绝（fixture 断言） |
+| 能力声明 | version ✅**（探测已验证；安装/升级未实现）** / modelProvider ✅ / MCP ✅（`command`+`args`）/ Skills ✅ / Rules ✅。**MCP `envRefs` 未验证**（没有证据表明 `${VAR}` 会在 `[mcp_servers.*].env` 展开，直接写入会把字面量交给服务进程） | `Capabilities()`（MCP 声明的 `Reason` 如实写明 envRefs 未验证）；envRefs 请求由 **`Validate`** 在阶段 1 明确拒绝（fixture `TestValidateRejectsUnverifiedBeforeWrite`） |
 
 ### 1.2 逐家族验收（矩阵 5 项）
 
 1. **身份与兼容性**：已装 → `Installed=true` + 版本；未装 → `Installed=false`（非错误）；已装但版本不可解析 → **显式错误**（不伪装成未安装）。fixture：`TestDetectDistinguishesMissingFromUnparseable`。非 Linux → 阶段 1 拒绝。
 2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent` 覆盖渲染、读取、未托管保留（含 JSON 注释级内容：TOML 采用**行级手术写**，注释与键序保留）、幂等；`envRefs` 在写入前拒绝（`TestValidateRejectsUnverifiedBeforeWrite`）。
 3. **生命周期**：重复 reconcile 无实质变更（幂等断言）；受管改动触发 drift、未托管改动不触发（`TestDriftOnlyFromManagedFields`）。**安装/升级：未验证**——command installer（§20.2）不在本片范围，`Apply(version)` 在版本不匹配时**显式失败**，不谎报成功。
-4. **恢复与一致性**：受管文件声明 `ManagedFiles`（config.toml、AGENTS.md）供 reconciler 备份/恢复使用；受管字段级回退（外部编辑场景）有 fixture（`TestRulesManagedBlockPreservesUserContent` 的 `MergeManaged` 断言 + config.toml 受管键回退路径）。daemon 与 one-shot 共用同一 `Executor`（AD-5，切片 3 已锁定）。
+4. **恢复与一致性**：受管文件声明 `ManagedFiles`（config.toml、AGENTS.md）供 reconciler 备份/恢复使用；受管字段级回退两条分支均有 fixture：AGENTS.md 受管块（`TestRulesManagedBlockPreservesUserContent`）与 config.toml 受管键/受管表（`TestMergeManagedRestoresOnlyManagedTOMLKeys`）；软链目标不被破坏（`TestManagedBlockWritePreservesSymlink`）。daemon 与 one-shot 共用同一 `Executor`（AD-5，切片 3 已锁定）。
 5. **验收记录**：本节；未验证项见 §5。
 
 ---
@@ -66,7 +66,7 @@
 | 受管字段与所有权 | 受管：`modelRoles.default`、`providers.fleet`（models.yml）、`mcpServers.<name>`、`AGENTS.md` 受管块、`skills/<name>` 软链；其余键不读不写（YAML 走 Node 树合并，注释保留） | fixture 断言（`symbolPreset`、`composer.shape`、行尾注释、未托管 MCP server 全部保留） |
 | 健康检查方式 | 受管键到位 + 文件可解析 + 版本一致 | `HealthCheck` + fixture 断言 |
 | Linux / macOS / WSL 支持组合 | 官方平台行：macOS · Linux · Windows · bun ≥ 1.3.14（无需 WSL）。**本机仅 Linux 实测**；macOS/Windows 未实测 → 适配器只允许 linux | README「Install」；适配器 `Validate` |
-| 能力声明 | version ✅ / modelProvider ✅ / MCP ✅（`command`+`args`）/ Skills ✅ / Rules ✅；**MCP `envRefs` 未验证**（文档只写字面 `env` 值） | `Capabilities()`；envRefs 请求阶段 1 拒绝 |
+| 能力声明 | version ✅**（探测已验证；安装/升级未实现）** / modelProvider ✅ / MCP ✅（`command`+`args`）/ Skills ✅ / Rules ✅。**MCP `envRefs` 未验证**（文档只写字面 `env` 值） | `Capabilities()`（`Reason` 写明）；envRefs 请求由 **`Validate`** 在阶段 1 明确拒绝 |
 | 其他未验证 | `composer.shape` 未登记在文档 schema（权威以 `omp config list` 为准）——适配器不依赖它；Bun 安装的版本钉选写法与产物校验和**未验证** | docs/settings.md（"不是完整 schema"） |
 
 ### 2.2 逐家族验收（矩阵 5 项）
@@ -95,14 +95,14 @@
 | 受管字段与所有权 | 受管：`model`、`provider.fleet`、`mcp.<期望点名条目>`、`AGENTS.md` 受管块、`skills/<name>` 软链 | fixture 断言（`$schema`、`theme`、未托管 `mcp.user-owned` 保留） |
 | 健康检查方式 | 受管键到位 + 配置可解析 + 版本一致 | `HealthCheck` + fixture 断言 |
 | Linux / macOS / WSL 支持组合 | npm 声明 `darwin/linux/win32` × `arm64/x64`；Windows 官方**建议 WSL**（"can run directly on Windows, we recommend using WSL"）。**本机未安装，任何平台都未实测** → 适配器只允许 linux | https://registry.npmjs.org/opencode-ai/1.18.32 ；https://opencode.ai/docs/windows-wsl/ |
-| 能力声明 | version ✅（flag 有文档；输出格式未验证）/ modelProvider ✅ / MCP ✅（含 `environment` 的 `{env:VAR}` 间接引用）/ Skills ✅（拒绝不合规 skill 名）/ Rules ✅ | 见上表各 URL |
+| 能力声明 | version ✅（flag 有文档；输出格式与安装均未验证）/ modelProvider ✅ / MCP ✅（含 `environment` 的 `{env:VAR}` 间接引用）/ Skills ✅（拒绝不合规 skill 名）/ Rules ✅ | `Capabilities()` 的 `Reason` 逐条写明未验证面；见上表各 URL |
 
 ### 3.2 逐家族验收（矩阵 5 项）
 
 1. **身份与兼容性**：`TestDetectDistinguishesMissingFromUnparseable`（三态可区分；格式未知时显式报错而非猜测）；非 Linux 阶段 1 拒绝。**真实二进制探测未实测**（本机未安装）。
 2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent` 覆盖 JSONC 读取、受管键渲染、未托管键保留、幂等；不合规 skill 名（`Bad_Name`）在写入前拒绝（`TestValidateRejectsBeforeWrite`）。
 3. **生命周期**：幂等、受管 drift、未托管不误报（`TestDriftOnlyFromManagedFields`）。**安装/升级未验证**。
-4. **恢复与一致性**：`ManagedFiles` 覆盖 opencode.json 与 AGENTS.md；受管字段级回退路径有 fixture。
+4. **恢复与一致性**：`ManagedFiles` 覆盖 opencode.json 与 AGENTS.md；`ExtractManaged`/`MergeManaged` 两条回退分支由 `TestManagedFilesAndMergeManagedRollback` 覆盖（含"未托管键在受管回退后仍在"）。
 5. **验收记录**：本节；未验证项见 §5。
 
 ### 3.3 已知限制（已在代码注释与本节声明）
@@ -149,7 +149,7 @@
 
 **通用（三家族共有）**
 
-1. **版本安装/升级**：command installer（§20.2）不在本片范围；`Apply(version)` 在版本不匹配时显式失败（`VersionVerificationFailed` 语义），绝不谎报成功。
+1. **版本安装/升级**：能力声明里 `version` 记为 `supported` 指的是**探测已验证**；安装/升级（§20.2 command installer）不在本片范围，`Apply(version)` 在版本不匹配时显式失败（`VersionVerificationFailed` 语义），绝不谎报成功。声明文本（`Reason`）与本清单口径一致。
 2. **macOS / Windows / WSL**：三家族均只有 Linux 实测（OpenCode 连 Linux 也未安装实测）；`Validate` 对非 linux `GOOS` 明确拒绝。
 3. **工件物化**：Skill 软链要求规范缓存 `~/.local/share/agent-fleet/skills/<name>/<digest>` 已存在；`FetchArtifact`/bundle 路径未实现（后续切片），缺失时**显式失败**而非静默跳过。
 4. **MCP 环境变量间接引用**：Codex 与 OMP **未验证** → 请求 `envRefs` 时阶段 1 拒绝；OpenCode 有文档化的 `{env:VAR}` 语法，已按该语法渲染。
@@ -182,3 +182,26 @@
 1. **适配器输入形态未在 §5.4 明确**：`render.go` 把 provider 归一化进 `agents.<family>.config`，而 skills/mcp/rules 位于快照顶层。本片把 `adapter.AgentDesiredState` 扩展为同时携带 `Skills`/`MCP`/`Rules`（核心仍只依赖接口，I-1 不被破坏），但建议架构明确该输入契约（避免后续家族各自解释）。
 2. **`fixture` 曾从 `config` 内读 skills**，与 render 输出不一致（切片 3 占位）；本片已统一为快照顶层 `skills`。
 3. **MCP `envRefs` 在部分家族无法满足**：Codex/OMP 没有环境变量间接引用的证据，按矩阵"未验证即拒绝"处理；若要求 FR-4.1 的 `envRefs` 在所有家族可用，需要在范围上明确允许"该家族不支持 envRefs"的降级路径。
+
+---
+
+## 7. 核查退回后的修复（KM-24 复核轮，2026-09-23）
+
+复核在 `c1a6d0e` 上确认了 7 项必须修复的问题，逐条修复与回归如下（每条都用"去掉修复即失败"验证过断言有效）：
+
+| # | 问题 | 修复 | 回归断言（去掉修复会失败） |
+|---|---|---|---|
+| 1 | MCP 条目省略 `args` 时两侧投影 `null` vs `[]`，永不收敛（Codex/OMP） | 期望侧 `normalizeArgs` 归一化为空切片；OpenCode 拼切片的行为一并锁定 | `TestMCPEntryWithoutArgsConverges`（codex / omp / opencode 各一） |
+| 2 | `yamlpatch.setPath` 替换既有叶子时未清空 `Content`，OMP `models.yml` 的 `providers.fleet` 改不动 | 整节点替换（保留该键的注释字段） | `TestProviderChangeConvergesOnSecondApply` |
+| 3 | `kit.AtomicWrite` 的 rename 把软链换成普通文件（本机 `~/.codex/AGENTS.md` 就是软链） | 写前 `resolveWritePath` 解析并**写穿**软链（含多级；悬空链写目标） | `TestManagedBlockWritePreservesSymlink` |
+| 4 | 绑定观测沿用主行 seq 判定，周期报文抢号会永久丢失门禁证据 | 绑定表使用**自己的** `(machine_id, operation_id)` 高水位，不受主行 `accepted` 影响 | `TestBoundObservationUsesItsOwnHighWaterMark`（周期 seq 更高时绑定仍写入；等值 seq 替换；更小 seq 拒绝） |
+| 5 | OpenCode 观测侧 `environment` 用期望值回填，外部改动看不见 | 从本机 `mcp.<name>.environment` 反向读取（只比较期望点名的键） | `TestManagedMCPEnvironmentDriftIsDetected` |
+| 6 | 交付说明 4 处与代码不符 | 能力声明的 `Reason` 写明"探测已验证 / 安装未实现"与"envRefs 未验证→阶段 1 拒绝"；补 TOML 受管键回退与 OpenCode 回退测试 | `TestMergeManagedRestoresOnlyManagedTOMLKeys`、`TestManagedFilesAndMergeManagedRollback` |
+| 7 | 两处空断言 | 假服务端记录**到达顺序**并断言绑定观测先于终态；`$schema` 断言改为"既有值被保留 + 新建文件补 schema"；空投影断言加反向对照 | `TestRunStreamReportsVerifyEvidence`（顺序颠倒即失败）、`TestApplyOnMissingFileAddsSchema`、`TestDesiredScopedProjection` |
+| 8 | 能力声明未上行控制面（矩阵要求经能力协商暴露） | `Hello.capabilities`（`AdapterCapability`）+ 落 `Machine.status.adapterCapabilities`（长度设上限，控制面只读） | `TestHelloCapabilityDeclarationsSurfacedToControlPlane` |
+
+顺手项（非阻塞）一并处理：`state.proto`/`observed.go` 的"本片占位"旧注释、`docs/README.md` 索引、护栏测试覆盖 `cmd/agent-fleet-server`、`diffMapStep`/`sortedKeys` 下沉 `kit`（三个家族共用一份）、删除恒等函数 `kit.SkillDirName`。
+
+仍未做（不阻塞，留待后续切片，避免夹带）：陈旧执行权锁恢复入口（`Recover()` 无生产调用者）、`Superseded(Skipped)` 口径、`versionArgs`/`goos`/`probeVersionQuiet` 的进一步下沉。
+
+ZCode：采纳复核意见，按 **(a) 只认官方运行时来源、等契约可确认再接入** 维持现状（未注册 + 阶段 1 显式失败）；(b)/(c) 属用户已决范围，随 [KM-27](mention://issue/01a0cd91-1937-73c7-b98c-fa7cc2082382) 决策页处理，本片不改文档、不改范围。

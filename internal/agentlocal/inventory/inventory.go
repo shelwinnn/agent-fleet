@@ -52,6 +52,9 @@ func (c *Collector) NextSeq() (int64, error) {
 	return c.nextSeq()
 }
 
+// AdapterRegistry 暴露适配器注册表（供 agentd 上报能力声明；nil 安全）。
+func (c *Collector) AdapterRegistry() *adapter.Registry { return c.Registry }
+
 // AdapterFamilies 返回已注册家族（Hello 的能力协商字段，FR-13.4）。
 func (c *Collector) AdapterFamilies() []string {
 	if c.Registry == nil {

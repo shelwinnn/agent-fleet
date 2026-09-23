@@ -123,7 +123,8 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 			MachineId:       cfg.MachineID,
 			AgentdVersion:   agentdVersion,
 			ProtocolVersion: "1",
-			Adapters:        collector.AdapterFamilies(), // 能力协商：已注册家族（FR-13.4）
+			Adapters:        collector.AdapterFamilies(),                  // 能力协商：已注册家族（FR-13.4）
+			Capabilities:    capabilityDecls(collector.AdapterRegistry()), // 能力声明（矩阵）
 		},
 	}}); err != nil {
 		return err
@@ -329,6 +330,31 @@ func sendInventory(ctx context.Context, stream grpc.BidiStreamingClient[fleetv1.
 	log.Info("observed state reported", "inventory_seq", obs.InventorySeq, "full", obs.Full,
 		"canonicalization_version", obs.CanonicalizationVersion)
 	return nil
+}
+
+// capabilityDecls 汇总已注册家族的逐能力声明（矩阵「统一适配契约」：
+// 支持/不支持/未验证都必须上行，控制面只读取声明）。
+func capabilityDecls(reg *adapter.Registry) []*fleetv1.AdapterCapability {
+	if reg == nil {
+		return nil
+	}
+	var out []*fleetv1.AdapterCapability
+	for _, family := range reg.Families() {
+		ad, err := reg.Get(family)
+		if err != nil {
+			continue
+		}
+		for _, d := range ad.Capabilities() {
+			out = append(out, &fleetv1.AdapterCapability{
+				Family:           family,
+				Capability:       string(d.Capability),
+				State:            string(d.State),
+				VerifiedVersions: d.VerifiedVersions,
+				Reason:           d.Reason,
+			})
+		}
+	}
+	return out
 }
 
 // observedToProto 映射观测状态（含 ADR-1 双侧投影摘要、绑定 operationId 与

@@ -50,6 +50,36 @@ func (c *Controller) OnConnected(ctx context.Context, machineName, agentdVersion
 	})
 }
 
+// SetAdapterCapabilities 记录节点上报的家族能力声明（矩阵「统一适配契约」：
+// 能力声明经 Greeting 阶段的能力协商暴露给控制面）。声明只作展示与协商依据，
+// 不参与调度；长度设上限，避免节点用超大声明撑爆 Machine status。
+func (c *Controller) SetAdapterCapabilities(ctx context.Context, machineName string, caps []domain.AdapterCapability) error {
+	const maxDecls = 64
+	if len(caps) > maxDecls {
+		caps = caps[:maxDecls]
+	}
+	bounded := make([]domain.AdapterCapability, 0, len(caps))
+	for _, decl := range caps {
+		decl.Family = truncateRunes(decl.Family, 64)
+		decl.Capability = truncateRunes(decl.Capability, 64)
+		decl.State = truncateRunes(decl.State, 32)
+		decl.VerifiedVersions = truncateRunes(decl.VerifiedVersions, 128)
+		decl.Reason = truncateRunes(decl.Reason, 256)
+		bounded = append(bounded, decl)
+	}
+	return c.update(ctx, machineName, "adapter_capabilities", func(st *domain.MachineStatus) {
+		st.AdapterCapabilities = bounded
+	})
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 // OnDisconnected 在 Connect 流断开时调用（§4.2 条件表：
 // "Connect 流断开 → AgentConnected=False，原因 AgentDisconnected"）。
 func (c *Controller) OnDisconnected(ctx context.Context, machineName string) error {
@@ -84,8 +114,10 @@ func (c *Controller) OnInventory(ctx context.Context, rec domain.ObservedStateRe
 		return err
 	}
 	if !accepted {
-		c.log.Warn("stale observed state dropped", "machine_id", rec.Machine,
-			"seq", rec.InventorySeq, "reason_code", "StaleObservation")
+		// 主行（机器条件）不被旧报文改写；携带 operationId 的绑定观测仍按
+		// 自己的高水位落 operation_observations（门禁证据不受影响）。
+		c.log.Warn("stale observed state dropped from machine status", "machine_id", rec.Machine,
+			"seq", rec.InventorySeq, "operation_id", rec.OperationID, "reason_code", "StaleObservation")
 		return nil
 	}
 	now := rec.RecordedAt

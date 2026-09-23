@@ -170,10 +170,11 @@ func (s *enrollmentStore) Store(ctx context.Context, rec *domain.ObservedStateRe
 		return false, fmt.Errorf("sqlite: store observed state for %q: %w", rec.Machine, err)
 	}
 	n, _ := res.RowsAffected()
-	if n == 0 {
-		return false, nil // 落后报文：主行与绑定行都不改写
-	}
-	// 绑定观测：每 (machine, operation) 保留最近一份，带 seq 高水位判定；
+	// 绑定观测使用**它自己的** (machine_id, operation_id) 高水位，不受主行判定
+	// 影响：绑定观测的 seq 由流水线阶段 11 分配，而周期 inventory 与流水线共用
+	// 同一计数器、又在同一条流上发送——只要周期 tick 抢在绑定观测上行之前取到
+	// 更大的号，沿用主行判定就会让绑定行**永远写不进去**，门禁条件 2 对该操作
+	// 永久失败（这正是本片要消灭的"门禁在生产必然失败"）。
 	// 周期报文（OperationID == ""）不写本表，因此永不覆盖既有绑定。
 	if rec.OperationID != "" {
 		if _, err := tx.ExecContext(ctx,
@@ -195,7 +196,7 @@ func (s *enrollmentStore) Store(ctx context.Context, rec *domain.ObservedStateRe
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("sqlite: commit observed state for %q: %w", rec.Machine, err)
 	}
-	return true, nil
+	return n > 0, nil
 }
 
 // LatestBound 取某操作最近一份绑定观测（§4.4 门禁条件 2 的唯一证据来源）。

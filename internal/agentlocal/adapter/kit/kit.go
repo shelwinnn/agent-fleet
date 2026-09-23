@@ -28,6 +28,9 @@ const (
 // AtomicWrite 落实 §5.5/§16.1 的原子写：临时文件 + fsync + rename + 目录 fsync。
 // 尽量保留原权限：目标已存在时沿用其权限位。
 func AtomicWrite(path string, data []byte, perm os.FileMode) error {
+	// 写穿软链（如 ~/.codex/AGENTS.md → 用户全局规则文件）：rename 到软链路径
+	// 会把软链换成普通文件，静默破坏用户的所有权结构（护栏 #3）。
+	path = resolveWritePath(path)
 	if info, err := os.Stat(path); err == nil {
 		perm = info.Mode().Perm()
 	}
@@ -63,6 +66,27 @@ func AtomicWrite(path string, data []byte, perm os.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// resolveWritePath 解析路径末端的软链（含多级），返回真正应写入的目标。
+// 软链悬空（目标不存在）时返回其目标路径：写入会创建目标，链接本身保持有效。
+func resolveWritePath(path string) string {
+	cur := path
+	for i := 0; i < 32; i++ {
+		info, err := os.Lstat(cur)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			return cur
+		}
+		target, err := os.Readlink(cur)
+		if err != nil {
+			return cur
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cur), target)
+		}
+		cur = filepath.Clean(target)
+	}
+	return cur
 }
 
 // ProjectionDigest 对归一化受管投影计算摘要（FR-8.2：绝不对整份文件哈希）。
@@ -162,16 +186,13 @@ func RulesContent(rules map[string]adapter.RulesEntry) string {
 // SkillCacheDir 是节点规范缓存目录（FR-6.3）：<home>/.local/share/agent-fleet/skills/<name>/<digest>。
 // 约定与 reconciler 的备份目录一致（同以 home 为根，护栏 #12）。
 func SkillCacheDir(home, name, digest string) string {
-	return filepath.Join(home, ".local", "share", "agent-fleet", "skills", SkillDirName(name), DigestDirName(digest))
+	return filepath.Join(home, ".local", "share", "agent-fleet", "skills", name, DigestDirName(digest))
 }
 
-// SkillDirName 把 digest 里的 "sha256:" 前缀转成可做目录名的形式。
+// DigestDirName 把 digest 里的 "sha256:" 前缀转成可做目录名的形式。
 func DigestDirName(digest string) string {
 	return strings.ReplaceAll(digest, ":", "-")
 }
-
-// SkillDirName 做同一件事（名字保留给 skill 名称的清洗）。
-func SkillDirName(name string) string { return name }
 
 // ReadSkillDigest 读软链目标中的 digest（copy 模式读内容摘要文件）。
 // 返回 "" 表示该 Skill 未被本适配器物化（漂移信号，FR-6.3）。
@@ -313,3 +334,31 @@ func ManagedBlockIn(text string) (string, bool, error) {
 	}
 	return strings.Trim(text[begin+len(BlockBegin):end], "\n"), true, nil
 }
+
+// DiffMapStep 比较期望侧与观测侧的同名映射（仅比较期望点名的键），产出
+// plan 变更项。三个家族适配器共用同一实现，避免各写一份导致语义漂移。
+func DiffMapStep(family, step, keyPrefix string, desiredRaw, observedRaw any) []adapter.Change {
+	desired, _ := desiredRaw.(map[string]any)
+	if len(desired) == 0 {
+		return nil
+	}
+	observed, _ := observedRaw.(map[string]any)
+	names := make([]string, 0, len(desired))
+	for n := range desired {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []adapter.Change
+	for _, n := range names {
+		if ValuesEqual(desired[n], observed[n]) {
+			continue
+		}
+		out = append(out, adapter.Change{Family: family, Step: step, Key: keyPrefix + n,
+			From: observed[n], To: desired[n]})
+	}
+	return out
+}
+
+// ValuesEqual 比较两个投影取值（投影值都是 JSON 可表达类型，用 %#v 比较可
+// 同时区分 nil 与空切片/空映射）。
+func ValuesEqual(a, b any) bool { return fmt.Sprintf("%#v", a) == fmt.Sprintf("%#v", b) }

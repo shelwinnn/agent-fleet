@@ -322,3 +322,80 @@ func TestOperationObservationBindingIsPreservedAcrossPeriodicReports(t *testing.
 		t.Fatalf("missing binding: want ErrNotFound, got %v", err)
 	}
 }
+
+// 回归（核查缺陷 4）：绑定观测必须用**自己的** (machine, operation) 高水位，
+// 不受主行判定影响。真实交错：周期 tick 在流水线阶段 11 取号之后、绑定观测上行
+// 之前抢到更大的 seq（两者共用同一计数器、同一发送主循环），此时主行拒绝旧 seq，
+// 但绑定证据必须落库，否则门禁条件 2 对该操作永久失败。
+func TestBoundObservationUsesItsOwnHighWaterMark(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	machines := NewMachineStore(db)
+	obs := NewObservedStateStore(db)
+	if err := machines.Create(ctx, &domain.Machine{Metadata: domain.ObjectMeta{Name: "m1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 周期报文先到（seq 20）：主行高水位 = 20。
+	if accepted, err := obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 20,
+		Payload: []byte(`{"inventorySeq":20}`), RecordedAt: time.Now().UTC(),
+	}); err != nil || !accepted {
+		t.Fatalf("periodic store: accepted=%v err=%v", accepted, err)
+	}
+
+	// 绑定观测随后到（seq 15 < 20）：主行不推进（机器条件不被旧报文改写），
+	// 但绑定行必须写入。
+	accepted, err := obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 15, OperationID: "op-1",
+		Payload:    []byte(`{"inventorySeq":15,"operationId":"op-1","adapterHealth":"passed"}`),
+		RecordedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted {
+		t.Fatal("main row must not regress to an older seq (FR-8.7)")
+	}
+	if latest, err := obs.Latest(ctx, "m1"); err != nil || latest.InventorySeq != 20 {
+		t.Fatalf("machine status row must stay at seq 20: %+v err=%v", latest, err)
+	}
+	bound, err := obs.LatestBound(ctx, "m1", "op-1")
+	if err != nil {
+		t.Fatalf("bound observation must be recorded despite the stale main-row seq: %v", err)
+	}
+	if bound.InventorySeq != 15 || !strings.Contains(string(bound.Payload), "passed") {
+		t.Fatalf("bound record = %+v", bound)
+	}
+
+	// 等值 seq 替换边界：同一操作、同 seq 的重投必须能替换（幂等重发），
+	// 更小的 seq 必须被拒绝。
+	if _, err := obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 15, OperationID: "op-1",
+		Payload:    []byte(`{"inventorySeq":15,"operationId":"op-1","adapterHealth":"failed"}`),
+		RecordedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustBound(t, obs, "m1", "op-1"); !strings.Contains(string(got.Payload), "failed") {
+		t.Fatalf("equal-seq redelivery must replace the bound row: %+v", got)
+	}
+	if _, err := obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 14, OperationID: "op-1",
+		Payload: []byte(`{"inventorySeq":14}`), RecordedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustBound(t, obs, "m1", "op-1"); got.InventorySeq != 15 {
+		t.Fatalf("stale bound seq must not rewrite the row: %+v", got)
+	}
+}
+
+func mustBound(t *testing.T, obs domain.ObservedStateRepository, machine, opID string) *domain.ObservedStateRecord {
+	t.Helper()
+	rec, err := obs.LatestBound(context.Background(), machine, opID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
