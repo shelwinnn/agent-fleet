@@ -19,6 +19,11 @@ import (
 type Config struct {
 	// AdminToken 非空时要求 /api/v1 全部请求携带 Authorization: Bearer <token>（§29.14）。
 	AdminToken string
+	// EnrollTokens 签发一次性 enrollment token（KM-22）；nil 时端点返回 501。
+	EnrollTokens EnrollTokenIssuer
+	// OnMachineDelete 在机器删除成功后调用（KM-22：退役该机证书，§4.6）。
+	// 失败只记日志，不影响 204——"删除即拒绝"由 Connect 的机器存在性检查兜底。
+	OnMachineDelete func(ctx context.Context, name string) error
 }
 
 type Server struct {
@@ -48,9 +53,11 @@ func (s *Server) Handler() http.Handler {
 		resource: "machines",
 		repo:     s.machines,
 		validate: func(m *domain.Machine) error { return m.Validate() },
+		onDelete: s.cfg.OnMachineDelete,
 	}
 	mux.Handle("/api/v1/machines", s.auth(machines.collection()))
 	mux.Handle("/api/v1/machines/{name}", s.auth(machines.item()))
+	mux.Handle("POST /api/v1/machines/{name}/enroll-token", s.auth(http.HandlerFunc(s.handleEnrollToken)))
 
 	profiles := &resourceAPI[domain.AgentProfile, *domain.AgentProfile]{
 		resource: "profiles",
@@ -65,6 +72,13 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/api/v1/"+name, s.auth(notImplemented(name)))
 		mux.Handle("/api/v1/"+name+"/{name}", s.auth(notImplemented(name)))
 	}
+
+	// catch-all：未匹配路径统一走 §6.4 错误体（KM-21 核查发现 #3：
+	// 不再回落 net/http 纯文本 "404 page not found"）。
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, domain.ReasonNotFound,
+			"no route for "+r.Method+" "+r.URL.Path, nil)
+	})
 
 	return s.logRequests(mux)
 }

@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -23,6 +25,8 @@ type resourceAPI[T any, PT resourceObject[T]] struct {
 	resource string
 	repo     domain.Repository[PT]
 	validate func(PT) error
+	// onDelete 在资源删除成功后调用（machines：退役证书，KM-22）。
+	onDelete func(ctx context.Context, name string) error
 }
 
 func (h *resourceAPI[T, PT]) collection() http.HandlerFunc {
@@ -56,6 +60,13 @@ func (h *resourceAPI[T, PT]) item() http.HandlerFunc {
 			if err := h.repo.Delete(r.Context(), name); err != nil {
 				writeStoreError(w, err)
 				return
+			}
+			if h.onDelete != nil {
+				if err := h.onDelete(r.Context(), name); err != nil {
+					// 资源已删除；钩子失败只记录（如证书退役标记），
+					// 后续 Connect 由"机器不存在"检查兜底拒绝。
+					slog.Error("post-delete hook failed", "resource", h.resource, "name", name, "err", err)
+				}
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
