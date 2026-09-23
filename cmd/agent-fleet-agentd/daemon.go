@@ -126,15 +126,7 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 	for _, pr := range exec.PendingResults() {
 		res := pr.Result
 		if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
-			OperationResult: &fleetv1.OperationResult{
-				OperationId:      pr.OperationID,
-				Phase:            res.Phase,
-				Reason:           res.Reason,
-				Message:          res.Message,
-				TerminalModifier: res.TerminalModifier,
-				StartedAtUnix:    res.StartedAt.Unix(),
-				FinishedAtUnix:   res.FinishedAt.Unix(),
-			},
+			OperationResult: resultToProto(pr.OperationID, &res),
 		}}); err != nil {
 			return err
 		}
@@ -236,16 +228,7 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 				// FR-13.8 重复派发幂等：执行中/已入队忽略（outbox 命中则重发终态）。
 				if replayed := exec.Enqueue(ev.execute); replayed != nil {
 					if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
-						OperationResult: &fleetv1.OperationResult{
-							OperationId:       ev.execute.GetOperationId(),
-							Phase:             replayed.Phase,
-							Reason:            replayed.Reason,
-							Message:           replayed.Message,
-							TerminalModifier:  replayed.TerminalModifier,
-							DesiredGeneration: ev.execute.GetDesiredGeneration(),
-							StartedAtUnix:     replayed.StartedAt.Unix(),
-							FinishedAtUnix:    replayed.FinishedAt.Unix(),
-						},
+						OperationResult: resultToProto(ev.execute.GetOperationId(), replayed),
 					}}); err != nil {
 						return err
 					}
@@ -255,15 +238,7 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 				// FR-13.9：取消在阶段边界生效；仅入队未开始的直接终结。
 				if res := exec.Cancel(ev.cancel); res != nil {
 					if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
-						OperationResult: &fleetv1.OperationResult{
-							OperationId:      ev.cancel,
-							Phase:            res.Phase,
-							Reason:           res.Reason,
-							Message:          res.Message,
-							TerminalModifier: res.TerminalModifier,
-							StartedAtUnix:    res.StartedAt.Unix(),
-							FinishedAtUnix:   res.FinishedAt.Unix(),
-						},
+						OperationResult: resultToProto(ev.cancel, res),
 					}}); err != nil {
 						return err
 					}

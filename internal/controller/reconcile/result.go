@@ -81,6 +81,13 @@ func (c *Controller) OnProgress(ctx context.Context, machine, opID, step, phase,
 //   - 恢复冲突 → Degraded=True（§14.2）；
 //   - 成功且对当前代、证据齐备 → 按摘要相等写 Drifted=False + Reconciled=True。
 func (c *Controller) OnResult(ctx context.Context, machine string, res OperationResultMsg) (ResultOutcome, error) {
+	// 上报相位只允许两个终态（§6.4）。畸形相位（""/"foo"/未决相位）若直接写库，
+	// 该行会既不在终态集合、也不在未决集合：部分唯一索引不再命中（机器级互斥被
+	// 静默释放，而节点可能仍在写），harvest 又因"非终态"永远不收割该目标。
+	if res.Phase != domain.OperationPhaseSucceeded && res.Phase != domain.OperationPhaseFailed {
+		return ResultOutcome{}, fmt.Errorf("%w: result phase %q is not a terminal phase (Succeeded|Failed)",
+			domain.ErrInvalid, res.Phase)
+	}
 	op, err := c.ops.Get(ctx, res.OperationID)
 	if err != nil {
 		return ResultOutcome{}, err

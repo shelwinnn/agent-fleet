@@ -92,6 +92,14 @@ func EvaluateGate(in GateInput) GateResult {
 	if verify == nil || verify.DesiredProjectionDigest == "" {
 		return GateResult{FailedCondition: 3, Reason: "operation carries no verify evidence"}
 	}
+	// §7.1/§4.4 条件 3 的**权威判据**：期望侧受管投影摘要 == 观测侧受管投影摘要。
+	// 只交叉核对"操作证据 vs 观测"两侧的一致性还不够——两边都报同一个漂移摘要
+	// 时交叉核对会通过，但机器实际处于 drift（这正是 §7.1 要求先判摘要相等的原因）。
+	if verify.DesiredProjectionDigest != verify.ObservedProjectionDigest {
+		return GateResult{FailedCondition: 3, Reason: fmt.Sprintf(
+			"observed managed projection differs from desired (%s vs %s): drift, gate requires equality",
+			short(verify.ObservedProjectionDigest), short(verify.DesiredProjectionDigest))}
+	}
 	if verify.DesiredProjectionDigest != in.PostApply.DesiredProjectionDigest {
 		return GateResult{FailedCondition: 3, Reason: fmt.Sprintf(
 			"desired projection digest mismatch between operation evidence and observation (%s vs %s)",

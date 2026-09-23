@@ -659,7 +659,10 @@ func TestMachineRollbackMaterializesNewGeneration(t *testing.T) {
 	}
 }
 
-// 恢复冲突 → Degraded=True（§14.2）。
+// 恢复冲突 → Degraded=True（§14.2）。服务端只依据节点上报的 reason_code 判定，
+// 真实的 RestoreConflict 由流水线产生（见
+// internal/reconciler TestPipelineRestorePaths/
+// unparseable_file_fails_explicitly_with_RestoreConflict）。
 func TestRestoreConflictSetsDegraded(t *testing.T) {
 	f := newFixture(t)
 	f.seedMachine("ws-1", profileSpecV1)
@@ -675,4 +678,64 @@ func TestRestoreConflictSetsDegraded(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.mustCondition(f.status("ws-1"), domain.ConditionDegraded, domain.ConditionTrue, domain.ReasonRestoreConflict)
+}
+
+// 零变更操作在健康检查阶段失败（节点没有备份可恢复，也不会报 RestoreConflict）
+// 时，**不得**写 Degraded=True：那会把一台未被改动的机器呈现为降级（§14.2 只对
+// "恢复也失败"降级；节点侧对应
+// internal/reconciler TestPipelineEmptyPlanFailurePathsHaveNoBackupToRestore）。
+func TestHealthFailureWithoutChangesDoesNotDegrade(t *testing.T) {
+	f := newFixture(t)
+	f.seedMachine("ws-1", profileSpecV1)
+	op, err := f.rec.Reconcile(f.ctx, "ws-1", ReconcileRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.rec.OnStarted(f.ctx, "ws-1", op.Metadata.Name) //nolint:errcheck
+	if _, err := f.rec.OnResult(f.ctx, "ws-1", OperationResultMsg{
+		OperationID: op.Metadata.Name, Phase: domain.OperationPhaseFailed,
+		Reason: domain.ReasonHealthCheckFailed,
+		Message: "health check failed: injected; no changes were applied, " +
+			"nothing to restore",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st := f.status("ws-1")
+	if c, ok := st.GetCondition(domain.ConditionDegraded); ok && c.Status == domain.ConditionTrue {
+		t.Fatalf("health failure on an unchanged machine must not set Degraded: %+v", c)
+	}
+	// 互斥正常释放（Failed 是终态）。
+	if _, err := f.rec.Reconcile(f.ctx, "ws-1", ReconcileRequest{}); err != nil {
+		t.Fatalf("mutex not released after health failure: %v", err)
+	}
+}
+
+// 畸形上报相位（""/"foo"/未决相位）必须被拒绝且不落库：若直接写入，该操作行既
+// 不在终态集合也不在未决集合——部分唯一索引不再命中（机器级互斥被静默释放，
+// 而节点可能仍在写），harvest 又因"非终态"永远不收割该目标（§4.3/§6.4）。
+func TestOnResultRejectsNonTerminalPhase(t *testing.T) {
+	f := newFixture(t)
+	f.seedMachine("ws-1", profileSpecV1)
+	op, err := f.rec.Reconcile(f.ctx, "ws-1", ReconcileRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.rec.OnStarted(f.ctx, "ws-1", op.Metadata.Name) //nolint:errcheck
+	for _, bad := range []string{"", "foo", domain.OperationPhaseRunning, domain.OperationPhaseUnknown} {
+		if _, err := f.rec.OnResult(f.ctx, "ws-1", OperationResultMsg{
+			OperationID: op.Metadata.Name, Phase: bad,
+		}); err == nil {
+			t.Fatalf("phase %q accepted by OnResult", bad)
+		}
+	}
+	// 相位未被改写：操作仍未决，互斥仍持有。
+	if got := f.mustOp(op.Metadata.Name).Status.Phase; got != domain.OperationPhaseRunning {
+		t.Fatalf("stored phase = %s, want Running (unchanged)", got)
+	}
+	if _, err := f.rec.Reconcile(f.ctx, "ws-1", ReconcileRequest{}); !errors.Is(err, domain.ErrMachineBusy) {
+		t.Fatalf("mutex silently released by malformed phase: err = %v", err)
+	}
+	if ref := f.rec.UnresolvedRef(f.ctx, "ws-1"); ref == nil || ref.ID != op.Metadata.Name {
+		t.Fatalf("unresolved ref lost: %+v", ref)
+	}
 }

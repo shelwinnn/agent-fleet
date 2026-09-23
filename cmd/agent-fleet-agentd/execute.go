@@ -17,6 +17,7 @@ import (
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
 	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"github.com/shelwinnn/agent-fleet/internal/reconciler"
 )
 
@@ -119,8 +120,9 @@ func (x *executor) Cancel(operationID string) *reconciler.Result {
 			now := time.Now().UTC()
 			return &reconciler.Result{
 				Phase: "Failed", Reason: "Cancelled", TerminalModifier: "Cancelled",
-				Message:   "cancelled before start (queued)",
-				StartedAt: now, FinishedAt: now,
+				Generation: q.Generation,
+				Message:    "cancelled before start (queued)",
+				StartedAt:  now, FinishedAt: now,
 			}
 		}
 	}
@@ -163,7 +165,7 @@ func (x *executor) RunWorker(ctx context.Context, msgs chan<- workerMsg) {
 		x.current = nil
 		x.mu.Unlock()
 		select {
-		case msgs <- workerMsg{result: resultToProto(q, res)}:
+		case msgs <- workerMsg{result: resultToProto(q.OperationID, res)}:
 		case <-ctx.Done():
 			return
 		}
@@ -189,7 +191,7 @@ func (x *executor) runOne(ctx context.Context, q queuedOp, cancelCh chan struct{
 			x.log.Error("stale execution lock; refusing silent takeover",
 				"operation_id", q.OperationID, "err", err.Error())
 			res := reconciler.Result{
-				Phase: "Failed", Reason: "StaleExecutionLock",
+				Phase: "Failed", Reason: "StaleExecutionLock", Generation: q.Generation,
 				Message:   "stale execution lock requires explicit recovery (" + err.Error() + ")",
 				StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 			}
@@ -197,7 +199,7 @@ func (x *executor) runOne(ctx context.Context, q queuedOp, cancelCh chan struct{
 			return &res
 		default:
 			res := reconciler.Result{
-				Phase: "Failed", Reason: "ConfigWriteFailed",
+				Phase: "Failed", Reason: "ConfigWriteFailed", Generation: q.Generation,
 				Message:   fmt.Sprintf("acquire execution lock failed: %v", err),
 				StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 			}
@@ -362,16 +364,34 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-// resultToProto 把终态结果转换为上行消息。
-func resultToProto(q queuedOp, res *reconciler.Result) *fleetv1.OperationResult {
+// resultToProto 把终态结果转换为上行消息。verify 证据必须随结果发出（§4.4 门禁
+// 四条件与 FR-15.5 审计证据都以它为准；节点算了不发 = 服务端永远没有证据，
+// Reconciled 也就永远不会置 True）。Generation 使重发结果与首次上报等价。
+func resultToProto(operationID string, res *reconciler.Result) *fleetv1.OperationResult {
 	return &fleetv1.OperationResult{
-		OperationId:       q.OperationID,
+		OperationId:       operationID,
 		Phase:             res.Phase,
 		Reason:            res.Reason,
 		Message:           res.Message,
-		DesiredGeneration: q.Generation,
+		DesiredGeneration: res.Generation,
 		TerminalModifier:  res.TerminalModifier,
 		StartedAtUnix:     res.StartedAt.Unix(),
 		FinishedAtUnix:    res.FinishedAt.Unix(),
+		Verify:            verifyToProto(res.Verify),
+	}
+}
+
+// verifyToProto 映射门禁与审计证据（两侧受管投影摘要 + 规范化版本 + 节点本地
+// 采集序 + 适配器健康；§6.4/FR-15.5）。
+func verifyToProto(v *domain.VerifyEvidence) *fleetv1.VerifyEvidence {
+	if v == nil {
+		return nil
+	}
+	return &fleetv1.VerifyEvidence{
+		DesiredProjectionDigest:  v.DesiredProjectionDigest,
+		ObservedProjectionDigest: v.ObservedProjectionDigest,
+		CanonicalizationVersion:  v.CanonicalizationVersion,
+		InventorySeq:             v.InventorySeq,
+		AdapterHealth:            v.AdapterHealth,
 	}
 }

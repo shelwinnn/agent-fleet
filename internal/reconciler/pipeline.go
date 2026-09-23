@@ -64,7 +64,10 @@ type Execution struct {
 // Result 是流水线终态（上报为 OperationResult）。OperationID 由调用方回填
 // （outbox 条目自证身份，FR-13.7 重发时携带）。
 type Result struct {
-	OperationID      string
+	OperationID string
+	// Generation 是本操作针对的期望代（随结果上行；outbox 重发同样携带，
+	// 使重发结果与首次上报等价）。
+	Generation       int64
 	Phase            string // Succeeded | Failed
 	Reason           string
 	Message          string
@@ -119,7 +122,7 @@ func New(opts Options) *Executor {
 // Run 执行一次流水线到终态。任何失败都已含恢复尝试的结果（§14.2：
 // 停止后续 → 恢复 → 再 inventory → 同时上报原始失败与恢复结果）。
 func (e *Executor) Run(ctx context.Context, home string, ex Execution) Result {
-	res := Result{StartedAt: e.opts.Now().UTC(), ReadOnly: ex.ReadOnly}
+	res := Result{StartedAt: e.opts.Now().UTC(), ReadOnly: ex.ReadOnly, Generation: ex.Generation}
 	cancelled := func() bool { return ex.Cancelled != nil && ex.Cancelled() }
 	progress := func(step, phase, msg string) {
 		if ex.Progress != nil {
@@ -208,9 +211,20 @@ func (e *Executor) Run(ctx context.Context, home string, ex Execution) Result {
 	}
 
 	backupDir := filepath.Join(home, ".local", "share", "agent-fleet", "backups", ex.OperationID)
+	// backedUp 标记"阶段 4 真的做过备份"。空计划（changes 为空）没有任何写入，
+	// 也就没有备份：此时 5–10 的取消/健康失败不得去读不存在的 manifest——那会
+	// 把一台未被改动的机器误报成 Failed(RestoreConflict)，服务端还会据此置
+	// Degraded=True（§14.2 只对"恢复也失败"置降级）。
+	backedUp := false
 	// restore 执行备份还原并组装终态：modifier 为 Cancelled 时终态修饰置位
 	//（FR-13.9），否则为普通失败原因。
 	restore := func(reason, modifier, origMsg string) Result {
+		if !backedUp {
+			// 零变更：跳过恢复，按原原因终结（修饰符照常保留）。
+			out := fail(reason, origMsg+"; no changes were applied, nothing to restore")
+			out.TerminalModifier = modifier
+			return out
+		}
 		// —— 失败/取消恢复：备份还原（含外部编辑冲突检测，§5.3 契约）——
 		progress("restore", "Running", "restoring from backup after "+reason)
 		msg, restoreErr := e.restoreFromBackup(home, backupDir, progress)
@@ -238,6 +252,7 @@ func (e *Executor) Run(ctx context.Context, home string, ex Execution) Result {
 		if err := e.backupManagedFiles(home, backupDir, families); err != nil {
 			return fail(domain.ReasonConfigWriteFailed, fmt.Sprintf("backup failed: %v", err))
 		}
+		backedUp = true
 	}
 	progress(StepBackup, "Succeeded", backupDir)
 

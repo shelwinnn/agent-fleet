@@ -419,6 +419,14 @@ func TestGateCausalBinding(t *testing.T) {
 	if r := EvaluateGate(in(op(""), obs("op-1", digest, "v2"))); r.Passed || r.FailedCondition != 3 {
 		t.Fatalf("version mismatch accepted: %+v", r)
 	}
+	// 条件 3 的权威判据（§7.1）：操作证据与观测**互相一致**（交叉核对全过），
+	// 但两侧摘要本身 desired != observed —— 那就是 drift，必须拒绝。只做交叉
+	// 核对会把一台实际漂移的机器放行。
+	driftEvidence := op("")
+	driftEvidence.Status.Verify.ObservedProjectionDigest = "sha256:drifted"
+	if r := EvaluateGate(in(driftEvidence, obs("op-1", "sha256:drifted", "v1"))); r.Passed || r.FailedCondition != 3 {
+		t.Fatalf("drift (desired != observed) accepted by gate: %+v", r)
+	}
 	// 条件 4：健康失败不通过。
 	unhealthy := op("")
 	unhealthy.Status.Verify.AdapterHealth = "failed"

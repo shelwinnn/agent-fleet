@@ -113,7 +113,8 @@ func TestDispatchExecuteOperationAndResultClosedLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 终态：操作 Succeeded、互斥释放、条件按当前代置位。
+	// 终态：操作 Succeeded、verify 证据落库、互斥释放、条件按当前代置位。
+	var terminal *domain.Operation
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		got, err := h.ops.Get(ctx, op.Metadata.Name)
@@ -121,12 +122,24 @@ func TestDispatchExecuteOperationAndResultClosedLoop(t *testing.T) {
 			if got.Status.Phase != domain.OperationPhaseSucceeded {
 				t.Fatalf("terminal = %s(%s)", got.Status.Phase, got.Status.TerminalModifier)
 			}
+			terminal = got
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("operation not terminal in time")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	// FR-15.5/§4.4：随结果上报的 verify 证据必须落库。缺了它，Reconciled 永远
+	// 不会置 True、门禁也没有证据可评估（本用例扮演节点；节点侧把 evidence 放进
+	// proto 的转换由 cmd/agent-fleet-agentd 的用例覆盖）。
+	if terminal.Status.Verify == nil {
+		t.Fatal("verify evidence not persisted on the operation (FR-15.5)")
+	}
+	if terminal.Status.Verify.InventorySeq != 7 ||
+		terminal.Status.Verify.DesiredProjectionDigest != "sha256:loop" ||
+		terminal.Status.Verify.AdapterHealth != domain.AdapterHealthPassed {
+		t.Fatalf("verify evidence mismatch: %+v", terminal.Status.Verify)
 	}
 	deadline = time.Now().Add(3 * time.Second)
 	for {
