@@ -6,13 +6,14 @@ import (
 	"time"
 )
 
-// MachineStatus 是 machines.status JSON 的类型化视图（架构 v1.1.2 §6.1/§6.2，
-// 本片维护的字段子集）。status 由 Machine 控制器独占写入；REST 更新不改写。
+// MachineStatus 是 machines.status JSON 的类型化视图（架构 v1.1.2 §6.1/§6.2）。
+// 条件写入纪律：每个 condition 恰有一个置位方（§6.2 归属表），REST 更新不改写。
 type MachineStatus struct {
 	Conditions []Condition `json:"conditions,omitempty"`
 
-	// agentd 通道与 inventory 观测（§6.1 Machine status 关键字段的本片子集）。
+	// agentd 通道与 inventory 观测（§6.1 Machine status 关键字段）。
 	ObservedGeneration int64      `json:"observedGeneration,omitempty"`
+	DesiredGeneration  int64      `json:"desiredGeneration,omitempty"`
 	OS                 string     `json:"os,omitempty"`
 	Arch               string     `json:"arch,omitempty"`
 	Hostname           string     `json:"hostname,omitempty"`
@@ -22,6 +23,25 @@ type MachineStatus struct {
 	LastHeartbeatAt    *time.Time `json:"lastHeartbeatAt,omitempty"`
 	LastInventoryAt    *time.Time `json:"lastInventoryAt,omitempty"`
 	InventorySeq       int64      `json:"inventorySeq,omitempty"`
+
+	// 三类摘要各司其职（FR-8.6/§7.1）：desired/observedProjectionDigest 是 drift
+	// 判据两侧（展示与诊断）；摘要比较本身由 Reconcile 控制器按观测求值。
+	// CanonicalizationVersion 是最近一次比较使用的投影规范化版本（跨版本不沿用
+	// 旧判定，§7.1 契约 2）。
+	DesiredProjectionDigest  string `json:"desiredProjectionDigest,omitempty"`
+	ObservedProjectionDigest string `json:"observedProjectionDigest,omitempty"`
+	CanonicalizationVersion  string `json:"canonicalizationVersion,omitempty"`
+
+	// UnresolvedOperation 是当前未决操作（FR-1.10/§6.1：UI 呈现原因与处置入口）。
+	UnresolvedOperation *UnresolvedOperationRef `json:"unresolvedOperation,omitempty"`
+}
+
+// UnresolvedOperationRef 指向占用机器级互斥的操作行（409 MachineBusy 的
+// diagnostics 也携带同样的引用，§8.1）。
+type UnresolvedOperationRef struct {
+	ID    string `json:"id"`
+	Phase string `json:"phase"`
+	Type  string `json:"type,omitempty"`
 }
 
 // ParseMachineStatus 解析 status JSON（空/未初始化视为零值）。

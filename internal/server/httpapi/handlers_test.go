@@ -31,7 +31,9 @@ func newFixture(t *testing.T, cfg Config) *fixture {
 	if err := db.Migrate(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	api := New(cfg, sqlite.NewMachineStore(db), sqlite.NewProfileStore(db), db.PingContext,
+	api := New(cfg, sqlite.NewMachineStore(db), sqlite.NewProfileStore(db),
+		sqlite.NewSkillStore(db), sqlite.NewProviderStore(db), sqlite.NewDeploymentStore(db),
+		sqlite.NewOperationStore(db), nil, nil, "fixture/v1", db.PingContext,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
@@ -180,14 +182,18 @@ func TestProfileCRUDAndSkeletons(t *testing.T) {
 		t.Fatalf("profile duplicate: status = %d reason = %v", code, errBody["reason"])
 	}
 
-	for _, path := range []string{
-		"/api/v1/skills", "/api/v1/skills/x",
-		"/api/v1/providers", "/api/v1/providers/x",
-		"/api/v1/deployments", "/api/v1/deployments/x",
-	} {
+	// KM-23 起五类资源 CRUD 全部可用（skills/providers/deployments 不再是骨架）：
+	// 集合端点 200（空列表），不存在的条目 404 NotFound。
+	for _, path := range []string{"/api/v1/skills", "/api/v1/providers", "/api/v1/deployments"} {
 		code, errBody := f.do(t, http.MethodGet, path, "", nil)
-		if code != http.StatusNotImplemented || errBody["reason"] != domain.ReasonNotImplemented {
-			t.Fatalf("GET %s: status = %d reason = %v, want 501 NotImplemented", path, code, errBody["reason"])
+		if code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d reason = %v, want 200 (KM-23 起资源可用)", path, code, errBody["reason"])
+		}
+	}
+	for _, path := range []string{"/api/v1/skills/x", "/api/v1/providers/x", "/api/v1/deployments/x"} {
+		code, errBody := f.do(t, http.MethodGet, path, "", nil)
+		if code != http.StatusNotFound || errBody["reason"] != domain.ReasonNotFound {
+			t.Fatalf("GET %s: status = %d reason = %v, want 404 NotFound", path, code, errBody["reason"])
 		}
 	}
 }

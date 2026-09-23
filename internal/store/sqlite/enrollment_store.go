@@ -147,16 +147,17 @@ func (s *enrollmentStore) Store(ctx context.Context, rec *domain.ObservedStateRe
 	// UPSERT 带 seq 条件：落后报文（inventory_seq < 已存高水位）不落主行、
 	// 不改写条件（FR-8.7 观测有序性）。影响行数为 0 即被拒绝。
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO observed_states (machine_id, inventory_seq, operation_id, payload, recorded_at)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO observed_states (machine_id, inventory_seq, operation_id, observed_generation, payload, recorded_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(machine_id) DO UPDATE SET
 		   inventory_seq = excluded.inventory_seq,
 		   operation_id  = excluded.operation_id,
+		   observed_generation = excluded.observed_generation,
 		   payload       = excluded.payload,
 		   recorded_at   = excluded.recorded_at
 		 WHERE excluded.inventory_seq >= observed_states.inventory_seq`,
-		rec.Machine, rec.InventorySeq, rec.OperationID, string(rec.Payload),
-		rec.RecordedAt.Format(time.RFC3339Nano))
+		rec.Machine, rec.InventorySeq, rec.OperationID, rec.ObservedGeneration,
+		string(rec.Payload), rec.RecordedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return false, fmt.Errorf("sqlite: store observed state for %q: %w", rec.Machine, err)
 	}
@@ -168,9 +169,9 @@ func (s *enrollmentStore) Latest(ctx context.Context, machine string) (*domain.O
 	var rec domain.ObservedStateRecord
 	var payload, recordedAt string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT machine_id, inventory_seq, operation_id, payload, recorded_at
+		`SELECT machine_id, inventory_seq, operation_id, observed_generation, payload, recorded_at
 		 FROM observed_states WHERE machine_id = ?`, machine).
-		Scan(&rec.Machine, &rec.InventorySeq, &rec.OperationID, &payload, &recordedAt)
+		Scan(&rec.Machine, &rec.InventorySeq, &rec.OperationID, &rec.ObservedGeneration, &payload, &recordedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: observed state for machine %q", domain.ErrNotFound, machine)
 	}

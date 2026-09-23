@@ -12,8 +12,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 )
+
+// ReconcileAPI 是 httpapi 对 Reconcile 控制器的窄依赖（§8.1 动作端点）。
+type ReconcileAPI interface {
+	Reconcile(ctx context.Context, machine string, req reconcile.ReconcileRequest) (*domain.Operation, error)
+	Cancel(ctx context.Context, machine, opID string) (*domain.Operation, error)
+	Skip(ctx context.Context, machine, opID string, req reconcile.SkipRequest) (*domain.Operation, error)
+	Rollback(ctx context.Context, machine string, targetGeneration int64) (*domain.Operation, error)
+	UnresolvedRef(ctx context.Context, machine string) *domain.UnresolvedOperationRef
+	EvaluateDrift(ctx context.Context, machine string) (*domain.DriftEvaluation, error)
+}
 
 // Config 为服务器装配参数。
 type Config struct {
@@ -27,20 +38,37 @@ type Config struct {
 }
 
 type Server struct {
-	cfg      Config
-	log      *slog.Logger
-	machines domain.MachineRepository
-	profiles domain.ProfileRepository
-	ping     func(ctx context.Context) error
+	cfg           Config
+	log           *slog.Logger
+	machines      domain.MachineRepository
+	profiles      domain.ProfileRepository
+	skills        domain.SkillRepository
+	providers     domain.ProviderRepository
+	deployments   domain.DeploymentRepository
+	operations    domain.OperationRepository
+	reconcile     ReconcileAPI
+	deploys       DeploymentAPI
+	schemaVersion string
+	ping          func(ctx context.Context) error
 }
 
 // New 装配服务器。ping 供 /readyz 探测存储可用性。
+// KM-23 起新增：skills/providers/deployments 仓储、operations 审计仓储、
+// Reconcile/Deployment 控制器与渲染 schema 版本（动作端点，§8.1）。
 func New(cfg Config, machines domain.MachineRepository, profiles domain.ProfileRepository,
+	skills domain.SkillRepository, providers domain.ProviderRepository,
+	deploys domain.DeploymentRepository, operations domain.OperationRepository,
+	reconcile ReconcileAPI, deploymentCtl DeploymentAPI, schemaVersion string,
 	ping func(ctx context.Context) error, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{cfg: cfg, log: log, machines: machines, profiles: profiles, ping: ping}
+	return &Server{
+		cfg: cfg, log: log, machines: machines, profiles: profiles,
+		skills: skills, providers: providers, deployments: deploys,
+		operations: operations, reconcile: reconcile, deploys: deploymentCtl,
+		schemaVersion: schemaVersion, ping: ping,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -59,6 +87,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/v1/machines/{name}", s.auth(machines.item()))
 	mux.Handle("POST /api/v1/machines/{name}/enroll-token", s.auth(http.HandlerFunc(s.handleEnrollToken)))
 
+	// 动作端点（§8.1；KM-23）。confirm/cancel/skip 是机器级互斥的三个合法例外。
+	mux.Handle("POST /api/v1/machines/{name}/reconcile", s.auth(http.HandlerFunc(s.handleReconcile)))
+	mux.Handle("POST /api/v1/machines/{name}/rollback", s.auth(http.HandlerFunc(s.handleRollbackMachine)))
+	mux.Handle("POST /api/v1/machines/{name}/operations/{opId}/cancel", s.auth(http.HandlerFunc(s.handleCancelOperation)))
+	mux.Handle("POST /api/v1/machines/{name}/operations/{opId}/skip", s.auth(http.HandlerFunc(s.handleSkipOperation)))
+	mux.Handle("GET /api/v1/machines/{name}/operations", s.auth(http.HandlerFunc(s.handleListOperations)))
+	mux.Handle("GET /api/v1/machines/{name}/drift", s.auth(http.HandlerFunc(s.handleDrift)))
+
 	profiles := &resourceAPI[domain.AgentProfile, *domain.AgentProfile]{
 		resource: "profiles",
 		repo:     s.profiles,
@@ -66,12 +102,33 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("/api/v1/profiles", s.auth(profiles.collection()))
 	mux.Handle("/api/v1/profiles/{name}", s.auth(profiles.item()))
+	mux.Handle("GET /api/v1/profiles/{name}/render", s.auth(http.HandlerFunc(s.handleRenderPreview)))
 
-	// 骨架路由：资源归属后续切片，未实现返回明确错误（501 NotImplemented）。
-	for _, name := range []string{"skills", "providers", "deployments"} {
-		mux.Handle("/api/v1/"+name, s.auth(notImplemented(name)))
-		mux.Handle("/api/v1/"+name+"/{name}", s.auth(notImplemented(name)))
+	skills := &resourceAPI[domain.Skill, *domain.Skill]{
+		resource: "skills",
+		repo:     s.skills,
+		validate: func(k *domain.Skill) error { return k.Validate() },
 	}
+	mux.Handle("/api/v1/skills", s.auth(skills.collection()))
+	mux.Handle("/api/v1/skills/{name}", s.auth(skills.item()))
+
+	providers := &resourceAPI[domain.ModelProvider, *domain.ModelProvider]{
+		resource: "providers",
+		repo:     s.providers,
+		validate: func(p *domain.ModelProvider) error { return p.Validate() },
+	}
+	mux.Handle("/api/v1/providers", s.auth(providers.collection()))
+	mux.Handle("/api/v1/providers/{name}", s.auth(providers.item()))
+
+	deployments := &resourceAPI[domain.Deployment, *domain.Deployment]{
+		resource: "deployments",
+		repo:     s.deployments,
+		validate: func(d *domain.Deployment) error { return d.Validate() },
+	}
+	mux.Handle("/api/v1/deployments", s.auth(deployments.collection()))
+	mux.Handle("/api/v1/deployments/{name}", s.auth(deployments.item()))
+	mux.Handle("POST /api/v1/deployments/{name}/rollback", s.auth(http.HandlerFunc(s.handleDeploymentRollback)))
+	mux.Handle("POST /api/v1/deployments/{name}/targets/{machine}/skip", s.auth(http.HandlerFunc(s.handleSkipDeploymentTarget)))
 
 	// catch-all：未匹配路径统一走 §6.4 错误体（KM-21 核查发现 #3：
 	// 不再回落 net/http 纯文本 "404 page not found"）。
