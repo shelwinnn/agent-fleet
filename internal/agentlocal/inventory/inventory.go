@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 )
@@ -26,10 +27,16 @@ type Collector struct {
 	DataDir string
 	// AgentdVersion 上报于占位 Agent 实例。
 	AgentdVersion string
+
+	// mu 串行化 Collect：inventorySeq 的推进是读-改-写（FR-8.7 单调性前提），
+	// 并发采集会导致 seq 重复或回退。
+	mu sync.Mutex
 }
 
 // Collect 产出一份全量观测（full=true）并递增持久化的 inventorySeq。
 func (c *Collector) Collect() (domain.ObservedState, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	seq, err := c.nextSeq()
 	if err != nil {
 		return domain.ObservedState{}, err

@@ -16,6 +16,13 @@ import (
 // agentdVersion 是 agentd 的版本号（§7.6 版本协商随 Hello 上报）。
 const agentdVersion = "0.2.0"
 
+// 本地未配置时的默认周期（§5.2：15s 心跳 / 5min 全量 inventory；
+// 服务端 Welcome 回传值可覆盖，本地显式配置优先级最高）。
+const (
+	defaultHeartbeatInterval = 15 * time.Second
+	defaultInventoryInterval = 5 * time.Minute
+)
+
 // renewWindow 是证书续期窗口（到期前该时长内触发；窗口带随机抖动，§4.6）。
 const renewWindow = 7 * 24 * time.Hour
 
@@ -102,10 +109,10 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 	heartbeatEvery := cfg.heartbeatInterval()
 	inventoryEvery := cfg.inventoryInterval()
 	if heartbeatEvery <= 0 {
-		heartbeatEvery = 15 * time.Second
+		heartbeatEvery = defaultHeartbeatInterval
 	}
 	if inventoryEvery <= 0 {
-		inventoryEvery = 5 * time.Minute
+		inventoryEvery = defaultInventoryInterval
 	}
 	hbSeq := int64(0)
 	heartbeat := time.NewTicker(heartbeatEvery)
@@ -113,7 +120,12 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 	full := time.NewTicker(inventoryEvery)
 	defer full.Stop()
 
-	// 接收循环在独立 goroutine；发送集中在当前 goroutine（单写者）。
+	// serverEvents 把服务端下行事件转交主循环处理（含由此触发的所有发送）。
+	type serverEvent struct {
+		welcome       *fleetv1.Welcome
+		wantInventory bool
+	}
+	serverEvents := make(chan serverEvent, 4)
 	recvErr := make(chan error, 1)
 	go func() {
 		for {
@@ -124,14 +136,16 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 			}
 			switch payload := msg.GetPayload().(type) {
 			case *fleetv1.ServerToAgent_Welcome:
-				w := payload.Welcome
-				log.Info("welcome received", "protocol_version", w.GetProtocolVersion(),
-					"heartbeat_interval_s", w.GetHeartbeatIntervalSeconds(),
-					"inventory_interval_s", w.GetInventoryIntervalSeconds())
+				select {
+				case serverEvents <- serverEvent{welcome: payload.Welcome}:
+				case <-streamCtx.Done():
+					return
+				}
 			case *fleetv1.ServerToAgent_RequestInventory:
 				log.Info("inventory requested by server")
-				if err := sendInventory(stream, collector, log); err != nil {
-					recvErr <- err
+				select {
+				case serverEvents <- serverEvent{wantInventory: true}:
+				case <-streamCtx.Done():
 					return
 				}
 			case *fleetv1.ServerToAgent_OperationResultAck:
@@ -148,6 +162,17 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 		select {
 		case err := <-recvErr:
 			return err
+		case ev := <-serverEvents:
+			// 发送单写者：下行事件触发的发送同样只在主循环执行
+			// （gRPC 禁止不同 goroutine 并发 Send 同一 stream）。
+			if w := ev.welcome; w != nil {
+				heartbeatEvery, inventoryEvery = applyWelcome(w, cfg, heartbeatEvery, inventoryEvery, heartbeat, full, log)
+			}
+			if ev.wantInventory {
+				if err := sendInventory(stream, collector, log); err != nil {
+					return err
+				}
+			}
 		case <-heartbeat.C:
 			hbSeq++
 			if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_Heartbeat{
@@ -164,6 +189,28 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 			return streamCtx.Err()
 		}
 	}
+}
+
+// applyWelcome 把 Welcome 回传的周期落实到 ticker（§5.2 服务端可覆盖节点周期）。
+// 优先级：本地显式配置（>0）> 服务端回传（>0）> 默认值；服务端未给（≤0）或与
+// 当前一致时不重排，避免无谓打断心跳节拍。
+func applyWelcome(w *fleetv1.Welcome, cfg *Config, hbEvery, invEvery time.Duration,
+	heartbeat, full *time.Ticker, log *slog.Logger) (time.Duration, time.Duration) {
+	if s := w.GetHeartbeatIntervalSeconds(); s > 0 && cfg.heartbeatInterval() <= 0 {
+		if d := time.Duration(s) * time.Second; d != hbEvery {
+			heartbeat.Reset(d)
+			hbEvery = d
+		}
+	}
+	if s := w.GetInventoryIntervalSeconds(); s > 0 && cfg.inventoryInterval() <= 0 {
+		if d := time.Duration(s) * time.Second; d != invEvery {
+			full.Reset(d)
+			invEvery = d
+		}
+	}
+	log.Info("report intervals in effect", "heartbeat_every", hbEvery.String(),
+		"inventory_every", invEvery.String())
+	return hbEvery, invEvery
 }
 
 func sendInventory(stream grpc.BidiStreamingClient[fleetv1.AgentToServer, fleetv1.ServerToAgent],

@@ -162,8 +162,18 @@ func (h *harness) enroll(machine, token string, ac *agentCert) (*fleetv1.EnrollR
 	return resp, err
 }
 
-// connectClient 用已签发证书材料建立 mTLS Connect 客户端（agentd 常驻路径）。
+// connectClient 用已签发证书材料建立 mTLS 连接（agentd 常驻路径）。
 func (h *harness) connectClient(certPEM []byte, priv *ecdsa.PrivateKey) (fleetv1.FleetAgentServiceClient, error) {
+	conn, err := h.mtlsConn(certPEM, priv)
+	if err != nil {
+		return nil, err
+	}
+	return fleetv1.NewFleetAgentServiceClient(conn), nil
+}
+
+// mtlsConn 用已签发证书材料建立 mTLS 连接（Connect 与认证型一元 RPC 共用）。
+func (h *harness) mtlsConn(certPEM []byte, priv *ecdsa.PrivateKey) (*grpc.ClientConn, error) {
+	h.t.Helper()
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(h.ca.CACertPEM()) {
 		return nil, errors.New("bad ca pem")
@@ -186,7 +196,7 @@ func (h *harness) connectClient(certPEM []byte, priv *ecdsa.PrivateKey) (fleetv1
 		return nil, err
 	}
 	h.t.Cleanup(func() { conn.Close() })
-	return fleetv1.NewFleetAgentServiceClient(conn), nil
+	return conn, nil
 }
 
 // connectStream 打开 Connect 流并完成 Hello→Welcome 握手。
@@ -371,6 +381,67 @@ func TestEnrollRejectsExpiredToken(t *testing.T) {
 	_, err := h.enroll("ws-1", token, ac)
 	if status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("expired enroll: want PermissionDenied, got %v", err)
+	}
+}
+
+// 续期（P0 回归）：身份必须取自 mTLS 通道——合法客户端证书续期成功且新证书
+// 绑定认证机器；无客户端证书的连接被拒（§12.2：不信任 CSR 自报 Subject）。
+func TestRenewCertificateIssuesFromChannelIdentityAndRejectsAnonymous(t *testing.T) {
+	h := newHarness(t, Config{})
+	ctx := context.Background()
+	if err := h.machines.Create(ctx, &domain.Machine{Metadata: domain.ObjectMeta{Name: "ws-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	ac := newAgentCert(t, "ws-1")
+	resp, err := h.enroll("ws-1", h.enrollToken("ws-1", ac, time.Minute), ac)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	oldDER, _ := pem.Decode(resp.GetCertPem())
+	if oldDER == nil {
+		t.Fatal("bad enroll cert pem")
+	}
+	oldCert, err := x509.ParseCertificate(oldDER.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 同一 mTLS 通道（既有有效客户端证书）上的续期成功。
+	mtls, err := h.mtlsConn(resp.GetCertPem(), ac.priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	renewed, err := fleetv1.NewFleetEnrollmentServiceClient(mtls).RenewCertificate(rpcCtx,
+		&fleetv1.RenewCertificateRequest{CsrPem: ac.csrPEM})
+	if err != nil {
+		t.Fatalf("renew over mTLS: %v", err)
+	}
+	newDER, _ := pem.Decode(renewed.GetCertPem())
+	if newDER == nil {
+		t.Fatal("bad renewed cert pem")
+	}
+	newCert, err := x509.ParseCertificate(newDER.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newCert.Subject.CommonName != "ws-1" {
+		t.Fatalf("renewed cert CN = %q, want authenticated machine %q", newCert.Subject.CommonName, "ws-1")
+	}
+	if newCert.SerialNumber.Cmp(oldCert.SerialNumber) == 0 {
+		t.Fatal("renewed cert serial equals old serial")
+	}
+	if !newCert.NotAfter.After(time.Now()) {
+		t.Fatalf("renewed cert already expired: %v", newCert.NotAfter)
+	}
+
+	// 无客户端证书的连接（仅 TLS）被拒：续期身份只能来自 mTLS 通道。
+	anon := h.enrollClient()
+	_, err = fleetv1.NewFleetEnrollmentServiceClient(anon).RenewCertificate(rpcCtx,
+		&fleetv1.RenewCertificateRequest{CsrPem: ac.csrPEM})
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("anonymous renew: want PermissionDenied, got %v", err)
 	}
 }
 

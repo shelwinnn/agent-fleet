@@ -36,10 +36,12 @@ func (s *Server) unaryInterceptor() grpc.UnaryServerInterceptor {
 			}
 			return resp, err
 		case fullMethodRenewCert:
-			if _, err := s.requireIdentity(ctx, info.FullMethod); err != nil {
+			id, err := s.requireIdentity(ctx, info.FullMethod)
+			if err != nil {
 				return nil, status.Error(codes.PermissionDenied, "valid client certificate required")
 			}
-			return handler(ctx, req)
+			// 身份必须注入 ctx：RenewCertificate 的续期主体取自 mTLS 通道而非 CSR。
+			return handler(WithIdentity(ctx, id), req)
 		default:
 			return handler(ctx, req)
 		}
