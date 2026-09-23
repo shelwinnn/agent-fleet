@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 )
 
 // 范围项 2（FR-8.2/FR-8.3 + ADR-1）在适配器契约层的最小锁定：

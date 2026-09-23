@@ -14,7 +14,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/desiredstate"
 )
 
@@ -23,7 +23,8 @@ const ID = "fixture"
 
 // CanonicalizationVersion 是 fixture 投影规范化规则版本（ADR-1：期望侧与观测侧
 // 必须一致；与期望快照的 snapshot 规范化版本是两套独立规则，§7.1）。
-const CanonicalizationVersion = "fixture-projection-v1"
+// 与家族适配器共用同一节点侧规则版本，使多家族聚合摘要可比（§7.1 契约 1）。
+const CanonicalizationVersion = adapter.ProjectionCanonicalizationVersion
 
 // 受管键集合（§16 所有权声明的 fixture 具象）。其余键一律未托管：
 // 未托管编辑不得改变投影摘要、不得触发 drift、不得被合并写覆盖。
@@ -43,6 +44,23 @@ type Adapter struct {
 func New() *Adapter { return &Adapter{FailNext: map[string]int{}} }
 
 func (a *Adapter) ID() string { return ID }
+
+// Capabilities 是 fixture 的能力声明（测试用适配器：全部能力"支持"仅表示
+// 语义可测，不代表任何真实家族）。
+func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
+	return []adapter.CapabilityDecl{
+		{Capability: adapter.CapabilityVersion, State: adapter.SupportSupported, Evidence: "fixture"},
+		{Capability: adapter.CapabilityModelProvider, State: adapter.SupportSupported, Evidence: "fixture"},
+		{Capability: adapter.CapabilityMCP, State: adapter.SupportSupported, Evidence: "fixture"},
+		{Capability: adapter.CapabilitySkills, State: adapter.SupportSupported, Evidence: "fixture"},
+		{Capability: adapter.CapabilityRules, State: adapter.SupportSupported, Evidence: "fixture"},
+	}
+}
+
+// Validate 落实阶段 1 能力前置校验（真实家族据此在写入前拒绝未支持能力）。
+func (a *Adapter) Validate(_ context.Context, _ string, desired adapter.AgentDesiredState) error {
+	return adapter.CheckCapabilities(ID, a.Capabilities(), desired)
+}
 
 // fail consums 一次注入；返回是否命中注入。
 func (a *Adapter) fail(step string) bool {

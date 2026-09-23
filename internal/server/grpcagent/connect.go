@@ -245,6 +245,7 @@ func observedFromProto(machine string, m *fleetv1.ObservedState) (domain.Observe
 		CanonicalizationVersion:  m.GetCanonicalizationVersion(),
 		DesiredProjectionDigest:  m.GetDesiredProjectionDigest(),
 		ObservedProjectionDigest: m.GetObservedProjectionDigest(),
+		AdapterHealth:            m.GetAdapterHealth(),
 	}
 	if mi := m.GetMachine(); mi != nil {
 		obs.Machine = &domain.MachineObservation{
@@ -259,10 +260,12 @@ func observedFromProto(machine string, m *fleetv1.ObservedState) (domain.Observe
 	}
 	for _, a := range m.GetAgents() {
 		obs.Agents = append(obs.Agents, domain.AgentObservation{
-			Family:     a.GetFamily(),
-			Version:    a.GetVersion(),
-			Enabled:    a.GetEnabled(),
-			ConfigPath: a.GetConfigPath(),
+			Family:       a.GetFamily(),
+			Version:      a.GetVersion(),
+			Enabled:      a.GetEnabled(),
+			ConfigPath:   a.GetConfigPath(),
+			Installed:    a.GetInstalled(),
+			VersionError: a.GetVersionError(),
 		})
 	}
 	payload, _ := json.Marshal(obs)

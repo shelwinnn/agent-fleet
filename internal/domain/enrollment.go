@@ -77,11 +77,17 @@ type ObservedStateRecord struct {
 	RecordedAt         time.Time
 }
 
-// ObservedStateRepository 维护每机最新观测。
+// ObservedStateRepository 维护每机最新观测与"每操作最近一份绑定观测"。
 type ObservedStateRepository interface {
 	// Store 写入观测。若 inventory_seq 落后于已存高水位，则不得改写
 	// （FR-8.7 观测有序性），此时返回 accepted=false 且不视为错误。
+	// rec.OperationID 非空时，同事务内写入 operation_observations（每
+	// (machine, operation) 保留最近一份，含 seq 高水位判定）。
 	Store(ctx context.Context, rec *ObservedStateRecord) (accepted bool, err error)
-	// Latest 取某机当前最新观测（无则 ErrNotFound）。
+	// Latest 取某机当前最新观测（无则 ErrNotFound）。周期报文可能已覆盖主行，
+	// 因此**不得**用它作为门禁证据（§4.4 条件 2）。
 	Latest(ctx context.Context, machine string) (*ObservedStateRecord, error)
+	// LatestBound 取某操作最近一份绑定观测（无则 ErrNotFound）。这是门禁
+	// 条件 2/3/4 的唯一可接受证据来源。
+	LatestBound(ctx context.Context, machine, operationID string) (*ObservedStateRecord, error)
 }

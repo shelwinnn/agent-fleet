@@ -144,9 +144,17 @@ func (s *enrollmentStore) Store(ctx context.Context, rec *domain.ObservedStateRe
 	if rec.RecordedAt.IsZero() {
 		rec.RecordedAt = time.Now().UTC()
 	}
+	// 主行 + 绑定表在同一事务内写入：门禁证据（绑定观测）与机器条件
+	// （最新观测）必须一致地推进，不能出现"条件已推进但证据丢失"的中间态。
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: begin observed state tx for %q: %w", rec.Machine, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// UPSERT 带 seq 条件：落后报文（inventory_seq < 已存高水位）不落主行、
 	// 不改写条件（FR-8.7 观测有序性）。影响行数为 0 即被拒绝。
-	res, err := s.db.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO observed_states (machine_id, inventory_seq, operation_id, observed_generation, payload, recorded_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(machine_id) DO UPDATE SET
@@ -162,7 +170,54 @@ func (s *enrollmentStore) Store(ctx context.Context, rec *domain.ObservedStateRe
 		return false, fmt.Errorf("sqlite: store observed state for %q: %w", rec.Machine, err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n == 0 {
+		return false, nil // 落后报文：主行与绑定行都不改写
+	}
+	// 绑定观测：每 (machine, operation) 保留最近一份，带 seq 高水位判定；
+	// 周期报文（OperationID == ""）不写本表，因此永不覆盖既有绑定。
+	if rec.OperationID != "" {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO operation_observations
+			   (machine_id, operation_id, inventory_seq, observed_generation, payload, recorded_at)
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(machine_id, operation_id) DO UPDATE SET
+			   inventory_seq = excluded.inventory_seq,
+			   observed_generation = excluded.observed_generation,
+			   payload = excluded.payload,
+			   recorded_at = excluded.recorded_at
+			 WHERE excluded.inventory_seq >= operation_observations.inventory_seq`,
+			rec.Machine, rec.OperationID, rec.InventorySeq, rec.ObservedGeneration,
+			string(rec.Payload), rec.RecordedAt.Format(time.RFC3339Nano)); err != nil {
+			return false, fmt.Errorf("sqlite: store operation observation for %q/%q: %w",
+				rec.Machine, rec.OperationID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("sqlite: commit observed state for %q: %w", rec.Machine, err)
+	}
+	return true, nil
+}
+
+// LatestBound 取某操作最近一份绑定观测（§4.4 门禁条件 2 的唯一证据来源）。
+func (s *enrollmentStore) LatestBound(ctx context.Context, machine, operationID string) (*domain.ObservedStateRecord, error) {
+	var rec domain.ObservedStateRecord
+	var payload, recordedAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT machine_id, inventory_seq, operation_id, observed_generation, payload, recorded_at
+		 FROM operation_observations WHERE machine_id = ? AND operation_id = ?`, machine, operationID).
+		Scan(&rec.Machine, &rec.InventorySeq, &rec.OperationID, &rec.ObservedGeneration, &payload, &recordedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: observation bound to operation %q on machine %q",
+			domain.ErrNotFound, operationID, machine)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get bound observation for %q/%q: %w", machine, operationID, err)
+	}
+	rec.Payload = json.RawMessage(payload)
+	if rec.RecordedAt, err = parseTime(recordedAt, "operation_observations.recorded_at"); err != nil {
+		return nil, err
+	}
+	return &rec, nil
 }
 
 func (s *enrollmentStore) Latest(ctx context.Context, machine string) (*domain.ObservedStateRecord, error) {

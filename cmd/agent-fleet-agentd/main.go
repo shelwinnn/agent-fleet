@@ -102,7 +102,7 @@ func cmdOneshot(args []string) error {
 		home = "."
 	}
 	collector := &inventory.Collector{DataDir: home + "/.local/share/agent-fleet", AgentdVersion: agentdVersion}
-	obs, err := collector.Collect()
+	obs, err := collector.Collect(context.Background())
 	if err != nil {
 		return err
 	}

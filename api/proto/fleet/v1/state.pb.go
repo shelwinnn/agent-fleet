@@ -38,11 +38,14 @@ type ObservedState struct {
 	Agents      []*AgentInstance `protobuf:"bytes,5,rep,name=agents,proto3" json:"agents,omitempty"`
 	// 投影规范化版本（§7.1；本片占位，真实双侧投影摘要随第 4 片）。
 	CanonicalizationVersion string `protobuf:"bytes,6,opt,name=canonicalization_version,json=canonicalizationVersion,proto3" json:"canonicalization_version,omitempty"`
-	// 期望侧/观测侧受管投影摘要（ADR-1 双侧投影；本片占位为空）。
+	// 期望侧/观测侧受管投影摘要（ADR-1 双侧投影；第 4 片起由家族适配器产出）。
 	DesiredProjectionDigest  string `protobuf:"bytes,7,opt,name=desired_projection_digest,json=desiredProjectionDigest,proto3" json:"desired_projection_digest,omitempty"`
 	ObservedProjectionDigest string `protobuf:"bytes,8,opt,name=observed_projection_digest,json=observedProjectionDigest,proto3" json:"observed_projection_digest,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// 适配器健康结果（passed | failed | skipped）。门禁条件 4 要求"同一份观测
+	// （或该操作 verify 证据）的健康结果"（§4.4），故随观测一并上报。
+	AdapterHealth string `protobuf:"bytes,9,opt,name=adapter_health,json=adapterHealth,proto3" json:"adapter_health,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ObservedState) Reset() {
@@ -127,6 +130,13 @@ func (x *ObservedState) GetDesiredProjectionDigest() string {
 func (x *ObservedState) GetObservedProjectionDigest() string {
 	if x != nil {
 		return x.ObservedProjectionDigest
+	}
+	return ""
+}
+
+func (x *ObservedState) GetAdapterHealth() string {
+	if x != nil {
+		return x.AdapterHealth
 	}
 	return ""
 }
@@ -224,14 +234,17 @@ func (x *MachineInfo) GetTotalMemBytes() int64 {
 	return 0
 }
 
-// AgentInstance 是节点上一个 Agent 实例（本片为占位：仅上报 agentd 自身实例；
-// Codex/OMP/OpenCode/ZCode 家族实例随第 4 片适配器接入）。
+// AgentInstance 是节点上一个 Agent 实例（agentd 自身 + 各家族探测结果）。
 type AgentInstance struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Family        string                 `protobuf:"bytes,1,opt,name=family,proto3" json:"family,omitempty"`
-	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
-	Enabled       bool                   `protobuf:"varint,3,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	ConfigPath    string                 `protobuf:"bytes,4,opt,name=config_path,json=configPath,proto3" json:"config_path,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Family     string                 `protobuf:"bytes,1,opt,name=family,proto3" json:"family,omitempty"`
+	Version    string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
+	Enabled    bool                   `protobuf:"varint,3,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	ConfigPath string                 `protobuf:"bytes,4,opt,name=config_path,json=configPath,proto3" json:"config_path,omitempty"`
+	// installed 区分"未安装"与"已安装但版本不可解析"（支持矩阵验收 1）。
+	Installed bool `protobuf:"varint,5,opt,name=installed,proto3" json:"installed,omitempty"`
+	// version_error 非空表示已安装但版本探测失败（如实呈现，不伪装成未安装）。
+	VersionError  string `protobuf:"bytes,6,opt,name=version_error,json=versionError,proto3" json:"version_error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -294,11 +307,25 @@ func (x *AgentInstance) GetConfigPath() string {
 	return ""
 }
 
+func (x *AgentInstance) GetInstalled() bool {
+	if x != nil {
+		return x.Installed
+	}
+	return false
+}
+
+func (x *AgentInstance) GetVersionError() string {
+	if x != nil {
+		return x.VersionError
+	}
+	return ""
+}
+
 var File_fleet_v1_state_proto protoreflect.FileDescriptor
 
 const file_fleet_v1_state_proto_rawDesc = "" +
 	"\n" +
-	"\x14fleet/v1/state.proto\x12\bfleet.v1\"\x82\x03\n" +
+	"\x14fleet/v1/state.proto\x12\bfleet.v1\"\xa9\x03\n" +
 	"\rObservedState\x12#\n" +
 	"\rinventory_seq\x18\x01 \x01(\x03R\finventorySeq\x12\x12\n" +
 	"\x04full\x18\x02 \x01(\bR\x04full\x12!\n" +
@@ -307,7 +334,8 @@ const file_fleet_v1_state_proto_rawDesc = "" +
 	"\x06agents\x18\x05 \x03(\v2\x17.fleet.v1.AgentInstanceR\x06agents\x129\n" +
 	"\x18canonicalization_version\x18\x06 \x01(\tR\x17canonicalizationVersion\x12:\n" +
 	"\x19desired_projection_digest\x18\a \x01(\tR\x17desiredProjectionDigest\x12<\n" +
-	"\x1aobserved_projection_digest\x18\b \x01(\tR\x18observedProjectionDigest\"\xc5\x01\n" +
+	"\x1aobserved_projection_digest\x18\b \x01(\tR\x18observedProjectionDigest\x12%\n" +
+	"\x0eadapter_health\x18\t \x01(\tR\radapterHealth\"\xc5\x01\n" +
 	"\vMachineInfo\x12\x0e\n" +
 	"\x02os\x18\x01 \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\x02 \x01(\tR\x04arch\x12\x1a\n" +
@@ -315,13 +343,15 @@ const file_fleet_v1_state_proto_rawDesc = "" +
 	"\bhome_dir\x18\x04 \x01(\tR\ahomeDir\x12\x16\n" +
 	"\x06kernel\x18\x05 \x01(\tR\x06kernel\x12\x1b\n" +
 	"\tcpu_count\x18\x06 \x01(\x05R\bcpuCount\x12&\n" +
-	"\x0ftotal_mem_bytes\x18\a \x01(\x03R\rtotalMemBytes\"|\n" +
+	"\x0ftotal_mem_bytes\x18\a \x01(\x03R\rtotalMemBytes\"\xbf\x01\n" +
 	"\rAgentInstance\x12\x16\n" +
 	"\x06family\x18\x01 \x01(\tR\x06family\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x18\n" +
 	"\aenabled\x18\x03 \x01(\bR\aenabled\x12\x1f\n" +
 	"\vconfig_path\x18\x04 \x01(\tR\n" +
-	"configPathB=Z;github.com/shelwinnn/agent-fleet/api/proto/fleet/v1;fleetv1b\x06proto3"
+	"configPath\x12\x1c\n" +
+	"\tinstalled\x18\x05 \x01(\bR\tinstalled\x12#\n" +
+	"\rversion_error\x18\x06 \x01(\tR\fversionErrorB=Z;github.com/shelwinnn/agent-fleet/api/proto/fleet/v1;fleetv1b\x06proto3"
 
 var (
 	file_fleet_v1_state_proto_rawDescOnce sync.Once

@@ -14,7 +14,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/desiredstate"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 )
@@ -158,13 +158,20 @@ func (e *Executor) Run(ctx context.Context, home string, ex Execution) Result {
 	if len(families) == 0 {
 		return fail(domain.ReasonDesiredStateInvalid, "snapshot has no managed agent family")
 	}
-	agents := map[string]adapter.AgentDesiredState{}
+	agents, err := adapter.DesiredStatesFromSnapshot(snap)
+	if err != nil {
+		return fail(domain.ReasonDesiredStateInvalid, err.Error())
+	}
+	// 适配器侧能力前置校验（矩阵：未支持/未验证能力必须在**任何写入之前**
+	// 明确拒绝，禁止静默跳过；阶段 1 早于阶段 4 备份与阶段 5–9 写入）。
 	for _, f := range families {
-		if _, err := e.opts.Registry.Get(f); err != nil {
+		ad, err := e.opts.Registry.Get(f)
+		if err != nil {
 			return fail(domain.ReasonDesiredStateInvalid, err.Error())
 		}
-		da := snap.Desired.Agents[f]
-		agents[f] = adapter.AgentDesiredState{Family: f, Version: da.Version, Config: da.Config}
+		if err := ad.Validate(ctx, home, agents[f]); err != nil {
+			return fail(domain.ReasonDesiredStateInvalid, err.Error())
+		}
 	}
 	progress(StepValidate, "Succeeded", fmt.Sprintf("generation=%d families=%v", ex.Generation, families))
 

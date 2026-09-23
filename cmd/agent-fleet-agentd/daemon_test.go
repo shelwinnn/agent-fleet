@@ -11,8 +11,8 @@ import (
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
-	"github.com/shelwinnn/agent-fleet/internal/adapter"
-	"github.com/shelwinnn/agent-fleet/internal/adapter/fixture"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/fixture"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
 	"github.com/shelwinnn/agent-fleet/internal/desiredstate"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
@@ -158,7 +158,7 @@ func TestRunStreamRequestInventoryAndWelcomeHeartbeat(t *testing.T) {
 	home := t.TempDir()
 	reg := adapter.NewRegistry()
 	reg.Register(fixture.New())
-	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, quietLogger())
+	exec := newExecutor(home, cfg.DataDir, reg, collector, quietLogger())
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
 	done := make(chan error, 1)
@@ -230,7 +230,7 @@ func TestRunStreamReportsVerifyEvidence(t *testing.T) {
 	home := t.TempDir()
 	reg := adapter.NewRegistry()
 	reg.Register(fixture.New())
-	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, quietLogger())
+	exec := newExecutor(home, cfg.DataDir, reg, collector, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	workerMsgs := make(chan workerMsg, 32)
@@ -281,6 +281,29 @@ func TestRunStreamReportsVerifyEvidence(t *testing.T) {
 	}
 	if v.GetInventorySeq() <= 0 || v.GetAdapterHealth() != domain.AdapterHealthPassed {
 		t.Fatalf("verify evidence incomplete: %+v", v)
+	}
+
+	// KM-24：与该操作绑定的 apply 后观测必须先于 OperationResult 上线
+	// （§4.4 门禁条件 2/3/4 只接受同 operationId 的观测；先证据后终态，
+	// 服务端才能在评估门禁时读到它）。
+	var bound *fleetv1.ObservedState
+	deadline := time.After(5 * time.Second)
+	for bound == nil {
+		select {
+		case o := <-fs.inventories:
+			if o.GetOperationId() == "op-verify-1" {
+				bound = o
+			}
+		case <-deadline:
+			t.Fatal("no operation-bound observation was reported on the wire")
+		}
+	}
+	if bound.GetInventorySeq() != v.GetInventorySeq() ||
+		bound.GetObservedProjectionDigest() != v.GetObservedProjectionDigest() ||
+		bound.GetDesiredProjectionDigest() != v.GetDesiredProjectionDigest() ||
+		bound.GetCanonicalizationVersion() != v.GetCanonicalizationVersion() ||
+		bound.GetAdapterHealth() != domain.AdapterHealthPassed {
+		t.Fatalf("bound observation must mirror the operation verify evidence: %+v vs %+v", bound, v)
 	}
 
 	// outbox 重发路径（服务端未 Ack → 条目仍在）必须携带同一份证据。

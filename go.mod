@@ -3,6 +3,7 @@ module github.com/shelwinnn/agent-fleet
 go 1.27.0
 
 require (
+	github.com/pelletier/go-toml/v2 v2.2.4
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1

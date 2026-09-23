@@ -19,9 +19,12 @@ message ObservedState {
   repeated AgentInstance agents = 5;
   // 投影规范化版本（§7.1；本片占位，真实双侧投影摘要随第 4 片）。
   string canonicalization_version = 6;
-  // 期望侧/观测侧受管投影摘要（ADR-1 双侧投影；本片占位为空）。
+  // 期望侧/观测侧受管投影摘要（ADR-1 双侧投影；第 4 片起由家族适配器产出）。
   string desired_projection_digest = 7;
   string observed_projection_digest = 8;
+  // 适配器健康结果（passed | failed | skipped）。门禁条件 4 要求"同一份观测
+  // （或该操作 verify 证据）的健康结果"（§4.4），故随观测一并上报。
+  string adapter_health = 9;
 }
 
 // MachineInfo 是节点机器信息（写入 Machine status 的 os/arch/hostname/homeDir）。
@@ -35,11 +38,14 @@ message MachineInfo {
   int64 total_mem_bytes = 7;
 }
 
-// AgentInstance 是节点上一个 Agent 实例（本片为占位：仅上报 agentd 自身实例；
-// Codex/OMP/OpenCode/ZCode 家族实例随第 4 片适配器接入）。
+// AgentInstance 是节点上一个 Agent 实例（agentd 自身 + 各家族探测结果）。
 message AgentInstance {
   string family = 1;
   string version = 2;
   bool enabled = 3;
   string config_path = 4;
+  // installed 区分"未安装"与"已安装但版本不可解析"（支持矩阵验收 1）。
+  bool installed = 5;
+  // version_error 非空表示已安装但版本探测失败（如实呈现，不伪装成未安装）。
+  string version_error = 6;
 }

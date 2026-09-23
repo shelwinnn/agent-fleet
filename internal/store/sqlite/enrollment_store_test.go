@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,5 +244,81 @@ func TestCertificateRetireByMachine(t *testing.T) {
 	// 幂等：重复退役不报错。
 	if err := s.RetireByMachine(ctx, "m1", now); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// KM-24 裁决断言（「每操作最近一份绑定观测」）：周期 inventory（无 operationId）
+// 只更新"每机最新观测"主行，绝不覆盖操作绑定观测；门禁证据因此不会在数秒内
+// 被更高 seq 的周期报文清空（§4.4 因果绑定）。
+func TestOperationObservationBindingIsPreservedAcrossPeriodicReports(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	machines := NewMachineStore(db)
+	obs := NewObservedStateStore(db)
+	if err := machines.Create(ctx, &domain.Machine{Metadata: domain.ObjectMeta{Name: "m1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 绑定观测（op-1, seq 5）：门禁证据写入成功且可读回。
+	accepted, err := obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 5, OperationID: "op-1",
+		Payload:    []byte(`{"inventorySeq":5,"operationId":"op-1","observedProjectionDigest":"sha256:ok"}`),
+		RecordedAt: time.Now().UTC(),
+	})
+	if err != nil || !accepted {
+		t.Fatalf("bound store: accepted=%v err=%v", accepted, err)
+	}
+	bound, err := obs.LatestBound(ctx, "m1", "op-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.InventorySeq != 5 || bound.OperationID != "op-1" {
+		t.Fatalf("bound record = %+v", bound)
+	}
+
+	// 2) 周期报文（无 operationId）以更高 seq 更新主行——绑定必须原样保留。
+	accepted, err = obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 9,
+		Payload:    []byte(`{"inventorySeq":9,"observedProjectionDigest":"sha256:periodic"}`),
+		RecordedAt: time.Now().UTC(),
+	})
+	if err != nil || !accepted {
+		t.Fatalf("periodic store: accepted=%v err=%v", accepted, err)
+	}
+	latest, err := obs.Latest(ctx, "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.InventorySeq != 9 || latest.OperationID != "" {
+		t.Fatalf("latest should be the periodic report: %+v", latest)
+	}
+	bound, err = obs.LatestBound(ctx, "m1", "op-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.InventorySeq != 5 || !strings.Contains(string(bound.Payload), "sha256:ok") {
+		t.Fatalf("periodic report clobbered the bound observation: %+v", bound)
+	}
+
+	// 3) 同一操作的更新观测按 seq 高水位替换；落后报文不改写（FR-8.7）。
+	if accepted, err = obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 4, OperationID: "op-1",
+		Payload: []byte(`{"inventorySeq":4}`), RecordedAt: time.Now().UTC(),
+	}); err != nil || accepted {
+		t.Fatalf("stale bound report must be rejected: accepted=%v err=%v", accepted, err)
+	}
+	if accepted, err = obs.Store(ctx, &domain.ObservedStateRecord{
+		Machine: "m1", InventorySeq: 12, OperationID: "op-1",
+		Payload: []byte(`{"inventorySeq":12}`), RecordedAt: time.Now().UTC(),
+	}); err != nil || !accepted {
+		t.Fatalf("newer bound report must be accepted: accepted=%v err=%v", accepted, err)
+	}
+	if bound, err = obs.LatestBound(ctx, "m1", "op-1"); err != nil || bound.InventorySeq != 12 {
+		t.Fatalf("bound record not refreshed: %+v err=%v", bound, err)
+	}
+
+	// 4) 无绑定观测的操作：LatestBound 返回 ErrNotFound（门禁条件 2 不通过）。
+	if _, err := obs.LatestBound(ctx, "m1", "op-unknown"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing binding: want ErrNotFound, got %v", err)
 	}
 }
