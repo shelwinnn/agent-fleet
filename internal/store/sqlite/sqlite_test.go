@@ -46,12 +46,13 @@ func TestMigrateIdempotent(t *testing.T) {
 		`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatalf("count schema_migrations: %v", err)
 	}
-	// KM-22 起为两个迁移（0001_init + 0002_agent_channel）；重复执行后登记数不变。
-	if n != 2 {
-		t.Fatalf("applied versions = %d, want 2", n)
+	// KM-23 起为三个迁移（+0003_desired_state）；重复执行后登记数不变。
+	if n != 3 {
+		t.Fatalf("applied versions = %d, want 3", n)
 	}
 	for _, table := range []string{"machines", "profiles", "providers", "skills", "deployments", "operations",
-		"enrollment_tokens", "agent_certificates", "observed_states"} {
+		"enrollment_tokens", "agent_certificates", "observed_states", "desired_snapshots",
+		"operation_steps", "deployment_targets"} {
 		var name string
 		err := db.sql.QueryRowContext(ctx,
 			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
@@ -167,7 +168,7 @@ func TestOperationsMachineMutex(t *testing.T) {
 	}
 
 	// 终态释放互斥。
-	if err := ops.UpdatePhase(ctx, first.Metadata.UID, domain.OperationPhaseSucceeded); err != nil {
+	if err := ops.Transition(ctx, first.Metadata.UID, "", domain.OperationPhaseSucceeded, nil); err != nil {
 		t.Fatalf("finish first: %v", err)
 	}
 	second := newOp("node-a")
@@ -176,7 +177,7 @@ func TestOperationsMachineMutex(t *testing.T) {
 	}
 
 	// Unknown 仍占用互斥（不是终态，FR-15.4）。
-	if err := ops.UpdatePhase(ctx, second.Metadata.UID, domain.OperationPhaseUnknown); err != nil {
+	if err := ops.Transition(ctx, second.Metadata.UID, "", domain.OperationPhaseUnknown, nil); err != nil {
 		t.Fatalf("mark unknown: %v", err)
 	}
 	if err := ops.Create(ctx, newOp("node-a")); !errors.Is(err, domain.ErrMachineBusy) {

@@ -4,7 +4,10 @@
 # machines / profiles 为完整 CRUD；skills / providers / deployments 为骨架路由，
 # 一律返回 501 NotImplemented（实现归属后续切片）。
 # KM-22 新增：POST /api/v1/machines/{name}/enroll-token（一次性 enrollment token）。
-# 其余动作端点（probe/reconcile/…）、SSE 与 gRPC 不在已实现范围。
+# KM-23 新增动作端点：reconcile/confirm、rollback、operations、cancel/skip、
+# drift、render、deployment rollback/skip-target（§8.1）。
+# 其余动作端点（probe/bootstrap/repair-agentd/inventory）、SSE 与 gRPC 契约
+# 不在本文件（gRPC 以 api/proto/fleet/v1 为准；SSH 路径随第 6 片）。
 # 声明版本为 3.1.0（KM-21 核查发现 #1：本文件使用了 3.1 才有的
 # components.pathItems；3.0.3 声明与内容不符会卡严格校验器）。
 openapi: 3.1.0
@@ -219,6 +222,240 @@ paths:
                 $ref: "#/components/schemas/EnrollToken"
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  # ===== KM-23 动作端点（§8.1）=====
+
+  /api/v1/machines/{name}/reconcile:
+    post:
+      tags: [machines]
+      summary: 触发收敛或确认计划（KM-23）
+      description: |
+        机器级互斥的派发点获取（§4.3）：以一次事务创建 Pending 操作行，
+        该机已有未决操作（Pending/Running/AwaitingConfirmation/CancelRequested/
+        Unknown）时返回 409 MachineBusy（diagnostics 携带未决操作引用），不排队。
+        携带 confirmPlanDigest 时为互斥三例外之一（§4.3 第 6 条）：确认该操作
+        自己的计划并推进执行；digest 与等待中的 planDigest 不一致返回
+        409 ReplanRequired（FR-12.7）。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReconcileRequest"
+      responses:
+        "202":
+          description: 已受理（返回 Operation，客户端凭 id 追踪进度）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "409": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/rollback:
+    post:
+      tags: [machines]
+      summary: 机器级回滚到指定 generation（KM-23，§7.2）
+      description: |
+        对目标 generation 的快照重放一次 reconcile：先把目标代内容物化为该机
+        新期望代（回滚不把机器拉回旧代，FR-7.5/ADR-2），走适配器合并写
+        （天然保留未托管字段）。目标代不可解析 → 409 RollbackUnsupported。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetGeneration]
+              properties:
+                targetGeneration:
+                  type: integer
+                  format: int64
+      responses:
+        "202":
+          description: 已受理（Rollback 型 Operation）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/operations:
+    get:
+      tags: [machines]
+      summary: 列出机器的操作审计记录（KM-23）
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      responses:
+        "200":
+          description: 操作列表（§6.4 不可变审计单元）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Operation"
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/operations/{opId}/cancel:
+    post:
+      tags: [machines]
+      summary: 取消未决操作（互斥例外端点之一，KM-23）
+      description: |
+        置 CancelRequested 并投递 CancelOperation；节点不可达时保持
+        CancelRequested，服务端不单方面置 Cancelled（FR-13.9）。重复取消幂等。
+        AwaitingConfirmation 的计划取消直接终态（节点无可中断流水线，§9.3）。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+        - name: opId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 取消状态（Operation）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/operations/{opId}/skip:
+    post:
+      tags: [machines]
+      summary: 显式跳过未决操作（互斥例外端点之一，KM-23）
+      description: |
+        立即释放控制面互斥，terminalModifier=Skipped：不计入成功、必须携带
+        reason（审计），UI 显式标出，不允许静默跳过（§9.6 路径 C/FR-15.4）。
+        跳过不改变节点实际状态——节点可能仍在写。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+        - name: opId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+                operator: { type: string }
+      responses:
+        "200":
+          description: 跳过后的 Operation（Succeeded + Skipped 修饰）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/drift:
+    get:
+      tags: [machines]
+      summary: drift 三态视图（KM-23，FR-14.5）
+      description: |
+        一致(False) / 未知或过期(Unknown + reason: NeverInventoried |
+        StaleObservation | ObservationPredatesDesired | ProjectionVersionMismatch) /
+        漂移(True)。权威判据：期望受管投影摘要 == 观测受管投影摘要 且
+        canonicalizationVersion 一致（FR-8.6）。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      responses:
+        "200":
+          description: drift 三态与证据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/profiles/{name}/render:
+    get:
+      tags: [profiles]
+      summary: 渲染期望状态预览（KM-23，FR-7.4）
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+        - name: machine
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 归一化期望状态 + 确定性摘要（不落库、不增代）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/deployments/{name}/rollback:
+    post:
+      tags: [machines]
+      summary: 创建回滚型 Deployment（KM-23，FR-10.4）
+      description: |
+        新 Deployment 携 spec.rollbackOf = 被回滚 generation，指向历史
+        targetGeneration（内容代）；历史不可变。推进时逐机物化新代。
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetGeneration:
+                  type: integer
+                  format: int64
+                  description: 缺省为源 Deployment 的目标代
+      responses:
+        "202":
+          description: 回滚型 Deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/deployments/{name}/targets/{machine}/skip:
+    post:
+      tags: [machines]
+      summary: 显式跳过被阻塞的发布目标（KM-23，FR-10.7）
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+        - name: machine
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: 已跳过（记 Skipped + 审计；不计入成功）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "404": { $ref: "#/components/responses/Error" }
+
   /api/v1/skills:
     $ref: "#/components/pathItems/Skeleton"
   /api/v1/skills/{name}:
@@ -227,11 +464,6 @@ paths:
     $ref: "#/components/pathItems/Skeleton"
   /api/v1/providers/{name}:
     $ref: "#/components/pathItems/Skeleton"
-  /api/v1/deployments:
-    $ref: "#/components/pathItems/Skeleton"
-  /api/v1/deployments/{name}:
-    $ref: "#/components/pathItems/Skeleton"
-components:
   parameters:
     ResourceName:
       name: name

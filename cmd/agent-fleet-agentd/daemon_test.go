@@ -10,6 +10,8 @@ import (
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
+	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/adapter/fixture"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -141,8 +143,14 @@ func TestRunStreamRequestInventoryAndWelcomeHeartbeat(t *testing.T) {
 	collector := &inventory.Collector{DataDir: filepath.Join(dir, "state"), AgentdVersion: agentdVersion}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	home := t.TempDir()
+	reg := adapter.NewRegistry()
+	reg.Register(fixture.New())
+	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, quietLogger())
+	workerMsgs := make(chan workerMsg, 32)
+	go exec.RunWorker(ctx, workerMsgs)
 	done := make(chan error, 1)
-	go func() { done <- runStream(ctx, cfg, conn, collector, quietLogger()) }()
+	go func() { done <- runStream(ctx, cfg, conn, collector, exec, workerMsgs, quietLogger()) }()
 
 	// 初始全量 inventory（seq 1）+ RequestInventory 触发的第二次（seq 2）。
 	for want := int64(1); want <= 2; want++ {

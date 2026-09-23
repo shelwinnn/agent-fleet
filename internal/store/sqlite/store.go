@@ -28,10 +28,6 @@ func NewDeploymentStore(db *DB) domain.DeploymentRepository {
 	return newResourceStore[domain.Deployment](db.sql, "deployments")
 }
 
-func NewOperationStore(db *DB) domain.OperationRepository {
-	return &operationStore{db: db.sql}
-}
-
 // newResourceStore 具象化泛型仓储（T 为资源结构体，PT 为其指针类型）。
 func newResourceStore[T any, PT objectOf[T]](db *sql.DB, table string) *resourceStore[T, PT] {
 	return &resourceStore[T, PT]{db: db, table: table}

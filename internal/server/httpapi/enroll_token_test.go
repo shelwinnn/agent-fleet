@@ -44,7 +44,9 @@ func enrollFixture(t *testing.T, withIssuer bool) *enrollFixtureT {
 			return nil
 		}
 	}
-	api := New(cfg, sqlite.NewMachineStore(db), sqlite.NewProfileStore(db), db.PingContext, discardLogger())
+	api := New(cfg, sqlite.NewMachineStore(db), sqlite.NewProfileStore(db),
+		sqlite.NewSkillStore(db), sqlite.NewProviderStore(db), sqlite.NewDeploymentStore(db),
+		sqlite.NewOperationStore(db), nil, nil, "fixture/v1", db.PingContext, discardLogger())
 	f.srv = httptest.NewServer(api.Handler())
 	t.Cleanup(f.srv.Close)
 	return f

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
+	"github.com/shelwinnn/agent-fleet/internal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/adapter/fixture"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -57,10 +59,22 @@ func runDaemon(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	collector := &inventory.Collector{DataDir: cfg.DataDir, AgentdVersion: agentdVersion}
 	maybeRenewCertificate(cfg, conn, log)
 
+	// 适配器注册表与执行宿主（本片注册 fixture 适配器验证语义；真实家族适配器
+	// 随第 4 片接入）。HOME 根可注入（护栏 #12）。
+	home := cfg.Home
+	if home == "" {
+		home = defaultHome()
+	}
+	reg := adapter.NewRegistry()
+	reg.Register(fixture.New())
+	exec := newExecutor(home, cfg.DataDir, reg, collector.NextSeq, log)
+	workerMsgs := make(chan workerMsg, 32)
+	go exec.RunWorker(ctx, workerMsgs)
+
 	log.Info("agentd daemon starting", "server", cfg.Server, "machine_id", cfg.MachineID,
-		"version", agentdVersion)
+		"version", agentdVersion, "home", home)
 	for {
-		if err := runStream(ctx, cfg, conn, collector, log); err != nil {
+		if err := runStream(ctx, cfg, conn, collector, exec, workerMsgs, log); err != nil {
 			log.Warn("connect stream ended; reconnecting", "err", err)
 		}
 		select {
@@ -79,7 +93,8 @@ func reconnectDelay() time.Duration {
 
 // runStream 建立一次 Connect 流并服务到断开。
 func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
-	collector *inventory.Collector, log *slog.Logger) error {
+	collector *inventory.Collector, exec *executor, workerMsgs <-chan workerMsg,
+	log *slog.Logger) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -106,6 +121,26 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 		return err
 	}
 
+	// 3) outbox 重发（FR-13.7：紧随 Hello + 全量观测之后，未确认终态按序重发；
+	// 服务端按 operationId 幂等去重，Ack 后淘汰）。
+	for _, pr := range exec.PendingResults() {
+		res := pr.Result
+		if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
+			OperationResult: &fleetv1.OperationResult{
+				OperationId:      pr.OperationID,
+				Phase:            res.Phase,
+				Reason:           res.Reason,
+				Message:          res.Message,
+				TerminalModifier: res.TerminalModifier,
+				StartedAtUnix:    res.StartedAt.Unix(),
+				FinishedAtUnix:   res.FinishedAt.Unix(),
+			},
+		}}); err != nil {
+			return err
+		}
+		log.Info("outbox result resent", "operation_id", pr.OperationID, "phase", res.Phase)
+	}
+
 	heartbeatEvery := cfg.heartbeatInterval()
 	inventoryEvery := cfg.inventoryInterval()
 	if heartbeatEvery <= 0 {
@@ -124,8 +159,11 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 	type serverEvent struct {
 		welcome       *fleetv1.Welcome
 		wantInventory bool
+		ack           string
+		execute       *fleetv1.ExecuteOperation
+		cancel        string
 	}
-	serverEvents := make(chan serverEvent, 4)
+	serverEvents := make(chan serverEvent, 8)
 	recvErr := make(chan error, 1)
 	go func() {
 		for {
@@ -149,7 +187,24 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 					return
 				}
 			case *fleetv1.ServerToAgent_OperationResultAck:
-				log.Info("operation result acked", "operation_id", payload.OperationResultAck.GetOperationId())
+				select {
+				case serverEvents <- serverEvent{ack: payload.OperationResultAck.GetOperationId()}:
+				case <-streamCtx.Done():
+					return
+				}
+			case *fleetv1.ServerToAgent_ExecuteOperation:
+				select {
+				case serverEvents <- serverEvent{execute: payload.ExecuteOperation}:
+				case <-streamCtx.Done():
+					return
+				}
+			case *fleetv1.ServerToAgent_CancelOperation:
+				log.Info("cancel operation received", "operation_id", payload.CancelOperation.GetOperationId())
+				select {
+				case serverEvents <- serverEvent{cancel: payload.CancelOperation.GetOperationId()}:
+				case <-streamCtx.Done():
+					return
+				}
 			case *fleetv1.ServerToAgent_DesiredStateChanged:
 				log.Info("desired state changed", "generation", payload.DesiredStateChanged.GetGeneration())
 			default:
@@ -170,6 +225,62 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 			}
 			if ev.wantInventory {
 				if err := sendInventory(stream, collector, log); err != nil {
+					return err
+				}
+			}
+			if ev.ack != "" {
+				// Ack 是 outbox 唯一淘汰依据（§8.2/FR-13.7）。
+				exec.Forget(ev.ack)
+			}
+			if ev.execute != nil {
+				// FR-13.8 重复派发幂等：执行中/已入队忽略（outbox 命中则重发终态）。
+				if replayed := exec.Enqueue(ev.execute); replayed != nil {
+					if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
+						OperationResult: &fleetv1.OperationResult{
+							OperationId:       ev.execute.GetOperationId(),
+							Phase:             replayed.Phase,
+							Reason:            replayed.Reason,
+							Message:           replayed.Message,
+							TerminalModifier:  replayed.TerminalModifier,
+							DesiredGeneration: ev.execute.GetDesiredGeneration(),
+							StartedAtUnix:     replayed.StartedAt.Unix(),
+							FinishedAtUnix:    replayed.FinishedAt.Unix(),
+						},
+					}}); err != nil {
+						return err
+					}
+				}
+			}
+			if ev.cancel != "" {
+				// FR-13.9：取消在阶段边界生效；仅入队未开始的直接终结。
+				if res := exec.Cancel(ev.cancel); res != nil {
+					if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
+						OperationResult: &fleetv1.OperationResult{
+							OperationId:      ev.cancel,
+							Phase:            res.Phase,
+							Reason:           res.Reason,
+							Message:          res.Message,
+							TerminalModifier: res.TerminalModifier,
+							StartedAtUnix:    res.StartedAt.Unix(),
+							FinishedAtUnix:   res.FinishedAt.Unix(),
+						},
+					}}); err != nil {
+						return err
+					}
+				}
+			}
+		case wm := <-workerMsgs:
+			// worker 上行（进度/终态）同样只在主循环发送（单写者）。
+			var out *fleetv1.AgentToServer
+			if wm.progress != nil {
+				out = &fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationProgress{
+					OperationProgress: wm.progress}}
+			} else if wm.result != nil {
+				out = &fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
+					OperationResult: wm.result}}
+			}
+			if out != nil {
+				if err := stream.Send(out); err != nil {
 					return err
 				}
 			}

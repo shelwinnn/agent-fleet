@@ -66,3 +66,29 @@ func (p *AgentProfile) Validate() error {
 	}
 	return ValidateJSONObject(p.Status, "status")
 }
+
+// Validate 校验 Skill 资源（名称合法 + spec 为合法 JSON 对象）。
+func (s *Skill) Validate() error {
+	if err := ValidateName(s.Metadata.Name); err != nil {
+		return err
+	}
+	return ValidateJSONObject(s.Spec, "spec")
+}
+
+// Validate 校验 ModelProvider 资源（名称合法 + spec 为合法 JSON 对象；
+// 不校验 secret 语义，apiKeyEnv 只允许环境变量名，由渲染层解释）。
+func (p *ModelProvider) Validate() error {
+	if err := ValidateName(p.Metadata.Name); err != nil {
+		return err
+	}
+	return ValidateJSONObject(p.Spec, "spec")
+}
+
+// Validate 校验 Deployment 资源（名称合法 + spec 为合法 JSON 对象；
+// 结构语义由 Deployment 控制器校验）。
+func (d *Deployment) Validate() error {
+	if err := ValidateName(d.Metadata.Name); err != nil {
+		return err
+	}
+	return ValidateJSONObject(d.Spec, "spec")
+}

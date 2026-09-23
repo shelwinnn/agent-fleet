@@ -121,6 +121,9 @@ message OperationResult {
   VerifyEvidence verify = 6;
   int64 started_at_unix = 7;
   int64 finished_at_unix = 8;
+  // terminal_modifier 是节点侧终态修饰（KM-23：取消终结 Failed(Cancelled)
+  // 时携带 "Cancelled"；服务端迟到成功记 "Superseded"，§6.4）。
+  string terminal_modifier = 9;
 }
 
 // VerifyEvidence 是绑定 operationId 的门禁与审计证据（§6.4）。

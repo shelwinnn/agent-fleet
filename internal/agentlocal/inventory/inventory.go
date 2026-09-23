@@ -33,6 +33,14 @@ type Collector struct {
 	mu sync.Mutex
 }
 
+// NextSeq 暴露节点本地单调序（FR-8.7）给 reconciler：操作流水线的投影采集与
+// 周期上报共用同一序列，保证服务端看到的 seq 全局单调不回退。
+func (c *Collector) NextSeq() (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.nextSeq()
+}
+
 // Collect 产出一份全量观测（full=true）并递增持久化的 inventorySeq。
 func (c *Collector) Collect() (domain.ObservedState, error) {
 	c.mu.Lock()

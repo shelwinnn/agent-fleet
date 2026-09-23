@@ -29,6 +29,9 @@ type Config struct {
 	// 间隔覆盖（≤0 时采用服务端 Welcome 回传值或默认值）。
 	HeartbeatIntervalSeconds int `yaml:"heartbeat_interval_seconds"`
 	InventoryIntervalSeconds int `yaml:"inventory_interval_seconds"`
+	// Home 是受管内容解析的根目录（§5.3/护栏 #12：适配器路径解析可注入，
+	// 默认 os.UserHomeDir()；测试用临时 HOME）。
+	Home string `yaml:"home"`
 }
 
 // DefaultConfigPath 返回 ~/.config/agent-fleet/agentd.yaml（§5.2）。
@@ -137,4 +140,12 @@ func (c *Config) inventoryInterval() time.Duration {
 		return time.Duration(c.InventoryIntervalSeconds) * time.Second
 	}
 	return 0
+}
+
+// defaultHome 返回受管内容解析的默认根（os.UserHomeDir()；注入失败时退回数据目录）。
+func defaultHome() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return DefaultDataDir()
 }

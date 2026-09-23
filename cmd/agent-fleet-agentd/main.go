@@ -78,10 +78,14 @@ func cmdEnroll(args []string, log *slog.Logger) error {
 func cmdDaemon(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	configPath, server, machine, caCert, dataDir, _ := commonFlags(fs)
+	home := fs.String("home", "", "受管内容解析根目录（覆盖配置；默认 $HOME，护栏 #12）")
 	fs.Parse(args) //nolint:errcheck // ExitOnError
 	cfg, err := LoadConfig(*configPath, *server, *machine, *caCert, *dataDir, "")
 	if err != nil {
 		return err
+	}
+	if *home != "" {
+		cfg.Home = *home
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
