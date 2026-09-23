@@ -825,8 +825,11 @@ type OperationResult struct {
 	Verify            *VerifyEvidence `protobuf:"bytes,6,opt,name=verify,proto3" json:"verify,omitempty"`
 	StartedAtUnix     int64           `protobuf:"varint,7,opt,name=started_at_unix,json=startedAtUnix,proto3" json:"started_at_unix,omitempty"`
 	FinishedAtUnix    int64           `protobuf:"varint,8,opt,name=finished_at_unix,json=finishedAtUnix,proto3" json:"finished_at_unix,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// terminal_modifier 是节点侧终态修饰（KM-23：取消终结 Failed(Cancelled)
+	// 时携带 "Cancelled"；服务端迟到成功记 "Superseded"，§6.4）。
+	TerminalModifier string `protobuf:"bytes,9,opt,name=terminal_modifier,json=terminalModifier,proto3" json:"terminal_modifier,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *OperationResult) Reset() {
@@ -913,6 +916,13 @@ func (x *OperationResult) GetFinishedAtUnix() int64 {
 		return x.FinishedAtUnix
 	}
 	return 0
+}
+
+func (x *OperationResult) GetTerminalModifier() string {
+	if x != nil {
+		return x.TerminalModifier
+	}
+	return ""
 }
 
 // VerifyEvidence 是绑定 operationId 的门禁与审计证据（§6.4）。
@@ -1467,7 +1477,7 @@ const file_fleet_v1_agent_proto_rawDesc = "" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x12\n" +
 	"\x04step\x18\x02 \x01(\tR\x04step\x12\x14\n" +
 	"\x05phase\x18\x03 \x01(\tR\x05phase\x12\x18\n" +
-	"\amessage\x18\x04 \x01(\tR\amessage\"\xaf\x02\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xdc\x02\n" +
 	"\x0fOperationResult\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x14\n" +
 	"\x05phase\x18\x02 \x01(\tR\x05phase\x12\x16\n" +
@@ -1476,7 +1486,8 @@ const file_fleet_v1_agent_proto_rawDesc = "" +
 	"\x12desired_generation\x18\x05 \x01(\x03R\x11desiredGeneration\x120\n" +
 	"\x06verify\x18\x06 \x01(\v2\x18.fleet.v1.VerifyEvidenceR\x06verify\x12&\n" +
 	"\x0fstarted_at_unix\x18\a \x01(\x03R\rstartedAtUnix\x12(\n" +
-	"\x10finished_at_unix\x18\b \x01(\x03R\x0efinishedAtUnix\"\x91\x02\n" +
+	"\x10finished_at_unix\x18\b \x01(\x03R\x0efinishedAtUnix\x12+\n" +
+	"\x11terminal_modifier\x18\t \x01(\tR\x10terminalModifier\"\x91\x02\n" +
 	"\x0eVerifyEvidence\x12:\n" +
 	"\x19desired_projection_digest\x18\x01 \x01(\tR\x17desiredProjectionDigest\x12<\n" +
 	"\x1aobserved_projection_digest\x18\x02 \x01(\tR\x18observedProjectionDigest\x129\n" +

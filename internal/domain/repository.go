@@ -12,8 +12,7 @@ type Repository[T ResourceObject] interface {
 	Delete(ctx context.Context, name string) error
 }
 
-// MachineRepository、ProfileRepository 为本切片 API 实际消费的两个仓储；
-// Provider/Skill/Deployment 的仓储随对应切片的 API 一同启用。
+// 各资源仓储：接口在领域层，SQLite 实现可替换（§4.9 / AD-2）。
 type (
 	MachineRepository    Repository[*Machine]
 	ProfileRepository    Repository[*AgentProfile]
@@ -21,12 +20,3 @@ type (
 	SkillRepository      Repository[*Skill]
 	DeploymentRepository Repository[*Deployment]
 )
-
-// OperationRepository 是 Operation 审计单元的最小仓储（本切片供互斥索引测试使用；
-// 完整状态机与派发语义在 reconcile 切片实现）。
-type OperationRepository interface {
-	Create(ctx context.Context, op *Operation) error
-	ListByMachine(ctx context.Context, machine string) ([]*Operation, error)
-	// UpdatePhase 迁移相位并递增 resource_version。相位合法性由调用方保证。
-	UpdatePhase(ctx context.Context, id, phase string) error
-}

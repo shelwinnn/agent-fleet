@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/shelwinnn/agent-fleet/internal/domain"
@@ -159,92 +158,6 @@ func (s *machineStore) Delete(ctx context.Context, name string) error {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: machine %q", domain.ErrNotFound, name)
-	}
-	return nil
-}
-
-// operationStore 实现 Operation 的最小仓储。互斥以 operations 表的部分唯一索引
-// 表达（架构 §4.3/§4.9）：并发创建同一机器的第二个未决操作在库层被拒绝。
-type operationStore struct {
-	db *sql.DB
-}
-
-func (s *operationStore) Create(ctx context.Context, op *domain.Operation) error {
-	meta := &op.Metadata
-	if op.Spec.Machine == "" {
-		return fmt.Errorf("%w: spec.machine is required", domain.ErrInvalid)
-	}
-	switch op.Spec.Type {
-	case domain.OperationTypeReconcile, domain.OperationTypeRepair, domain.OperationTypeBootstrap,
-		domain.OperationTypeRollback, domain.OperationTypeAutoPlan:
-	default:
-		return fmt.Errorf("%w: unknown operation type %q", domain.ErrInvalid, op.Spec.Type)
-	}
-	if op.Status.Phase == "" {
-		op.Status.Phase = domain.OperationPhasePending
-	}
-	meta.UID = ids.NewUID()
-	meta.ResourceVersion = 1
-	now := time.Now().UTC()
-	meta.CreationTimestamp = now
-	stamp := now.Format(time.RFC3339Nano)
-	specJSON, _ := json.Marshal(op.Spec)
-	statusJSON, _ := json.Marshal(op.Status)
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO operations (id, machine_id, op_type, transport, desired_generation, phase, spec, status, resource_version, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		meta.UID, op.Spec.Machine, op.Spec.Type, op.Spec.Transport, op.Spec.DesiredGeneration,
-		op.Status.Phase, string(specJSON), string(statusJSON), meta.ResourceVersion, stamp, stamp)
-	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: operations.machine_id") {
-		// operations 表唯一涉及 machine_id 的约束只有 §4.3 的机器级互斥部分索引，
-		// SQLite 对部分唯一索引冲突按列名报告，故以此识别。
-		return fmt.Errorf("%w: %s", domain.ErrMachineBusy, op.Spec.Machine)
-	}
-	return mapConstraintErr(err, "operations")
-}
-
-func (s *operationStore) ListByMachine(ctx context.Context, machine string) ([]*domain.Operation, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, machine_id, op_type, transport, desired_generation, phase, spec, status, resource_version, created_at, updated_at
-		 FROM operations WHERE machine_id = ? ORDER BY created_at`, machine)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list operations for %q: %w", machine, err)
-	}
-	defer rows.Close()
-
-	var out []*domain.Operation
-	for rows.Next() {
-		var id, machineID, opType, transport, phase, specJSON, statusJSON, createdAt, updatedAt string
-		var generation, rv int64
-		if err := rows.Scan(&id, &machineID, &opType, &transport, &generation, &phase,
-			&specJSON, &statusJSON, &rv, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("sqlite: scan operations: %w", err)
-		}
-		op := &domain.Operation{}
-		if err := fillMeta(&op.Metadata, id, machineID, rv, createdAt); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal([]byte(specJSON), &op.Spec); err != nil {
-			return nil, fmt.Errorf("sqlite: unmarshal operation spec: %w", err)
-		}
-		if err := json.Unmarshal([]byte(statusJSON), &op.Status); err != nil {
-			return nil, fmt.Errorf("sqlite: unmarshal operation status: %w", err)
-		}
-		out = append(out, op)
-	}
-	return out, rows.Err()
-}
-
-func (s *operationStore) UpdatePhase(ctx context.Context, id, phase string) error {
-	statusJSON, _ := json.Marshal(domain.OperationStatus{Phase: phase})
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE operations SET phase = ?, status = ?, resource_version = resource_version + 1, updated_at = ?
-		 WHERE id = ?`, phase, string(statusJSON), time.Now().UTC().Format(time.RFC3339Nano), id)
-	if err != nil {
-		return fmt.Errorf("sqlite: update operation %s phase: %w", id, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: operation %q", domain.ErrNotFound, id)
 	}
 	return nil
 }

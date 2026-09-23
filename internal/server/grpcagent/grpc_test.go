@@ -20,6 +20,7 @@ import (
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
 	"github.com/shelwinnn/agent-fleet/internal/controller/machine"
+	"github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
@@ -42,6 +43,10 @@ type harness struct {
 	observed   domain.ObservedStateRepository
 	status     domain.MachineStatusRepository
 	ctrl       *machine.Controller
+	rec        *reconcile.Controller
+	profiles   domain.ProfileRepository
+	snapshots  domain.SnapshotRepository
+	ops        domain.OperationRepository
 }
 
 func quietLog() *slog.Logger {
@@ -69,11 +74,23 @@ func newHarness(t *testing.T, cfg Config) *harness {
 	status := sqlite.NewMachineStatusStore(db)
 	certs := sqlite.NewAgentCertificateStore(db)
 	observed := sqlite.NewObservedStateStore(db)
+	profiles := sqlite.NewProfileStore(db)
+	snapshots := sqlite.NewSnapshotStore(db)
+	ops := sqlite.NewOperationStore(db)
 	ctrl := machine.NewController(machines, status, observed, certs, quietLog())
 	go machine.RunOfflineScanner(context.Background(), ctrl, cfg.scanEvery(), cfg.offlineAfter(), quietLog())
 
+	// KM-23：接线 Reconcile 控制器（下行 Dispatcher = 本 Server；上行 ResultSink =
+	// reconcile 控制器），构成 §9.2 的完整 daemon 闭环。
+	render := reconcile.NewRenderer(machines, profiles, sqlite.NewSkillStore(db),
+		sqlite.NewProviderStore(db), "fixture/v1")
+	rec := reconcile.NewController(machines, status, snapshots, ops, observed, render,
+		reconcile.Config{PlanTimeout: 30 * time.Minute, FreshnessWindow: 15 * time.Minute}, quietLog())
+
 	tokens := enrollment.NewTokenService(sqlite.NewEnrollmentStore(db))
 	srv := New(cfg, ca, tokens, ctrl, machines, certs, observed, quietLog())
+	rec.SetDispatcher(srv)
+	srv.SetResultSink(rec)
 
 	g := srv.GRPCServer()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -87,6 +104,7 @@ func newHarness(t *testing.T, cfg Config) *harness {
 		t: t, addr: ln.Addr().String(), ca: ca, caPath: caPath, tokens: tokens,
 		tokenStore: sqlite.NewEnrollmentStore(db),
 		machines:   machines, certs: certs, observed: observed, status: status, ctrl: ctrl,
+		rec: rec, profiles: profiles, snapshots: snapshots, ops: ops,
 	}
 }
 

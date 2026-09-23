@@ -68,9 +68,13 @@ type MachineStatusRepository interface {
 type ObservedStateRecord struct {
 	Machine      string
 	InventorySeq int64
-	OperationID  string          // 空表示周期上报
-	Payload      json.RawMessage // ObservedState JSON
-	RecordedAt   time.Time
+	OperationID  string // 空表示周期上报
+	// ObservedGeneration 是该观测"对哪一代期望采集"的因果标注：携带 operationId
+	// 的观测按该操作的目标代归属（§4.4 因果绑定）；周期观测按存储时的当前代归属。
+	// 期望代在其后变化时，Drifted/Reconciled 必须置 Unknown(ObservationPredatesDesired)。
+	ObservedGeneration int64
+	Payload            json.RawMessage // ObservedState JSON
+	RecordedAt         time.Time
 }
 
 // ObservedStateRepository 维护每机最新观测。

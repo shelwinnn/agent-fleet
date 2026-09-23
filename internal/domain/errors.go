@@ -10,8 +10,17 @@ var (
 	ErrAlreadyExists = errors.New("resource already exists")
 	ErrInvalid       = errors.New("resource invalid")
 	// ErrMachineBusy 表示目标机器已有未决操作（§4.3：互斥以持久层唯一索引表达）。
-	// API 侧的 409 MachineBusy 在 reconcile 切片接入；本切片由存储层先行返回。
 	ErrMachineBusy = errors.New("machine has an unresolved operation")
+	// ErrOpState 表示操作的相位迁移不合法（CAS from 不匹配等，§6.4 状态机）。
+	ErrOpState = errors.New("operation state transition invalid")
+	// ErrAgentDisconnected 表示该机器当前没有活跃 Connect 流，无法派发（§4.3 路由）。
+	ErrAgentDisconnected = errors.New("agent connect stream not available")
+	// ErrRollbackUnsupported 表示回滚目标代不可用或安装器不支持（§7.2/FR-2.4：
+	// 如实报错，绝不虚报成功）。
+	ErrRollbackUnsupported = errors.New("rollback unsupported")
+	// ErrReplanRequired 表示计划基线已失效，需重新 plan 与重新确认
+	//（FR-12.7：确认窗口内基线变化按 ReplanRequired 处理）。
+	ErrReplanRequired = errors.New("replan required")
 )
 
 // reason code（错误体首要素，§6.4）。MachineBusy 属 §30 第四组（操作协调），

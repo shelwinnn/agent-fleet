@@ -16,7 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shelwinnn/agent-fleet/internal/controller/machine"
+	deployctl "github.com/shelwinnn/agent-fleet/internal/controller/deployment"
+	machine "github.com/shelwinnn/agent-fleet/internal/controller/machine"
+	reconcilectl "github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"
 	grpcagent "github.com/shelwinnn/agent-fleet/internal/server/grpcagent"
 	"github.com/shelwinnn/agent-fleet/internal/server/httpapi"
@@ -53,6 +55,14 @@ func run() error {
 		"心跳超时置离线阈值（§4.2 默认 45s）")
 	offlineScanEvery := fs.Duration("offline-scan-every", grpcagent.DefaultOfflineScanEvery,
 		"离线扫描周期（默认 5s）")
+	planTimeout := fs.Duration("plan-timeout", 30*time.Minute,
+		"计划确认窗口（§9.3 默认 30 分钟，可配置）")
+	freshnessWindow := fs.Duration("freshness-window", 15*time.Minute,
+		"观测新鲜度阈值（§6.2 默认 3×inventory 间隔 = 15min）")
+	deployScanEvery := fs.Duration("deploy-scan-every", 2*time.Second,
+		"Deployment 推进循环周期")
+	adapterSchemaVersion := fs.String("adapter-schema-version", "fixture/v1",
+		"适配器 schema 版本（渲染输入五要素之一，§9；随适配器切片对齐）")
 	fs.Parse(os.Args[1:]) //nolint:errcheck // ExitOnError
 
 	if *dbPath == "" {
@@ -94,9 +104,31 @@ func run() error {
 	statusStore := sqlite.NewMachineStatusStore(db)
 	certStore := sqlite.NewAgentCertificateStore(db)
 	observedStore := sqlite.NewObservedStateStore(db)
+	snapshotStore := sqlite.NewSnapshotStore(db)
+	operationStore := sqlite.NewOperationStore(db)
+	profileStore := sqlite.NewProfileStore(db)
+	skillStore := sqlite.NewSkillStore(db)
+	providerStore := sqlite.NewProviderStore(db)
+	deploymentStore := sqlite.NewDeploymentStore(db)
+	targetStore := sqlite.NewDeploymentTargetStore(db)
 
 	ctrl := machine.NewController(machineStore, statusStore, observedStore, certStore, log)
 	go machine.RunOfflineScanner(ctx, ctrl, *offlineScanEvery, *offlineAfter, log)
+
+	// Reconcile 控制器（§4.3/§4.8/FR-9.x）：期望渲染 + 快照物化 + 派发 +
+	// 状态机 + drift 三态。渲染纯函数经 NewRenderer 注入各仓储。
+	render := reconcilectl.NewRenderer(machineStore, profileStore, skillStore,
+		providerStore, *adapterSchemaVersion)
+	recCtrl := reconcilectl.NewController(machineStore, statusStore, snapshotStore,
+		operationStore, observedStore, render, reconcilectl.Config{
+			PlanTimeout:     *planTimeout,
+			FreshnessWindow: *freshnessWindow,
+		}, log)
+
+	// Deployment 控制器（§4.4/FR-10.x）与周期推进循环。
+	depCtrl := deployctl.NewController(deploymentStore, targetStore, machineStore,
+		snapshotStore, operationStore, observedStore, recCtrl, log)
+	go depCtrl.RunLoop(ctx, *deployScanEvery)
 
 	tokens := enrollment.NewTokenService(sqlite.NewEnrollmentStore(db))
 	agentSrv := grpcagent.New(grpcagent.Config{
@@ -105,6 +137,34 @@ func run() error {
 		OfflineAfter:       *offlineAfter,
 		ClientCertValidity: *clientCertValidity,
 	}, ca, tokens, ctrl, machineStore, certStore, observedStore, log)
+	// 双向接线：gRPC 端点是下行派发通道（Dispatcher），Reconcile 控制器是
+	// 上行结果回灌入口（ResultSink）。
+	recCtrl.SetDispatcher(agentSrv)
+	agentSrv.SetResultSink(recCtrl)
+
+	// 重启自愈（§4.3 第 4 条/FR-15.3）：Pending/Running → Unknown（不移出未决集合）。
+	if err := recCtrl.RecoverInflight(ctx); err != nil {
+		return fmt.Errorf("recover in-flight operations: %w", err)
+	}
+
+	// 计划超时与观测新鲜度扫描（§9.3 第 4 条/§6.2 契约）。
+	go func() {
+		ticker := time.NewTicker(*offlineScanEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				if err := recCtrl.ScanPlanTimeout(ctx, now.UTC()); err != nil {
+					log.Error("plan timeout scan failed", "err", err)
+				}
+				if err := recCtrl.ScanFreshness(ctx, now.UTC()); err != nil {
+					log.Error("freshness scan failed", "err", err)
+				}
+			}
+		}
+	}()
 
 	// agent gRPC 端点（§4.1）：TLS 强制 + 服务端证书；Connect/Renew 强制客户端
 	// 证书（mTLS），Enroll 免客户端证书但经 TLS + token + 按源 IP 失败限速。
@@ -129,7 +189,8 @@ func run() error {
 			return ctrl.OnMachineDeleted(ctx, name)
 		},
 	},
-		machineStore, sqlite.NewProfileStore(db), db.PingContext, log)
+		machineStore, profileStore, skillStore, providerStore, deploymentStore,
+		operationStore, recCtrl, depCtrl, *adapterSchemaVersion, db.PingContext, log)
 
 	srv := &http.Server{
 		Addr:              *addr,
