@@ -22,6 +22,7 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"
 	grpcagent "github.com/shelwinnn/agent-fleet/internal/server/grpcagent"
 	"github.com/shelwinnn/agent-fleet/internal/server/httpapi"
+	"github.com/shelwinnn/agent-fleet/internal/server/sse"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
 )
 
@@ -99,6 +100,11 @@ func run() error {
 	if err := db.Migrate(ctx, log); err != nil {
 		return err
 	}
+
+	// SSE 事件枢纽（§8.1 `GET /api/v1/events`，§23.6）：接到持久层的写成功钩子上，
+	// 因此 REST、控制器与 agent 上报三条写入来源都自动产生事件（KM-25）。
+	events := sse.NewHub(log)
+	db.SetChangeSink(events.Publish)
 
 	machineStore := sqlite.NewMachineStore(db)
 	statusStore := sqlite.NewMachineStatusStore(db)
@@ -183,8 +189,10 @@ func run() error {
 	}()
 
 	api := httpapi.New(httpapi.Config{
-		AdminToken:   adminToken,
-		EnrollTokens: &tokenIssuer{tokens: tokens, ttl: *tokenTTL},
+		AdminToken:        adminToken,
+		Events:            events.Handler(),
+		DeploymentTargets: targetStore.List,
+		EnrollTokens:      &tokenIssuer{tokens: tokens, ttl: *tokenTTL},
 		OnMachineDelete: func(ctx context.Context, name string) error {
 			return ctrl.OnMachineDeleted(ctx, name)
 		},

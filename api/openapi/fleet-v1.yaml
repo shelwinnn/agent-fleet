@@ -1,13 +1,18 @@
 # agent-fleet REST 契约
 #
 # 依据：架构 v1.1.2 §8.1（REST API）与 §6.4（错误模型）。
-# machines / profiles 为完整 CRUD；skills / providers / deployments 为骨架路由，
-# 一律返回 501 NotImplemented（实现归属后续切片）。
 # KM-22 新增：POST /api/v1/machines/{name}/enroll-token（一次性 enrollment token）。
 # KM-23 新增动作端点：reconcile/confirm、rollback、operations、cancel/skip、
 # drift、render、deployment rollback/skip-target（§8.1）。
-# 其余动作端点（probe/bootstrap/repair-agentd/inventory）、SSE 与 gRPC 契约
-# 不在本文件（gRPC 以 api/proto/fleet/v1 为准；SSH 路径随第 6 片）。
+# KM-25 起：本文件与实现对齐——skills / providers / deployments 已是完整 CRUD
+# （不再是 501 骨架），并补入 SSE 端点 GET /api/v1/events（FR-14.1/FR-14.2、§23.6）
+# 与 Web UI 需要的 Operation / Deployment 目标 / MachineStatus 类型。
+# 【路径约定】§8.1 列出的全部路径都写在 "/api/v1" 前缀之下（该节的资源端点同样
+# 省略前缀），因此 §23.6 的 `GET /events` 与其余端点一致地解析为 /api/v1/events。
+# 【仍未注册的端点】§23.1 的 ssh/probe、bootstrap、repair-agentd、inventory 与
+# §23.3 的 skills/{id}/resolve、skills/{id}/revisions 属第 6 片（SSH 路径），
+# 当前未注册：命中 catch-all 返回 404 NotFound。本文件不为其编造契约。
+# gRPC 契约以 api/proto/fleet/v1 为准。
 # 声明版本为 3.1.0（KM-21 核查发现 #1：本文件使用了 3.1 才有的
 # components.pathItems；3.0.3 声明与内容不符会卡严格校验器）。
 openapi: 3.1.0
@@ -20,11 +25,19 @@ info:
     spec 由操作者读写；status 由控制器维护——创建时初始化为 `{}`，更新时不接受改写。
 servers:
   - url: http://127.0.0.1:7788
+# §29.14：admin token 经 `Authorization: Bearer` 传递；服务端未配置 token（回环默认）
+# 时不校验。因此 security 列表含空项——"带 token"与"服务端未启用鉴权"都合法。
+security:
+  - adminToken: []
+  - {}
 tags:
   - name: system
   - name: machines
   - name: profiles
-  - name: skeleton
+  - name: skills
+  - name: providers
+  - name: deployments
+  - name: events
 paths:
   /healthz:
     get:
@@ -292,12 +305,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Operation"
+                $ref: "#/components/schemas/OperationList"
         "404": { $ref: "#/components/responses/Error" }
   /api/v1/machines/{name}/operations/{opId}/cancel:
     post:
@@ -371,8 +379,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/MachineDrift"
         "404": { $ref: "#/components/responses/Error" }
   /api/v1/profiles/{name}/render:
     get:
@@ -390,8 +397,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/RenderPreview"
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /api/v1/deployments/{name}/rollback:
@@ -456,14 +462,283 @@ paths:
                 additionalProperties: true
         "404": { $ref: "#/components/responses/Error" }
 
+  # ===== KM-25：skills / providers / deployments 的完整 CRUD（KM-23 起已实现）=====
+
   /api/v1/skills:
-    $ref: "#/components/pathItems/Skeleton"
+    get:
+      tags: [skills]
+      summary: 列出 Skill（支持 ?name= 过滤）
+      parameters:
+        - name: name
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Skill 列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillList"
+    post:
+      tags: [skills]
+      summary: 创建 Skill
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Skill"
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skill"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /api/v1/skills/{name}:
-    $ref: "#/components/pathItems/Skeleton"
+    parameters:
+      - $ref: "#/components/parameters/ResourceName"
+    get:
+      tags: [skills]
+      summary: 读取 Skill
+      responses:
+        "200":
+          description: Skill
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skill"
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [skills]
+      summary: 更新 Skill spec（metadata 与 status 以存储现值为准）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Skill"
+      responses:
+        "200":
+          description: 更新后的 Skill
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skill"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [skills]
+      summary: 删除 Skill
+      responses:
+        "204":
+          description: 已删除
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/providers:
-    $ref: "#/components/pathItems/Skeleton"
+    get:
+      tags: [providers]
+      summary: 列出 ModelProvider（支持 ?name= 过滤；只存 apiKeyEnv 名称，不含秘密值）
+      parameters:
+        - name: name
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: ModelProvider 列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProviderList"
+    post:
+      tags: [providers]
+      summary: 创建 ModelProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelProvider"
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProvider"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /api/v1/providers/{name}:
-    $ref: "#/components/pathItems/Skeleton"
+    parameters:
+      - $ref: "#/components/parameters/ResourceName"
+    get:
+      tags: [providers]
+      summary: 读取 ModelProvider
+      responses:
+        "200":
+          description: ModelProvider
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProvider"
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [providers]
+      summary: 更新 ModelProvider spec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelProvider"
+      responses:
+        "200":
+          description: 更新后的 ModelProvider
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProvider"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [providers]
+      summary: 删除 ModelProvider
+      responses:
+        "204":
+          description: 已删除
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/deployments:
+    get:
+      tags: [deployments]
+      summary: 列出 Deployment（支持 ?name= 过滤；status.targets 为逐机推进状态）
+      description: |
+        `status.targets` 由服务端从 `deployment_targets` 表补齐（§6.1 的资源形态、
+        §10.1 的权威存储），列表与单对象、以及创建/更新/回滚的响应都带该字段；
+        逐机结果的 `phase`/`reason` 是 UI 区分 Superseded/Skipped 与 Failed 的依据
+        （FR-14.5 第 3 组，KM-25）。
+      parameters:
+        - name: name
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deployment 列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeploymentList"
+    post:
+      tags: [deployments]
+      summary: 创建 Deployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Deployment"
+      responses:
+        "201":
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/deployments/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [deployments]
+      summary: 读取 Deployment
+      responses:
+        "200":
+          description: Deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [deployments]
+      summary: 更新 Deployment spec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Deployment"
+      responses:
+        "200":
+          description: 更新后的 Deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deployment"
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [deployments]
+      summary: 删除 Deployment
+      responses:
+        "204":
+          description: 已删除
+        "404": { $ref: "#/components/responses/Error" }
+
+  # ===== SSE（KM-25；FR-14.1/FR-14.2，事件格式见 §23.6）=====
+  /api/v1/events:
+    get:
+      tags: [events]
+      summary: 订阅资源变更事件流（SSE）
+      description: |
+        `Accept: text/event-stream` 的长连接。每条事件为
+        `event: <resource-type>` + `data: {"id","revision"}`：
+        资源类型取 machines/profiles/skills/providers/deployments/operations，
+        `id` 为资源名（operations 为操作 id，等于 metadata.name），
+        `revision` 为写入后的 metadata.resourceVersion。
+        UI 据此按 (类型, id) 选择性重取，SSE 不承载资源正文（FR-14.2/NFR-9）。
+
+        契约细节（§23.6 未规定、本实现取的最小自洽语义，KM-25 已登记）：
+        - 连接建立时先发一条标准 SSE `retry:` 建议（3s）与周期保活注释行；
+        - 无 Last-Event-ID 重放：客户端重连后自行做一次全量重取（事件只用于失效旧数据）；
+        - 删除事件携带"删除前版本 +1"，该 id 随后经 REST 读取得到 404；
+        - 订阅端缓冲溢出时服务端关闭该连接（不静默丢事件），由客户端重连收敛；
+        - 鉴权同其余 /api/v1 端点（§29.14，Bearer adminToken）。浏览器 EventSource
+          无法设置请求头，UI 侧用 fetch 流式读取该端点。
+      responses:
+        "200":
+          description: 事件流（text/event-stream；连接保持直到客户端断开）
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE 记录序列，形如：
+                  `event: machines\ndata: {"id":"gpu-home","revision":7}\n\n`
+        "401": { $ref: "#/components/responses/Error" }
+        "501":
+          description: 未装配事件枢纽（骨架语义）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+# 【KM-25 修复】原文件缺少顶层 `components:` 键：parameters/schemas/pathItems/responses
+# 实际落在文档根上，全部 `#/components/...` 引用都解析不到，且两个 `schemas:` 同级键
+# 在解析时后者覆盖前者（EnrollTokenRequest/EnrollToken 丢失）。现补齐 components 容器。
+components:
+  securitySchemes:
+    adminToken:
+      type: http
+      scheme: bearer
+      description: |
+        §29.14 管理令牌：非回环监听时必须携带（值来自 `--admin-token-env` 指定的
+        环境变量）；回环监听且未配置时不校验。浏览器端 EventSource 不能带头，
+        UI 对 `GET /api/v1/events` 使用 fetch 流式读取以携带该头。
   parameters:
     ResourceName:
       name: name
@@ -472,7 +747,29 @@ paths:
       schema:
         type: string
         pattern: "^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"
+  responses:
+    Error:
+      description: 统一错误体
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  # 【KM-25 修复】原先 components 下出现两个 `schemas:` 键：YAML 解析时后者覆盖前者，
+  # 使 EnrollTokenRequest / EnrollToken 在解析结果中消失（严格校验器也会拒绝重复键）。
+  # 现合并为单一 schemas 块；原先未被任何路径引用的 pathItems.Skeleton 已删除
+  # （骨架端点属第 6 片，未注册即无契约可写，见文件头说明）。
   schemas:
+    # KM-25 补齐：KM-23 的动作端点引用了本 schema 但从未定义（配合缺失的 components 键）。
+    ReconcileRequest:
+      type: object
+      description: |
+        POST /machines/{name}/reconcile 的请求体（可空）。携带 confirmPlanDigest 时
+        表示"确认该操作自己的计划"——机器级互斥三例外之一（§4.3 第 6 条），
+        不创建第二条未决操作；digest 与等待中的 planDigest 不一致返回 409 ReplanRequired。
+      properties:
+        confirmPlanDigest:
+          type: string
+          description: 被确认计划（spec.planDigest）的摘要
     EnrollTokenRequest:
       type: object
       required: [csrPubKeySha256]
@@ -499,36 +796,6 @@ paths:
           format: date-time
         note:
           type: string
-  pathItems:
-    Skeleton:
-      get:
-        tags: [skeleton]
-        summary: 骨架路由（未实现）
-        responses:
-          "501": { $ref: "#/components/responses/Error" }
-      post:
-        tags: [skeleton]
-        summary: 骨架路由（未实现）
-        responses:
-          "501": { $ref: "#/components/responses/Error" }
-      put:
-        tags: [skeleton]
-        summary: 骨架路由（未实现）
-        responses:
-          "501": { $ref: "#/components/responses/Error" }
-      delete:
-        tags: [skeleton]
-        summary: 骨架路由（未实现）
-        responses:
-          "501": { $ref: "#/components/responses/Error" }
-  responses:
-    Error:
-      description: 统一错误体
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
-  schemas:
     HealthStatus:
       type: object
       required: [status]
@@ -590,9 +857,8 @@ paths:
               type: string
           additionalProperties: true
         status:
-          type: object
-          description: 控制器维护（conditions 等）；API 创建/更新时不接受改写
-          additionalProperties: true
+          description: 控制器维护（§6.2 conditions 与观测字段）；API 创建/更新时不接受改写
+          $ref: "#/components/schemas/MachineStatus"
     MachineList:
       type: object
       required: [items]
@@ -601,6 +867,253 @@ paths:
           type: array
           items:
             $ref: "#/components/schemas/Machine"
+    Condition:
+      type: object
+      description: §22 状态条件；三态 True/False/Unknown（FR-1.9：不得以 False 冒充"已确认一致"）
+      required: [type, status, lastTransitionTime]
+      properties:
+        type:
+          type: string
+          enum: [SSHReachable, AgentConnected, InventoryReady, Drifted, Reconciled, Degraded]
+        status:
+          type: string
+          enum: ["True", "False", "Unknown"]
+        reason: { type: string }
+        message: { type: string }
+        lastTransitionTime: { type: string, format: date-time }
+    MachineStatus:
+      type: object
+      description: |
+        控制器维护的 Machine status（§6.1/§6.2）。UI 呈现在此基础上做三态判定：
+        Drifted 为 Unknown 时必须显示原因，绝不渲染为"一致"（FR-14.5）。
+      properties:
+        conditions:
+          type: array
+          items: { $ref: "#/components/schemas/Condition" }
+        observedGeneration: { type: integer, format: int64 }
+        desiredGeneration: { type: integer, format: int64 }
+        os: { type: string }
+        arch: { type: string }
+        hostname: { type: string }
+        homeDir: { type: string }
+        kernelVersion: { type: string }
+        agentdVersion: { type: string }
+        lastHeartbeatAt: { type: string, format: date-time }
+        lastInventoryAt: { type: string, format: date-time }
+        inventorySeq: { type: integer, format: int64 }
+        desiredProjectionDigest: { type: string }
+        observedProjectionDigest: { type: string }
+        canonicalizationVersion: { type: string }
+        unresolvedOperation:
+          $ref: "#/components/schemas/UnresolvedOperationRef"
+        adapterCapabilities:
+          type: array
+          description: 节点上报的逐家族能力声明（控制面只读，KM-24）
+          items:
+            type: object
+            properties:
+              family: { type: string }
+              capability: { type: string }
+              state: { type: string }
+              verifiedVersions: { type: string }
+              reason: { type: string }
+      additionalProperties: true
+    UnresolvedOperationRef:
+      type: object
+      description: 占用机器级互斥的操作引用（FR-1.10；409 MachineBusy 的 diagnostics 同形）
+      properties:
+        id: { type: string }
+        phase: { type: string }
+        type: { type: string }
+    Skill:
+      type: object
+      required: [metadata]
+      properties:
+        metadata: { $ref: "#/components/schemas/ObjectMeta" }
+        spec:
+          type: object
+          description: Skill 源引用（source/ref 等，JSON 对象透传存储）
+          additionalProperties: true
+        status:
+          type: object
+          description: resolve 控制器写入 resolvedRevision/contentDigest；未解析时为空
+          properties:
+            resolvedRevision: { type: string }
+            contentDigest: { type: string }
+          additionalProperties: true
+    SkillList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Skill" }
+    ModelProvider:
+      type: object
+      required: [metadata]
+      properties:
+        metadata: { $ref: "#/components/schemas/ObjectMeta" }
+        spec:
+          type: object
+          description: openai-compatible 端点引用；只存 apiKeyEnv 环境变量名，不含秘密值
+          additionalProperties: true
+        status:
+          type: object
+          additionalProperties: true
+    ModelProviderList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ModelProvider" }
+    DeploymentTarget:
+      type: object
+      description: |
+        逐机推进状态（§6.1/§10.1）。Superseded 与 Skipped 必须与 Failed 区分显示，
+        且各自带 reason（FR-14.5）。
+      required: [machine, phase]
+      properties:
+        machine: { type: string }
+        phase:
+          type: string
+          enum: [Pending, Running, Succeeded, Failed, Superseded, Skipped, Blocked]
+        reason:
+          type: string
+          description: Superseded/Skipped/Failed 的原因码（如 SupersededByNewerGeneration）
+        operationId: { type: string }
+        effectiveGeneration: { type: integer, format: int64 }
+        updatedAt: { type: string, format: date-time }
+    DeploymentStatus:
+      type: object
+      properties:
+        phase:
+          type: string
+          enum: [Pending, Canary, RollingOut, Paused, Succeeded, Failed]
+        reason: { type: string }
+        targets:
+          type: array
+          items: { $ref: "#/components/schemas/DeploymentTarget" }
+    Deployment:
+      type: object
+      required: [metadata]
+      properties:
+        metadata: { $ref: "#/components/schemas/ObjectMeta" }
+        spec:
+          type: object
+          description: |
+            发布规格：selector.machineNames、targetGeneration、rollbackOf（非空即回滚型）、
+            strategy{canary,batchSize,maxUnavailable,pauseOnFailure}。
+          properties:
+            machineNames:
+              type: array
+              items: { type: string }
+            targetGeneration: { type: integer, format: int64 }
+            rollbackOf: { type: integer, format: int64 }
+            strategy:
+              type: object
+              properties:
+                canary: { type: integer }
+                batchSize: { type: integer }
+                maxUnavailable: { type: integer }
+                pauseOnFailure: { type: boolean }
+              additionalProperties: true
+          additionalProperties: true
+        status: { $ref: "#/components/schemas/DeploymentStatus" }
+    DeploymentList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Deployment" }
+    Operation:
+      type: object
+      description: 系统创建的不可变审计单元（§6.4）；动作端点以 202 返回
+      required: [metadata, spec, status]
+      properties:
+        metadata: { $ref: "#/components/schemas/ObjectMeta" }
+        spec:
+          type: object
+          properties:
+            machine: { type: string }
+            type:
+              type: string
+              enum: [Reconcile, Repair, Bootstrap, Rollback, AutoPlan]
+            transport: { type: string, enum: [agentd, ssh] }
+            desiredGeneration: { type: integer, format: int64 }
+            readOnly: { type: boolean }
+            planDigest:
+              type: string
+              description: 确认对象是具体计划（FR-12.7）；SSH 路径 AwaitingConfirmation 时非空
+          additionalProperties: true
+        status:
+          type: object
+          properties:
+            phase:
+              type: string
+              enum: [Pending, Running, AwaitingConfirmation, CancelRequested, Succeeded, Failed, Unknown]
+            startedAt: { type: string, format: date-time }
+            finishedAt: { type: string, format: date-time }
+            terminalModifier:
+              type: string
+              enum: [Superseded, Cancelled, Skipped]
+            planExpiresAt:
+              type: string
+              format: date-time
+              description: 确认窗口截止（§9.3 默认 30 分钟）；UI 显示"等待确认（剩余 T）"
+            verify:
+              type: object
+              description: 门禁证据（FR-15.5）；UI 只呈现结论
+              properties:
+                desiredProjectionDigest: { type: string }
+                observedProjectionDigest: { type: string }
+                canonicalizationVersion: { type: string }
+                inventorySeq: { type: integer, format: int64 }
+                adapterHealth: { type: string, enum: [passed, failed, skipped] }
+              additionalProperties: true
+          additionalProperties: true
+    OperationList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Operation" }
+    MachineDrift:
+      type: object
+      description: |
+        drift 三态视图（GET /machines/{name}/drift，FR-14.5）。`drifted.status` 是权威
+        三态：False=一致 / Unknown=未知或过期（带 reason）/ True=漂移。
+      properties:
+        machine: { type: string }
+        drifted: { $ref: "#/components/schemas/ConditionView" }
+        reconciled: { $ref: "#/components/schemas/ConditionView" }
+        desiredGeneration: { type: integer, format: int64 }
+        observedGeneration: { type: integer, format: int64 }
+        lastInventoryAt: { type: string, format: date-time }
+        inventorySeq: { type: integer, format: int64 }
+        desiredProjectionDigest: { type: string }
+        observedProjectionDigest: { type: string }
+        unresolvedOperation: { $ref: "#/components/schemas/UnresolvedOperationRef" }
+        evaluation: { type: object, additionalProperties: true }
+    ConditionView:
+      type: object
+      description: 条件的展示视图；未记录时 status=Unknown 且 reason=NeverInventoried
+      properties:
+        status: { type: string, enum: ["True", "False", "Unknown"] }
+        reason: { type: string }
+        message: { type: string }
+        lastTransitionTime: { type: string, format: date-time }
+    RenderPreview:
+      type: object
+      description: GET /profiles/{name}/render?machine=<name>（FR-7.4：不落库、不增代）
+      properties:
+        profile: { type: string }
+        machine: { type: string }
+        digest: { type: string }
+        canonicalizationVersion: { type: string }
+        desired: { type: object, additionalProperties: true }
     AgentProfile:
       type: object
       required: [metadata]

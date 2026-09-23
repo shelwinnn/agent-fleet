@@ -31,3 +31,30 @@ jobs:
         run: go build ./...
       - name: test
         run: go test -race ./...
+
+  # Web UI（KM-25：FR-14.4 Svelte + TypeScript + Vite + shadcn-svelte）。
+  # 门禁 = 类型检查 + 单元测试 + 生产构建；联调测试（tests/integration.test.ts）
+  # 需要真实控制面，故默认跳过（FLEET_INTEGRATION=1 时启用）。
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: install
+        run: pnpm install --frozen-lockfile
+      - name: check
+        run: pnpm check
+      - name: test
+        run: pnpm test
+      - name: build
+        run: pnpm build

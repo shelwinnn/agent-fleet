@@ -35,6 +35,13 @@ type Config struct {
 	// OnMachineDelete 在机器删除成功后调用（KM-22：退役该机证书，§4.6）。
 	// 失败只记日志，不影响 204——"删除即拒绝"由 Connect 的机器存在性检查兜底。
 	OnMachineDelete func(ctx context.Context, name string) error
+	// Events 是 SSE 事件枢纽处理器（KM-25：§8.1 `GET /api/v1/events`，格式见 §23.6）；
+	// nil 时该路由按骨架语义返回 501。
+	Events http.Handler
+	// DeploymentTargets 读取某 Deployment 的逐机推进状态（deployment_targets 表）。
+	// 非 nil 时，GET /api/v1/deployments 与 /{name} 会把结果并入 status.targets
+	// （§6.1 已规定的字段；FR-14.5 第 3 组的数据来源）。
+	DeploymentTargets func(ctx context.Context, deployment string) ([]domain.DeploymentTargetStatus, error)
 }
 
 type Server struct {
@@ -87,6 +94,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/v1/machines/{name}", s.auth(machines.item()))
 	mux.Handle("POST /api/v1/machines/{name}/enroll-token", s.auth(http.HandlerFunc(s.handleEnrollToken)))
 
+	// SSE 事件枢纽（§8.1 `GET /events`，§23.6 事件格式；KM-25）。
+	// 路径按 §8.1 的 /api/v1 前缀约定解析为 /api/v1/events；鉴权与其余端点同一
+	// 中间件（§29.14），浏览器端用 fetch 流式读取以携带 Authorization 头。
+	events := s.cfg.Events
+	if events == nil {
+		events = notImplemented("events")
+	}
+	mux.Handle("GET /api/v1/events", s.auth(events))
+
 	// 动作端点（§8.1；KM-23）。confirm/cancel/skip 是机器级互斥的三个合法例外。
 	mux.Handle("POST /api/v1/machines/{name}/reconcile", s.auth(http.HandlerFunc(s.handleReconcile)))
 	mux.Handle("POST /api/v1/machines/{name}/rollback", s.auth(http.HandlerFunc(s.handleRollbackMachine)))
@@ -124,6 +140,7 @@ func (s *Server) Handler() http.Handler {
 		resource: "deployments",
 		repo:     s.deployments,
 		validate: func(d *domain.Deployment) error { return d.Validate() },
+		enrich:   s.attachDeploymentTargets,
 	}
 	mux.Handle("/api/v1/deployments", s.auth(deployments.collection()))
 	mux.Handle("/api/v1/deployments/{name}", s.auth(deployments.item()))
@@ -189,6 +206,14 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Flush 透传 http.Flusher：SSE 处理器（/api/v1/events）经本中间件时，若这里
+// 不实现 Flusher，事件会被缓冲到连接结束（KM-25）。底层不支持 Flush 时是空操作。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // notImplemented 返回骨架路由的 501 响应。

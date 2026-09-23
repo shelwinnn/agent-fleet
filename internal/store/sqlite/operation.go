@@ -20,10 +20,12 @@ import (
 // reconcile 控制器经 ListUnresolved + Transition 完成——互斥随库恢复。
 type operationStore struct {
 	db *sql.DB
+	// changes 写成功后发布变更（§23.6 SSE 事件源）。
+	changes *changeNotifier
 }
 
 func NewOperationStore(db *DB) domain.OperationRepository {
-	return &operationStore{db: db.sql}
+	return &operationStore{db: db.sql, changes: db.changes}
 }
 
 func (s *operationStore) Create(ctx context.Context, op *domain.Operation) error {
@@ -77,6 +79,7 @@ func (s *operationStore) Create(ctx context.Context, op *domain.Operation) error
 		}
 		return mapConstraintErr(err, "operations")
 	}
+	s.changes.emit(resourceOperations, meta.Name, meta.ResourceVersion)
 	return nil
 }
 
@@ -200,7 +203,13 @@ func (s *operationStore) Transition(ctx context.Context, id, from, to string, mu
 		if err := writeOperationRow(ctx, tx, op); err != nil {
 			return err
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		// 相位迁移是 UI 最关心的变更（未决操作/阻塞/终态），事件版本 = rv+1
+		//（writeOperationRow 的 UPDATE 就是 rv+1）。
+		s.changes.emit(resourceOperations, id, op.Metadata.ResourceVersion+1)
+		return nil
 	})
 }
 
@@ -254,7 +263,15 @@ func (s *operationStore) ReplaceSteps(ctx context.Context, id string, steps []do
 				return fmt.Errorf("sqlite: insert step %s/%d: %w", id, st.Seq, err)
 			}
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		// 步骤明细随进度上报变化；事件版本用操作行当前 rv + 1（步骤表不单独计版本）。
+		var rv int64
+		if err := s.db.QueryRowContext(ctx, `SELECT resource_version FROM operations WHERE id = ?`, id).Scan(&rv); err == nil {
+			s.changes.emit(resourceOperations, id, rv+1)
+		}
+		return nil
 	})
 }
 

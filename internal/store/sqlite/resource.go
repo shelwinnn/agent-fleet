@@ -23,6 +23,8 @@ type objectOf[T any] interface {
 type resourceStore[T any, PT objectOf[T]] struct {
 	db    *sql.DB
 	table string
+	// changes 写成功后发布变更（§23.6 SSE 事件源）；可为 nil 的零值槽。
+	changes *changeNotifier
 }
 
 func (s *resourceStore[T, PT]) Create(ctx context.Context, obj PT) error {
@@ -46,7 +48,11 @@ func (s *resourceStore[T, PT]) Create(ctx context.Context, obj PT) error {
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`, s.table),
 		meta.UID, meta.Name, string(obj.SpecJSON()), string(obj.StatusJSON()),
 		meta.ResourceVersion, stamp, stamp)
-	return mapConstraintErr(err, s.table)
+	if err != nil {
+		return mapConstraintErr(err, s.table)
+	}
+	s.changes.emit(s.table, meta.Name, meta.ResourceVersion)
+	return nil
 }
 
 func (s *resourceStore[T, PT]) Get(ctx context.Context, name string) (PT, error) {
@@ -135,17 +141,36 @@ func (s *resourceStore[T, PT]) Update(ctx context.Context, obj PT) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sqlite: commit update %s: %w", s.table, err)
 	}
+	s.changes.emit(s.table, meta.Name, meta.ResourceVersion)
 	return nil
 }
 
+// Delete 删除资源并发变更事件。删除前读取 resource_version，事件携带 rv+1
+// （"该资源最后一次可见变更的版本"）——UI 据此重取时从 REST 得到 404，
+// 从而把条目从视图移除（§23.6 未定义删除事件的形态，取最小自洽语义）。
 func (s *resourceStore[T, PT]) Delete(ctx context.Context, name string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM `+s.table+` WHERE name = ?`, name)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("sqlite: delete %s %q: %w", s.table, name, err)
+		return fmt.Errorf("sqlite: begin delete %s: %w", s.table, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	defer func() { _ = tx.Rollback() }()
+
+	var rv int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT resource_version FROM `+s.table+` WHERE name = ?`, name).Scan(&rv)
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: %s %q", domain.ErrNotFound, s.table, name)
 	}
+	if err != nil {
+		return fmt.Errorf("sqlite: lock %s %q: %w", s.table, name, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.table+` WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("sqlite: delete %s %q: %w", s.table, name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit delete %s %q: %w", s.table, name, err)
+	}
+	s.changes.emit(s.table, name, rv+1)
 	return nil
 }
 

@@ -31,6 +31,9 @@ func newFixture(t *testing.T, cfg Config) *fixture {
 	if err := db.Migrate(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	if cfg.DeploymentTargets == nil {
+		cfg.DeploymentTargets = sqlite.NewDeploymentTargetStore(db).List
+	}
 	api := New(cfg, sqlite.NewMachineStore(db), sqlite.NewProfileStore(db),
 		sqlite.NewSkillStore(db), sqlite.NewProviderStore(db), sqlite.NewDeploymentStore(db),
 		sqlite.NewOperationStore(db), nil, nil, "fixture/v1", db.PingContext,

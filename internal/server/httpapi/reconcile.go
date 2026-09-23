@@ -216,6 +216,10 @@ func (s *Server) handleDeploymentRollback(w http.ResponseWriter, r *http.Request
 		writeStoreError(w, err)
 		return
 	}
+	if err := s.attachDeploymentTargets(r.Context(), dep); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, dep)
 }
 
