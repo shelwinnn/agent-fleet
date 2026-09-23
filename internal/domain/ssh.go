@@ -44,6 +44,13 @@ func Coded(reason, format string, args ...any) error {
 	return &CodedError{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
+// ReasonCoder 是"自带 §30 reason code"的错误契约：domain.CodedError 与各控制器
+// 自己的失败类型（如 reconcile.SSHFailure）都实现它，使 ReasonOf 成为唯一的取码
+// 入口——否则调用方会各自写类型断言，容易退化成 Internal（§6.4 错误五要素首要素）。
+type ReasonCoder interface {
+	ReasonCode() string
+}
+
 // ReasonOf 取出错误的 reason code；未携带码时回退 Internal（绝不猜类别）。
 func ReasonOf(err error) string {
 	if err == nil {
@@ -52,6 +59,12 @@ func ReasonOf(err error) string {
 	var ce *CodedError
 	if errors.As(err, &ce) && ce.Reason != "" {
 		return ce.Reason
+	}
+	var rc ReasonCoder
+	if errors.As(err, &rc) {
+		if code := rc.ReasonCode(); code != "" {
+			return code
+		}
 	}
 	return ReasonInternal
 }

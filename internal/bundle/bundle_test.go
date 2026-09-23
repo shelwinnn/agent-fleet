@@ -367,3 +367,69 @@ func TestCodedErrorsAreWrapped(t *testing.T) {
 		t.Fatalf("reason = %q", ce.Reason)
 	}
 }
+
+// ---- KM-26 核查回归：符号链接与摘要边界 ----
+
+// TestArtifactRootSymlinkRejected：工件根自身是符号链接时必须拒绝（否则"空树摘要 +
+// 指向树外的软链"会让 Verify 通过并物化出 0 条目目录）。
+func TestArtifactRootSymlinkRejected(t *testing.T) {
+	srcRoot := t.TempDir()
+	real := filepath.Join(srcRoot, "real-artifact")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "SKILL.md"), []byte("# x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(srcRoot, "linked-artifact")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if _, err := TreeDigest(linked); err == nil {
+		t.Fatal("TreeDigest must reject a symlinked artifact root")
+	} else if got := domain.ReasonOf(err); got != domain.ReasonSkillPathRejected {
+		t.Fatalf("reason = %s, want %s (%v)", got, domain.ReasonSkillPathRejected, err)
+	}
+	if _, err := measureTree(linked, DefaultLimits()); err == nil {
+		t.Fatal("measureTree must reject a symlinked artifact root")
+	}
+}
+
+// TestInstallRejectsSymlinkAncestor：<cacheRoot>/<name> 是符号链接时不得跟随
+// （否则物化会写到 cacheRoot 之外）。
+func TestInstallRejectsSymlinkAncestor(t *testing.T) {
+	dir, m := buildFixture(t)
+	cache := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(cache, "tool")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	_, err := InstallArtifacts(dir, cache, m, DefaultLimits())
+	if err == nil {
+		t.Fatal("install through a symlinked skill directory must be rejected")
+	}
+	if got := domain.ReasonOf(err); got != domain.ReasonSkillPathRejected {
+		t.Fatalf("reason = %s, want %s (%v)", got, domain.ReasonSkillPathRejected, err)
+	}
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be written outside cacheRoot, found %d entries", len(entries))
+	}
+}
+
+// TestSealAllowsSingleFieldTamper：Seal 让"只改路径字段但摘要仍正确"的 bundle 可构造，
+// 从而把路径校验单独暴露出来（集成测试用它锁定 SkillPathRejected）。
+func TestSealAllowsSingleFieldTamper(t *testing.T) {
+	dir, m := buildFixture(t)
+	m.Artifacts[0].Path = "artifacts/skills/../../etc"
+	if err := Seal(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Verify(dir, DefaultLimits())
+	if err == nil {
+		t.Fatal("path escaping artifact must be rejected even with a valid bundle digest")
+	}
+	if got := domain.ReasonOf(err); got != domain.ReasonSkillPathRejected {
+		t.Fatalf("reason = %s, want %s (%v)", got, domain.ReasonSkillPathRejected, err)
+	}
+}

@@ -413,6 +413,11 @@ func InstallArtifacts(bundleDir, cacheRoot string, m *Manifest, limits Limits) (
 		if err != nil {
 			return installed, err
 		}
+		// 逐级拒绝符号链接祖先：`<cacheRoot>/<name>` 若是软链，物化就会写到
+		// cacheRoot 之外（A7 的同类逃逸）。
+		if err := ensureNoSymlinkAncestors(cacheRoot, dst); err != nil {
+			return installed, err
+		}
 		if got, err := TreeDigest(dst); err == nil && got == a.TreeDigest {
 			installed = append(installed, dst)
 			continue
@@ -435,6 +440,38 @@ func InstallArtifacts(bundleDir, cacheRoot string, m *Manifest, limits Limits) (
 	}
 	return installed, nil
 }
+
+// ensureNoSymlinkAncestors 逐级检查 cacheRoot 到 target 之间**已存在**的路径
+// 元素都不是符号链接（不存在的层级由后续 MkdirAll 创建）。
+func ensureNoSymlinkAncestors(root, target string) error {
+	rootClean := filepath.Clean(root)
+	rel, err := filepath.Rel(rootClean, filepath.Clean(target))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return errf(domain.ReasonSkillPathRejected, "cache target %q escapes %q", target, root)
+	}
+	cur := rootClean
+	for _, elem := range strings.Split(rel, string(filepath.Separator)) {
+		if elem != "" && elem != "." {
+			cur = filepath.Join(cur, elem)
+		}
+		info, statErr := os.Lstat(cur)
+		if os.IsNotExist(statErr) {
+			continue
+		}
+		if statErr != nil {
+			return statErr
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return errf(domain.ReasonSkillPathRejected, "symlink in artifact cache path rejected: %s", cur)
+		}
+	}
+	return nil
+}
+
+// Seal 计算 bundle 自身摘要并原子写回 manifest.json。Build 内部调用它；导出它是
+// 为了让测试与离线工具能构造/重封一个"摘要正确"的 bundle（例如只改路径字段后重封，
+// 以便把路径校验单独暴露出来）。
+func Seal(dir string, m *Manifest) error { return writeManifest(dir, m) }
 
 // skillCachePath 计算节点侧 Skill 工件缓存路径（与适配器 kit.SkillCacheDir 一致）。
 func skillCachePath(cacheRoot, name, contentDigest string) (string, error) {
@@ -476,8 +513,15 @@ func TreeDigest(root string) (string, error) {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// walkTree 以确定顺序遍历目录树，**不跟随符号链接**（遇到即拒绝）。
+// walkTree 以确定顺序遍历目录树，**不跟随符号链接**（遇到即拒绝）。根自身也检查：
+// 否则"根是符号链接"会走 WalkDir 的 root 分支被早返回跳过，等于放行一个指向
+// 树外的工件根（空树摘要 + 指向外部的软链）。
 func walkTree(root string, fn func(rel string, info fs.FileInfo, abs string) error) error {
+	if info, err := os.Lstat(root); err != nil {
+		return err
+	} else if info.Mode()&fs.ModeSymlink != 0 {
+		return errf(domain.ReasonSkillPathRejected, "artifact root must not be a symlink: %s", root)
+	}
 	entries := []string{}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {

@@ -1,7 +1,7 @@
 // agent-fleet-agentd 是节点侧 agent（架构 v1.1.2 §5.1/§3.6 cmd 布局）。
 // 子命令：daemon（常驻 mTLS 长连接 + 心跳 + 全量 inventory）、enroll、
-// oneshot inventory|plan|apply（SSH-only 路径，第 6 片）、version。
-// doctor 尚未实现（见交付说明的遗留项）。
+// oneshot inventory|plan|apply（SSH-only 路径，第 6 片）、doctor（诊断与
+// --recover-lock 显式恢复陈旧执行权锁）、version。
 package main
 
 import (
@@ -31,6 +31,8 @@ func main() {
 		err = cmdEnroll(os.Args[2:], log)
 	case "oneshot":
 		err = cmdOneshot(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
 	case "version":
 		fmt.Println("agent-fleet-agentd " + agentdVersion)
 	default:
@@ -56,6 +58,7 @@ func usage() {
   agent-fleet-agentd oneshot inventory [--home P] [--data-dir P]
   agent-fleet-agentd oneshot plan      --bundle P --operation-id ID [--staging P]
   agent-fleet-agentd oneshot apply     --bundle P --operation-id ID [--plan-digest D]
+  agent-fleet-agentd doctor [--json] [--recover-lock]
   agent-fleet-agentd version
 `)
 }

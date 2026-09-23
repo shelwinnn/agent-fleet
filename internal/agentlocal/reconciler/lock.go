@@ -72,9 +72,13 @@ func (l *ExecutionLock) Acquire(channel, operationID string) error {
 	}
 	// 持有者已死 → 陈旧锁。但陈旧 ≠ 可立即夺取：只有确认"无未清理暂存产物"
 	// （这里以 StagingCleaned 标记表达）才可安全夺取，否则要求显式处理。
+	// MVP 中 StagingCleaned 没有任何写入点（节点无法自证 staging 已清），因此
+	// 陈旧锁一律走显式恢复路径——错误消息里必须给出可执行的命令（§5.6 规则 5）。
 	if !cur.StagingCleaned {
 		return &StaleLockError{Reason: fmt.Sprintf(
-			"stale lock held by dead pid %d (op %s) with unverified staging; explicit recovery required",
+			"stale lock held by dead pid %d (op %s) with unverified staging; "+
+				"explicit recovery required: confirm no change pipeline is running on this node, "+
+				"then run `agent-fleet-agentd doctor --recover-lock`",
 			cur.OwnerPID, cur.OperationID), Stale: *cur}
 	}
 	// 可安全夺锁（记录一条告警语义由调用方日志承载）。
@@ -115,8 +119,21 @@ func (l *ExecutionLock) Release() error {
 	return err
 }
 
-// Recover 显式清理陈旧锁（§5.6 规则 5 的操作者显式处理路径；对应
-// `agentd doctor --recover-lock` 的核心动作，MVP 以库函数形态提供）。
+// Holder 返回当前锁的持有者与"持有者是否仍存活"（诊断用，不改变锁状态）。
+// 无锁时返回 (nil, false, nil)。
+func (l *ExecutionLock) Holder() (*LockFile, bool, error) {
+	cur, err := l.load()
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return cur, processAlive(cur.OwnerPID), nil
+}
+
+// Recover 显式清理陈旧锁（§5.6 规则 5 的操作者显式处理路径；由
+// `agent-fleet-agentd doctor --recover-lock` 调用）。持有者仍存活时拒绝。
 func (l *ExecutionLock) Recover() error {
 	cur, err := l.load()
 	if os.IsNotExist(err) {

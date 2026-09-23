@@ -55,7 +55,16 @@ ssh node-1 -- agent-fleet-agentd oneshot apply --bundle ~/.local/share/agent-fle
      --operation-id op-… --plan-digest sha256:… --staging ~/.local/share/agent-fleet/staging --home ~
 ```
 
-`oneshot` 的退出码：`0` 产出结果（成功或失败都算，结果 JSON 里有 `reason`）、`2` bundle 校验失败、`3` 执行权被占用（`NodeBusy`/`StaleExecutionLock`）、`1` 其它基础设施错误。
+`oneshot` 的退出码：`0` 产出结果（成功或失败都算，结果 JSON 里有 `reason`）、`2` bundle 校验失败、`3` 执行权不可用（`NodeBusy`/`StaleExecutionLock`）、`1` 其它基础设施错误。stdout 恒为**恰好一份** JSON 文档。
+
+节点侧排障：
+
+```bash
+agent-fleet-agentd doctor                  # 平台/适配器/执行权/暂存 报告
+agent-fleet-agentd doctor --recover-lock   # 陈旧锁的唯一人工恢复入口（§5.6 规则 5）
+```
+
+陈旧锁不会被静默夺取：只有确认节点上没有变更流水线在跑，才由操作者执行 `--recover-lock`（错误消息里也带这条命令）。
 
 ## 3. 关键契约
 
@@ -84,6 +93,15 @@ go test -run 'TestSSH|TestOpenSSH' -v ./internal/controller/sshops/   # 真实�
 go test ./internal/bundle/ ./internal/sshtransport/                   # bundle 安全与传输分类
 ```
 
+核查回归（KM-26 复核 4 项必改，均先用旧提交复现失败、修复后转绿）：
+节点侧 agentd 摘要必须逐 token 全等（`digest_test.go`，含 `test -x` 复用分支与
+fail-closed）；`Unknown(StaleObservation)` 在任何求值入口都不得被改写成确定判决
+（`reconcile/freshness_test.go` + `httpapi` 的端点一致性用例）；节点锁失败映射为
+`NodeBusy`/`StaleExecutionLock` 且 stdout 恒为单份 JSON（`oneshot_test.go`）；
+陈旧锁经 `doctor --recover-lock` 显式恢复；另有 `inventorySeq` 未前进、
+bundle 根/缓存祖先符号链接、scp 方向、连接前分类的远端输出守卫、
+include 值含空白/引号等回归用例。
+
 集成测试用真实 OpenSSH：测试内起本地 `sshd`（独立 host key + `known_hosts` 严格校验 + `environment="HOME=…,PATH=…"` 隔离），覆盖
 inventory → plan → 确认 → apply 闭环、`MachineBusy`、错误 `planDigest` 被拒、
 基线变化 `ReplanRequired`（零变更）、bundle 篡改与被路径逃逸包被拒、
@@ -93,7 +111,7 @@ host-key/DNS/连接三类传输错误分类、SSH-only 新鲜度三态（`NeverI
 ## 6. 已知遗留（不在本片范围）
 
 1. `POST /machines/{name}/ssh/bootstrap` 与 `/ssh/repair-agentd` 未实现（路由未注册 → §6.4 JSON 404）：bootstrap 属 enrollment 编排，repair 需服务/日志诊断路径。
-2. `agentd doctor`（含 `--recover-lock` 引导）未实现；陈旧锁目前只能经库函数 `reconciler.ExecutionLock.Recover` 显式处理。
+2. ~~`agentd doctor --recover-lock` 未实现~~ → 已实现（`cmd/agent-fleet-agentd/doctor.go`）：`doctor` 输出只读诊断报告（平台/适配器/执行权/暂存），`doctor --recover-lock` 是陈旧锁的显式恢复入口（持有者仍存活时拒绝清理）。剩余缺口是"节点侧自动判定 staging 已清理"，因此陈旧锁仍一律要求人工确认。
 3. Deployment 驱动 SSH 机器时本片一律要求操作者确认（"按策略自动确认"的策略尚未定义，§9.3）。
 4. 控制面尚无生产者在 gRPC 路径上填充 `ExecuteOperation.baseline/plan_digest`（proto 与节点侧已就绪，SSH 路径已完整实现 FR-12.7）。
 5. 决议器 `internal/skills` 尚未落地：bundle 工件来源目前是 `<data-dir>/artifacts/skills/<contentDigest>/` 目录约定，工件树摘要由本片端到端校验，但"控制面解析器内容摘要算法"未参与复核。

@@ -184,9 +184,23 @@ func validateHostPatternName(name string) error {
 	return nil
 }
 
-// validateIncludeValue 拒绝任何会把一行拆成多行或带不可见控制字符的值：
-// \n、\r、NUL 及其它控制字符都是 ssh_config 注入向量（FR-12.6）。
+// validateIncludeValue 拒绝任何会在渲染后破坏 ssh_config 解析的值（FR-12.6）：
+//   - 控制字符（换行、回车、NUL 等）是"把一行拆成多行 / 注入指令"的向量；
+//   - 空白与引号会把一个值拆成多个 token，渲染出的行要么被 OpenSSH 判为
+//     "bad configuration option"（一旦操作者 Include 了该文件，**所有** ssh/scp
+//     调用都会失败），要么改变语义（例如 `User dev -oProxyCommand=evil`）。
+//
+// 注入本身被控制字符检查挡住，但一个渲染不出来的值同样不可接受：宁可整次渲染
+// 失败并给出机器名，也不要写出一个让操作者 ssh 全挂的配置文件。
 func validateIncludeValue(field, value string) error {
+	if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return fmt.Errorf("%w: %s %q contains whitespace; refusing to render an unparseable OpenSSH include line (FR-12.6)",
+			domain.ErrInvalid, field, value)
+	}
+	if strings.ContainsAny(value, `"'`) {
+		return fmt.Errorf("%w: %s %q contains a quote character; refusing to render it into the OpenSSH include (FR-12.6)",
+			domain.ErrInvalid, field, value)
+	}
 	for _, r := range value {
 		if unicode.IsControl(r) {
 			return fmt.Errorf("%w: %s %q contains control character %q; refusing to render it into the OpenSSH include (FR-12.6)",

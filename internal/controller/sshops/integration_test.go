@@ -583,6 +583,9 @@ func TestSSHBundleVerificationRejectsTamperedBundle(t *testing.T) {
 }
 
 // TestSSHPathEscapeRejected：恶意 bundle（路径越界）被节点拒绝整包（§7.4 安全点 3）。
+// 夹具的 manifest 会被**重新封装**（bundle.Seal）成摘要正确的形态，这样唯一可能
+// 触发拒绝的就是路径校验本身——而不是先被 bundle 摘要校验拦下（核查意见：上一版
+// 接受 SkillDigestMismatch 等于没测路径拒绝）。
 func TestSSHPathEscapeRejected(t *testing.T) {
 	env := startSSHEnv(t)
 	f := newCPFixture(t, env, time.Hour)
@@ -596,57 +599,56 @@ func TestSSHPathEscapeRejected(t *testing.T) {
 		t.Fatalf("reconcile(plan): %v", err)
 	}
 	layout := env.layout()
-	// 用 testdata 的恶意夹具替换远端 manifest（路径越界 + 正确重封的 bundle 摘要
-	// 由夹具测试覆盖；这里验证**远端真实执行**时同样被拒）。
-	raw, err := os.ReadFile(filepath.Join("..", "..", "bundle", "testdata", "bundles",
+	bundleDir := layout.BundleDir()
+
+	// 真实 bundle 的 machine/generation/snapshot（让夹具只保留"路径越界"这一处差异）。
+	realRaw, err := os.ReadFile(filepath.Join(bundleDir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var real bundle.Manifest
+	if err := json.Unmarshal(realRaw, &real); err != nil {
+		t.Fatal(err)
+	}
+	fixtureRaw, err := os.ReadFile(filepath.Join("..", "..", "bundle", "testdata", "bundles",
 		"malicious-path-relative", "manifest.json"))
 	if err != nil {
 		t.Skipf("malicious fixture unavailable: %v", err)
 	}
-	var man map[string]any
-	if err := json.Unmarshal(raw, &man); err != nil {
+	var evil bundle.Manifest
+	if err := json.Unmarshal(fixtureRaw, &evil); err != nil {
 		t.Fatal(err)
 	}
-	// 保持夹具语义（越界路径），但把 machine/generation/snapshot 换成真实 bundle 的，
-	// 以便错误只可能来自路径校验而不是"快照不匹配"。
-	realRaw, err := os.ReadFile(filepath.Join(layout.BundleDir(), "manifest.json"))
-	if err != nil {
+	evil.Machine = real.Machine
+	evil.Generation = real.Generation
+	evil.SnapshotDigest = real.SnapshotDigest
+	evil.Snapshot = real.Snapshot
+	evil.SchemaVersion = real.SchemaVersion
+	// 重封：摘要正确，路径仍然是越界的。
+	if err := bundle.Seal(bundleDir, &evil); err != nil {
 		t.Fatal(err)
 	}
-	var real map[string]any
-	if err := json.Unmarshal(realRaw, &real); err != nil {
-		t.Fatal(err)
-	}
-	man["machine"] = real["machine"]
-	man["generation"] = real["generation"]
-	man["snapshotDigest"] = real["snapshotDigest"]
-	man["snapshot"] = real["snapshot"]
-	out2, err := json.Marshal(man)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(layout.BundleDir(), "manifest.json"), out2, 0o644); err != nil {
-		t.Fatal(err)
-	}
+
 	agentd := filepath.Join(layout.BinDir(), "agentd-"+agentdDigest(t, env))
 	out, err := env.transport().Run(ctx, testAlias, []string{agentd, "oneshot", "plan",
-		"--bundle", layout.BundleDir(), "--operation-id", planOp.Metadata.Name,
+		"--bundle", bundleDir, "--operation-id", planOp.Metadata.Name,
 		"--staging", layout.Root(), "--home", env.remoteHome})
 	if err == nil {
 		t.Fatalf("path-escaping bundle must be rejected; stdout=%s", out.Stdout)
 	}
 	var res struct {
+		Phase  string `json:"phase"`
 		Reason string `json:"reason"`
 	}
 	if jerr := json.Unmarshal(out.Stdout, &res); jerr != nil {
 		t.Fatalf("result unparseable: %v (%s)", jerr, out.Stdout)
 	}
-	// bundle 摘要先于路径校验（安全点 5 优先），因此这里接受两种拒绝原因之一，
-	// 但都必须属于"拒绝整包"这一类。
-	switch res.Reason {
-	case domain.ReasonSkillPathRejected, domain.ReasonSkillDigestMismatch:
-	default:
-		t.Fatalf("unexpected rejection reason %q (want path/digest rejection)", res.Reason)
+	if res.Reason != domain.ReasonSkillPathRejected {
+		t.Fatalf("reason = %q, want %s (bundle digest was re-sealed, so only the path check can fire)",
+			res.Reason, domain.ReasonSkillPathRejected)
+	}
+	if res.Phase != domain.OperationPhaseFailed {
+		t.Fatalf("phase = %q, want Failed", res.Phase)
 	}
 }
 

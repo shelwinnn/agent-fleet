@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -425,8 +426,14 @@ func (o *Orchestrator) ensureAgentd(ctx context.Context, alias, home, osName, ar
 		return "", sshFailure(domain.ReasonInstallerFailed, "agentd binary for %s/%s: %v", osName, arch, err)
 	}
 	remote := layout.AgentdBinary(digest)
-	if _, err := o.cfg.Transport.Run(ctx, alias, []string{"test", "-x", remote}); err == nil {
-		return remote, nil
+	// 复用分支也必须校验摘要：路径名里的 digest 是**约定**，不是证据（FR-12.8）。
+	// 校验通过才允许复用；校验工具缺失或结果不符一律重新上传（而不是跳过校验）。
+	if out, err := o.cfg.Transport.Run(ctx, alias, []string{"test", "-x", remote}); err == nil && out.ExitCode == 0 {
+		if verr := o.verifyRemoteDigest(ctx, alias, remote, digest); verr == nil {
+			return remote, nil
+		}
+		o.cfg.Log.Warn("staged agentd failed digest verification; re-uploading",
+			"machine_alias", alias, "path", remote)
 	}
 	if _, err := o.cfg.Transport.Run(ctx, alias, []string{"install", "-d", "-m", "700", layout.BinDir()}); err != nil {
 		return "", err
@@ -447,31 +454,85 @@ func (o *Orchestrator) ensureAgentd(ctx context.Context, alias, home, osName, ar
 	return remote, nil
 }
 
-// verifyRemoteDigest 在节点上核对刚上传文件的 SHA-256（sha256sum 或 shasum）。
+// digestTools 是节点侧可用的摘要命令（按优先级；输出格式不同，见 parseDigestOutput）。
+var digestTools = [][]string{
+	{"sha256sum"},
+	{"shasum", "-a", "256"},
+	{"openssl", "dgst", "-sha256"},
+}
+
+var hex64Re = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// verifyRemoteDigest 在节点上核对刚上传文件的 SHA-256。
+//
+// 只接受"恰好 64 位十六进制摘要 token 与期望值全等"（FR-12.8）。**不做**子串匹配：
+// 远端路径本身就叫 agentd-<digest>，而 sha256sum/shasum/openssl 默认都把文件名写进
+// 输出，子串/前缀匹配会让校验恒真（等于没有校验）。工具缺失或输出不可解析一律失败，
+// 摘要不符立即失败（不 fallback 到下一个工具，避免"换一个工具碰运气"）。
 func (o *Orchestrator) verifyRemoteDigest(ctx context.Context, alias, remote, want string) error {
-	wantHex := strings.TrimPrefix(want, "sha256:")
-	for _, argv := range [][]string{
-		{"sha256sum", remote},
-		{"shasum", "-a", "256", remote},
-		{"openssl", "dgst", "-sha256", remote},
-	} {
+	wantHex := strings.ToLower(strings.TrimPrefix(want, "sha256:"))
+	if !hex64Re.MatchString(wantHex) {
+		return sshFailure(domain.ReasonInstallerFailed,
+			"refusing to verify an agentd binary with a malformed expected digest %q", want)
+	}
+	var lastErr error
+	for _, tool := range digestTools {
+		argv := append(append([]string{}, tool...), remote)
 		out, err := o.cfg.Transport.Run(ctx, alias, argv)
 		if err != nil {
-			continue
+			lastErr = err
+			continue // 工具不存在/不可用：尝试下一个
 		}
-		fields := strings.Fields(string(out.Stdout))
-		if len(fields) == 0 {
-			continue
+		got, perr := parseDigestOutput(tool[0], string(out.Stdout))
+		if perr != nil {
+			lastErr = perr
+			continue // 输出不可解析：尝试下一个
 		}
-		got := strings.ToLower(strings.TrimPrefix(fields[0], "SHA256("))
-		if strings.HasPrefix(got, wantHex) || strings.Contains(strings.ToLower(string(out.Stdout)), wantHex) {
-			return nil
+		if got != wantHex {
+			return sshFailure(domain.ReasonInstallerFailed,
+				"uploaded agentd digest mismatch on %s: want sha256:%s got sha256:%s", remote, wantHex, got)
 		}
-		return sshFailure(domain.ReasonInstallerFailed,
-			"uploaded agentd digest mismatch: want %s got %s", want, fields[0])
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no digest tool produced output")
 	}
 	return sshFailure(domain.ReasonInstallerFailed,
-		"no digest tool (sha256sum/shasum/openssl) available on the node to verify the uploaded agentd binary")
+		"could not verify the uploaded agentd binary on the node (need sha256sum, shasum -a 256 or openssl dgst -sha256): %v",
+		lastErr)
+}
+
+// parseDigestOutput 从摘要命令输出里取**唯一的摘要 token**：
+//
+//	sha256sum / shasum -a 256 : "<hex>  <path>"
+//	openssl dgst -sha256       : "SHA256(<path>)= <hex>"
+//
+// 只认这些形态，其余一律报错（不做子串兜底）。
+func parseDigestOutput(tool, stdout string) (string, error) {
+	line := strings.TrimSpace(stdout)
+	if line == "" {
+		return "", fmt.Errorf("%s produced no output", tool)
+	}
+	var token string
+	switch tool {
+	case "openssl":
+		_, rest, ok := strings.Cut(line, ")= ")
+		if !ok {
+			return "", fmt.Errorf("unexpected openssl output %q", snippet(line))
+		}
+		token = strings.TrimSpace(rest)
+	default:
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			return "", fmt.Errorf("%s produced no digest field", tool)
+		}
+		token = fields[0]
+	}
+	token = strings.ToLower(token)
+	if !hex64Re.MatchString(token) {
+		return "", fmt.Errorf("%s digest token %q is not a 64-hex sha256", tool, snippet(token))
+	}
+	return token, nil
 }
 
 // cleanupAfterRun 落实 §4.5 清理规则 3：收到节点结果（进程已退出）即清理该次输入；
@@ -719,6 +780,15 @@ func reasonOr(reason, _ string) string {
 		return reason
 	}
 	return domain.ReasonRemoteCommandFailed
+}
+
+// snippet 截断远端输出用于错误消息（避免把整段 stderr/stdout 塞进 reason）。
+func snippet(s string) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", "; "))
+	if len(s) > 160 {
+		return s[:160] + "…"
+	}
+	return s
 }
 
 func fileDigest(path string) (string, int64, error) {

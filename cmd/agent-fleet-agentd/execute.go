@@ -36,6 +36,10 @@ type queuedOp struct {
 // workerMsg 是 worker → 主循环的上行消息（主循环是流的唯一发送者，P1-2）。
 // baselineFromProto 把协议里的计划基线转换为流水线基线（FR-12.7）：为空时返回
 // nil（无基线可比），非空时 apply 前的重算基线必须与它一致，否则零变更拒绝。
+//
+// 【已知取舍】当前返回 nil = fail-open：控制面还没有生产者在 AutoPlan→apply 流程里
+// 填充 baseline（见 docs/ssh-only-oneshot.md 遗留项 4）。补上生产者时必须同时改成
+// fail-closed（缺 baseline 即拒绝执行），否则"确认后 apply"会退化成"目标代确认"。
 func baselineFromProto(b *fleetv1.PlanBaseline) *reconciler.Baseline {
 	if b == nil || b.GetObservedProjectionDigest() == "" {
 		return nil

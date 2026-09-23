@@ -62,6 +62,9 @@ type SSHFailure struct {
 
 func (e *SSHFailure) Error() string { return e.Reason + ": " + e.Message }
 
+// ReasonCode 实现 domain.ReasonCoder：SSH 路径的失败语义也走统一的取码入口。
+func (e *SSHFailure) ReasonCode() string { return e.Reason }
+
 // NewSSHFailure 构造 SSH 路径失败（reason 取 §30 四组错误码之一）。
 func NewSSHFailure(reason, format string, args ...any) *SSHFailure {
 	return &SSHFailure{Reason: reason, Message: fmt.Sprintf(format, args...)}

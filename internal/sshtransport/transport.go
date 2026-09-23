@@ -173,32 +173,33 @@ func (t *Transport) Run(ctx context.Context, alias string, argv []string) (Resul
 
 // Upload 用 scp 上传文件或目录（§4.5：文件传输用 scp）。
 func (t *Transport) Upload(ctx context.Context, alias, local, remote string) error {
-	return t.scp(ctx, alias, []string{"-r"}, local, remote)
+	return t.scp(ctx, alias, local, alias+":"+remote)
 }
 
-// Download 用 scp 下载文件或目录。
+// Download 用 scp 下载文件或目录（方向与 Upload 相反：远端 → 本地）。
 func (t *Transport) Download(ctx context.Context, alias, remote, local string) error {
-	return t.scp(ctx, alias, []string{"-r"}, remote, local)
+	return t.scp(ctx, alias, alias+":"+remote, local)
 }
 
-func (t *Transport) scp(ctx context.Context, alias string, extra []string, src, dst string) error {
+// scp 执行一次传输。src/dst 是**完整操作数**：远端一侧已带 `<alias>:` 前缀。
+func (t *Transport) scp(ctx context.Context, alias, src, dst string) error {
 	if err := validateAlias(alias); err != nil {
 		return err
 	}
-	if err := validateScpOperand(src); err != nil {
+	if err := validateScpEndpoint(alias, src); err != nil {
 		return err
 	}
-	if err := validateScpOperand(dst); err != nil {
+	if err := validateScpEndpoint(alias, dst); err != nil {
 		return err
 	}
 	args := t.baseArgs()
 	args = append(args, "-q", "-o", "BatchMode=yes", "-o",
 		"ConnectTimeout="+strconv.Itoa(int(t.cfg.ConnectTimeout.Seconds())))
-	args = append(args, extra...)
+	args = append(args, "-r")
 	// 远端操作数一律写成 <alias>:<path> 且 path 必须是绝对路径（本包只使用
 	// staging 固定路径）。不含引号：现代 scp 走 SFTP 子系统，远端路径按字面量
 	// 处理，不经远端 shell 解析（因此也不需要再引用）。
-	args = append(args, src, alias+":"+dst)
+	args = append(args, src, dst)
 	out, err := t.exec(ctx, t.cfg.SCPBinary, args, "", t.cfg.CommandTimeout)
 	if err != nil {
 		return err
@@ -267,27 +268,32 @@ func (t *Transport) exec(ctx context.Context, bin string, args []string, remote 
 func classify(res Result, timedOut bool) error {
 	stderr := string(res.Stderr)
 	lower := strings.ToLower(stderr)
+	// 连接阶段类别只在"本地 ssh 自己失败、远端尚未产生任何输出"时采用：远端进程
+	// 也可能把 "Host key verification failed." 之类的文本写进自己的 stderr 并退 255，
+	// 那种情况远端命令**已经启动**，若按连接前失败归类就会把 Unknown 误判成 Failed
+	// 并提前释放机器级互斥（§6.4/FR-15.4）。
+	noRemoteOutput := len(res.Stdout) == 0
 	switch {
-	case strings.Contains(lower, "could not resolve hostname") ||
+	case noRemoteOutput && (strings.Contains(lower, "could not resolve hostname") ||
 		strings.Contains(lower, "name or service not known") ||
-		strings.Contains(lower, "nodename nor servname provided"):
+		strings.Contains(lower, "nodename nor servname provided")):
 		return domain.Coded(domain.ReasonDNSResolveFailed, "dns resolve failed: %s", snippet(stderr))
-	case strings.Contains(lower, "host key verification failed") ||
+	case noRemoteOutput && (strings.Contains(lower, "host key verification failed") ||
 		strings.Contains(lower, "remote host identification has changed") ||
-		strings.Contains(lower, "no matching host key type found"):
+		strings.Contains(lower, "no matching host key type found")):
 		// host-key 失败必须显式呈现，绝不静默降级（§13.3/FR-12.3）。
 		return domain.Coded(domain.ReasonHostKeyVerificationFailed, "host key verification failed: %s", snippet(stderr))
-	case strings.Contains(lower, "permission denied") ||
+	case noRemoteOutput && (strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "authentication failed") ||
 		strings.Contains(lower, "too many authentication failures") ||
-		strings.Contains(lower, "no supported authentication methods"):
+		strings.Contains(lower, "no supported authentication methods")):
 		return domain.Coded(domain.ReasonAuthenticationFailed, "authentication failed: %s", snippet(stderr))
-	case strings.Contains(lower, "connection timed out") ||
+	case noRemoteOutput && (strings.Contains(lower, "connection timed out") ||
 		strings.Contains(lower, "operation timed out") ||
 		strings.Contains(lower, "connection refused") ||
 		strings.Contains(lower, "no route to host") ||
 		strings.Contains(lower, "network is unreachable") ||
-		strings.Contains(lower, "connection closed by remote host"):
+		strings.Contains(lower, "connection closed by remote host")):
 		return domain.Coded(domain.ReasonConnectionTimeout, "connection failed: %s", snippet(stderr))
 	case timedOut:
 		// 我们自己的超时：无输出时按连接阶段超时归类，否则按远端命令失败归类。
@@ -348,6 +354,19 @@ func validateAlias(alias string) error {
 		return domain.Coded(domain.ReasonInvalid, "ssh alias contains whitespace: %q", alias)
 	}
 	return nil
+}
+
+// validateScpEndpoint 校验一个完整 scp 操作数：远端一侧（`<alias>:<path>`）的路径
+// 必须是绝对路径（本包只使用 staging 固定路径），两侧都拒绝 '-' 前缀与控制字符。
+func validateScpEndpoint(alias, operand string) error {
+	path := operand
+	if rest, ok := strings.CutPrefix(operand, alias+":"); ok {
+		path = rest
+		if !strings.HasPrefix(path, "/") {
+			return domain.Coded(domain.ReasonInvalid, "remote scp path must be absolute: %q", path)
+		}
+	}
+	return validateScpOperand(path)
 }
 
 // validateScpOperand 拒绝以 '-' 开头的操作数（scp 选项注入）与控制字符。

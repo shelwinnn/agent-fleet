@@ -41,10 +41,9 @@ import (
 //	3 = 执行权被占用（NodeBusy/StaleExecutionLock，§5.6 规则 4/5）
 //	1 = 其它基础设施错误（无法读取/写入本地状态等）
 const (
-	exitResult    = 0
-	exitInfra     = 1
-	exitBundle    = 2
-	exitExecution = 3
+	exitInfra     = 1 // 其它基础设施错误（本地状态读写失败等）
+	exitBundle    = 2 // bundle 校验失败（路径/名称/摘要/预算）
+	exitExecution = 3 // 执行权不可用（NodeBusy / StaleExecutionLock，§5.6 规则 4/5）
 )
 
 // exitError 把退出码与错误一起上抛（main 据此退出；错误本身仍可 errors.As）。
@@ -184,21 +183,18 @@ func cmdOneshotPlan(args []string) error {
 	if err := requireOneshotInputs(f); err != nil {
 		return err
 	}
-	man, exitCode, err := verifyBundle(f.bundlePath)
+	man, err := verifyBundle(f.bundlePath)
 	if err != nil {
-		emitOneshotError(f.opID, exitCode, err)
-		return withExit(exitCode, err)
+		return oneshotFail(f.opID, err)
 	}
 	collector := newOneshotCollector(home, dataDir)
 	cacheDir := filepath.Join(dataDir, "skills")
 	if _, err := bundle.InstallArtifacts(f.bundlePath, cacheDir, man, bundle.DefaultLimits()); err != nil {
-		emitOneshotError(f.opID, exitBundle, err)
-		return withExit(exitBundle, err)
+		return oneshotFail(f.opID, err)
 	}
 	lock := reconciler.NewExecutionLock(dataDir)
 	if err := lock.Acquire("oneshot", f.opID); err != nil {
-		emitOneshotError(f.opID, exitCodeForLock(err), err)
-		return withExit(exitCodeForLock(err), err)
+		return oneshotFail(f.opID, err)
 	}
 	defer lock.Release() //nolint:errcheck // 释放失败只影响锁文件残留，不改变结果
 
@@ -219,8 +215,7 @@ func cmdOneshotPlan(args []string) error {
 	if err := writePlanRecord(staging, f.opID, res, man); err != nil {
 		// 计划记录写不进去 → 后续 apply 无法比对基线，此刻必须显式失败而不是
 		// 让操作者确认一份无法执行的计划。
-		emitOneshotError(f.opID, exitInfra, err)
-		return withExit(exitInfra, err)
+		return oneshotFail(f.opID, err)
 	}
 	if err := writeJSON(os.Stdout, out); err != nil {
 		return err
@@ -254,45 +249,35 @@ func cmdOneshotApply(args []string) error {
 		fmt.Fprintln(os.Stderr, "oneshot apply: replaying recorded result (idempotent)")
 		return writeJSON(os.Stdout, prev)
 	}
-	man, exitCode, err := verifyBundle(f.bundlePath)
+	man, err := verifyBundle(f.bundlePath)
 	if err != nil {
-		emitOneshotError(f.opID, exitCode, err)
-		return withExit(exitCode, err)
+		return oneshotFail(f.opID, err)
 	}
 	plan, err := loadPlanRecord(staging, f.opID)
 	if err != nil {
 		// 没有计划记录（或记录不可解析）→ 必须重新 plan 与重新确认（FR-12.7）。
-		e := domain.Coded(domain.ReasonReplanRequired, "%v", err)
-		emitOneshotError(f.opID, exitResult, e)
-		return writeJSON(os.Stdout, failedResult(f.opID, domain.ReasonReplanRequired, e.Error()))
+		return oneshotRefuse(f.opID, domain.ReasonReplanRequired, err.Error())
 	}
 	if f.planDigest != "" && plan.PlanDigest != f.planDigest {
-		e := domain.Coded(domain.ReasonReplanRequired,
-			"confirmed planDigest %s does not match the recorded plan %s", f.planDigest, plan.PlanDigest)
-		emitOneshotError(f.opID, exitResult, e)
-		return writeJSON(os.Stdout, failedResult(f.opID, domain.ReasonReplanRequired, e.Error()))
+		return oneshotRefuse(f.opID, domain.ReasonReplanRequired,
+			fmt.Sprintf("confirmed planDigest %s does not match the recorded plan %s", f.planDigest, plan.PlanDigest))
 	}
 	if plan.BundleDigest != man.BundleDigest {
-		e := domain.Coded(domain.ReasonReplanRequired,
-			"bundle changed since plan (%s != %s)", plan.BundleDigest, man.BundleDigest)
-		emitOneshotError(f.opID, exitResult, e)
-		return writeJSON(os.Stdout, failedResult(f.opID, domain.ReasonReplanRequired, e.Error()))
+		return oneshotRefuse(f.opID, domain.ReasonReplanRequired,
+			fmt.Sprintf("bundle changed since plan (%s != %s)", plan.BundleDigest, man.BundleDigest))
 	}
 	collector := newOneshotCollector(home, dataDir)
 	cacheDir := filepath.Join(dataDir, "skills")
 	if _, err := bundle.InstallArtifacts(f.bundlePath, cacheDir, man, bundle.DefaultLimits()); err != nil {
-		emitOneshotError(f.opID, exitBundle, err)
-		return withExit(exitBundle, err)
+		return oneshotFail(f.opID, err)
 	}
 	// 期望快照落盘：后续周期 inventory（daemon 模式）以同一代作为期望侧输入。
 	if err := collector.SaveDesired(man.Snapshot); err != nil {
-		emitOneshotError(f.opID, exitInfra, err)
-		return withExit(exitInfra, err)
+		return oneshotFail(f.opID, err)
 	}
 	lock := reconciler.NewExecutionLock(dataDir)
 	if err := lock.Acquire("oneshot", f.opID); err != nil {
-		emitOneshotError(f.opID, exitCodeForLock(err), err)
-		return withExit(exitCodeForLock(err), err)
+		return oneshotFail(f.opID, err)
 	}
 	exec := newOneshotExecutor(collector)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -313,9 +298,8 @@ func cmdOneshotApply(args []string) error {
 	// 结果先落盘（绑定 operationId），再释放执行权（§5.6 规则 2：释放的依据是
 	// "进程已完成并记录了结果"）。
 	if err := writeOneshotResult(staging, f.opID, out); err != nil {
-		emitOneshotError(f.opID, exitInfra, err)
 		lock.Release() //nolint:errcheck
-		return withExit(exitInfra, err)
+		return oneshotFail(f.opID, err)
 	}
 	if err := lock.Release(); err != nil {
 		fmt.Fprintln(os.Stderr, "oneshot apply: release execution lock:", err)
@@ -399,25 +383,9 @@ func observationFor(collector *inventory.Collector, opID string, res *reconciler
 	return b
 }
 
-// verifyBundle 校验 bundle 并把 §30 reason 映射为退出码。
-func verifyBundle(dir string) (*bundle.Manifest, int, error) {
-	man, err := bundle.Verify(dir, bundle.DefaultLimits())
-	if err != nil {
-		return nil, exitBundle, err
-	}
-	return man, exitResult, nil
-}
-
-func exitCodeForLock(err error) int {
-	var held *reconciler.LockHeldError
-	if errors.As(err, &held) {
-		return exitExecution
-	}
-	var stale *reconciler.StaleLockError
-	if errors.As(err, &stale) {
-		return exitExecution
-	}
-	return exitInfra
+// verifyBundle 校验 bundle（失败原因由 classifyOneshot 映射为退出码 2）。
+func verifyBundle(dir string) (*bundle.Manifest, error) {
+	return bundle.Verify(dir, bundle.DefaultLimits())
 }
 
 // cancelRequested 观察取消标记（§5.1：SSH-only 没有 CancelOperation 通道，控制面
@@ -472,14 +440,75 @@ func failedResult(opID, reason, message string) *oneshotResult {
 	}
 }
 
-// emitOneshotError 把基础设施错误写成 stdout JSON（控制面即使看到非零退出码也能
-// 取得 reason code），并打一行 stderr 日志。
-func emitOneshotError(opID string, exitCode int, err error) {
+// classifyOneshot 决定 (reason, exitCode)。节点锁失败与 bundle 校验失败必须各自
+// 可辨，不得退化成 Internal：`*LockHeldError`/`*StaleLockError` 是普通 error，
+// domain.ReasonOf 只能给出兜底码（§6.4 用户可见错误五要素的第一个要素）。
+func classifyOneshot(err error) (string, int) {
+	var held *reconciler.LockHeldError
+	if errors.As(err, &held) {
+		return domain.ReasonNodeBusy, exitExecution
+	}
+	var stale *reconciler.StaleLockError
+	if errors.As(err, &stale) {
+		return domain.ReasonStaleExecutionLock, exitExecution
+	}
 	reason := domain.ReasonOf(err)
+	switch reason {
+	case domain.ReasonNodeBusy, domain.ReasonStaleExecutionLock:
+		// 已经包过码的版本（lockReason 的产物）也要落回执行权退出码，
+		// 否则 3 会退化成 1（核查必改 3 的同类问题）。
+		return reason, exitExecution
+	case domain.ReasonSkillPathRejected, domain.ReasonSkillDigestMismatch,
+		domain.ReasonArtifactTooLarge, domain.ReasonBundleTooLarge,
+		domain.ReasonSkillDownloadFailed, domain.ReasonDesiredStateInvalid:
+		return reason, exitBundle
+	}
+	return reason, exitInfra
+}
+
+// lockReason 把节点执行权错误包成带 §30 reason code 的错误，并给出可执行的人工
+// 恢复路径（§5.6 规则 5：陈旧锁不得静默夺取，但必须告诉操作者怎么办）。
+func lockReason(err error) error {
+	var held *reconciler.LockHeldError
+	if errors.As(err, &held) {
+		return domain.Coded(domain.ReasonNodeBusy,
+			"another change pipeline holds the node execution lock (%s, op %s); oneshot does not queue (FR-9.9/§5.6 rule 4)",
+			held.Held.Channel, held.Held.OperationID)
+	}
+	var stale *reconciler.StaleLockError
+	if errors.As(err, &stale) {
+		return domain.Coded(domain.ReasonStaleExecutionLock,
+			"stale execution lock (owner pid %d, op %s): confirm no change pipeline is running on this node, "+
+				"then run `agent-fleet-agentd doctor --recover-lock` to clear it",
+			stale.Stale.OwnerPID, stale.Stale.OperationID)
+	}
+	return err
+}
+
+// oneshotFail 是唯一的失败出口：**恰好一份** JSON 文档写到 stdout（控制面按
+// "stdout 是单个 JSON 文档"解析），stderr 打一行日志，返回带退出码的错误。
+func oneshotFail(opID string, err error) error {
+	// 分类必须看**原始**错误（lockReason 会把它换成 CodedError，类型断言就失效了），
+	// 包装只用于人读消息。
+	reason, exitCode := classifyOneshot(err)
+	err = lockReason(err)
 	out := failedResult(opID, reason, err.Error())
 	out.Error = err.Error()
-	_ = writeJSON(os.Stdout, out)
-	fmt.Fprintf(os.Stderr, "oneshot error (exit=%d): %s\n", exitCode, err)
+	if werr := writeJSON(os.Stdout, out); werr != nil {
+		return withExit(exitInfra, werr)
+	}
+	fmt.Fprintf(os.Stderr, "oneshot error (exit=%d, reason=%s): %s\n", exitCode, reason, err)
+	return withExit(exitCode, err)
+}
+
+// oneshotRefuse 输出一份"节点拒绝执行"的终态结果（零变更），退出码 0：
+// 拒绝是节点的正常结论，不是基础设施错误（控制面据此写 Failed(reason)）。
+func oneshotRefuse(opID, reason, message string) error {
+	if err := writeJSON(os.Stdout, failedResult(opID, reason, message)); err != nil {
+		return withExit(exitInfra, err)
+	}
+	fmt.Fprintf(os.Stderr, "oneshot refused (reason=%s): %s\n", reason, message)
+	return nil
 }
 
 func writeJSON(w *os.File, v any) error {

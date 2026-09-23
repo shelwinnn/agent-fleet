@@ -121,6 +121,13 @@ func (s *Server) handleDrift(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, domain.ReasonInternal, err.Error(), nil)
 		return
 	}
+	// 求值会写条件（例如把超窗观测置回 Unknown(StaleObservation)）：响应必须用
+	// **求值后**的 status，否则会出现"响应说 Unknown、库里是 False"的自相矛盾。
+	if fresh, ferr := s.machines.Get(r.Context(), name); ferr == nil {
+		if parsed, perr := domain.ParseMachineStatus(fresh.StatusJSON()); perr == nil {
+			st = parsed
+		}
+	}
 	drift, _ := st.GetCondition(domain.ConditionDrifted)
 	reconciled, _ := st.GetCondition(domain.ConditionReconciled)
 	writeJSON(w, http.StatusOK, map[string]any{

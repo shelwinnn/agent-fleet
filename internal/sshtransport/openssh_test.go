@@ -192,6 +192,15 @@ func TestRenderIncludeRejectsInjection(t *testing.T) {
 		{"negation in machine name", "!dev", `{"ssh":{"hostName":"a"}}`},
 		{"comma in machine name", "a,b", `{"ssh":{"hostName":"a"}}`},
 		{"newline in machine name", "dev\nHost evil", `{"ssh":{"hostName":"a"}}`},
+		// KM-26 核查回归：值里有空白/引号时渲染出的行 OpenSSH 解析不了
+		//（`User dev -oProxyCommand=evil` 会让整个 ssh_config 变成 bad configuration），
+		// 因此必须与注入同等对待：整次渲染失败，不写出坏文件。
+		{"space in user", "devbox-01", `{"ssh":{"hostName":"a","user":"dev -oProxyCommand=evil"}}`},
+		{"space in hostName", "devbox-01", `{"ssh":{"hostName":"a b"}}`},
+		{"space in proxyJump", "devbox-01", `{"ssh":{"hostName":"a","proxyJump":"bastion evil"}}`},
+		{"space in identityFile", "devbox-01", `{"ssh":{"hostName":"a","identityFile":"/home/dev/my key"}}`},
+		{"double quote in user", "devbox-01", `{"ssh":{"hostName":"a","user":"de\"v"}}`},
+		{"single quote in proxyJump", "devbox-01", `{"ssh":{"hostName":"a","proxyJump":"bast'ion"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

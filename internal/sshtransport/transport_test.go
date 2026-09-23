@@ -316,3 +316,78 @@ func opWithPhase(phase, modifier string) *domain.Operation {
 	op.Metadata.Name = "op-1"
 	return op
 }
+
+// ---- KM-26 核查回归：scp 方向、连接前分类的远端输出守卫、操作数校验 ----
+
+// fakeSCP 生成一个假 scp，记录收到的 argv。
+func fakeSCP(t *testing.T) (bin, argvFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	bin = filepath.Join(dir, "scp")
+	argvFile = filepath.Join(dir, "scp-argv.txt")
+	script := "#!/bin/sh\n: > " + argvFile + "\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argvFile + "; done\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, argvFile
+}
+
+func TestScpUploadAndDownloadDirections(t *testing.T) {
+	bin, argvFile := fakeSCP(t)
+	tr := New(Config{SCPBinary: bin, ClientConfig: "/tmp/c.conf"})
+	ctx := context.Background()
+
+	if err := tr.Upload(ctx, "node-a", "/local/bundle", "/remote/staging/bundle"); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	up := readArgv(t, argvFile)
+	if up[len(up)-2] != "/local/bundle" || up[len(up)-1] != "node-a:/remote/staging/bundle" {
+		t.Fatalf("Upload operands = %v, want [<local> node-a:<remote>]", up[len(up)-2:])
+	}
+
+	if err := tr.Download(ctx, "node-a", "/remote/staging/result.json", "/local/result.json"); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	down := readArgv(t, argvFile)
+	if down[len(down)-2] != "node-a:/remote/staging/result.json" || down[len(down)-1] != "/local/result.json" {
+		t.Fatalf("Download operands = %v, want [node-a:<remote> <local>]", down[len(down)-2:])
+	}
+}
+
+func readArgv(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+}
+
+func TestScpRejectsRelativeRemotePath(t *testing.T) {
+	bin, _ := fakeSCP(t)
+	tr := New(Config{SCPBinary: bin})
+	if err := tr.Upload(context.Background(), "node-a", "/local/x", "relative/path"); err == nil {
+		t.Fatal("relative remote path must be rejected (only absolute staging paths are used)")
+	}
+}
+
+// TestClassifyRemoteOutputIsNotConnectionFailure：远端进程自己打印
+// "Host key verification failed." 并退 255 时，命令**已经启动**，不能当成连接前失败
+// （否则会把 Unknown 误判成 Failed 并提前释放机器级互斥，§6.4/FR-15.4）。
+func TestClassifyRemoteOutputIsNotConnectionFailure(t *testing.T) {
+	res := Result{
+		Stdout:   []byte(`{"phase":"Failed","reason":"RemoteCommandFailed"}`),
+		Stderr:   []byte("Host key verification failed.\n"),
+		ExitCode: 255,
+	}
+	err := classify(res, false)
+	if got := domain.ReasonOf(err); got != domain.ReasonRemoteCommandFailed {
+		t.Fatalf("reason = %s, want %s (%v)", got, domain.ReasonRemoteCommandFailed, err)
+	}
+	// 反过来：远端没有任何输出 + 同样的 stderr → 连接前失败（host-key 校验失败）。
+	res.Stdout = nil
+	err = classify(res, false)
+	if got := domain.ReasonOf(err); got != domain.ReasonHostKeyVerificationFailed {
+		t.Fatalf("reason = %s, want %s (%v)", got, domain.ReasonHostKeyVerificationFailed, err)
+	}
+}
