@@ -348,7 +348,7 @@ func TestPipelineRunsFromSelfContainedSnapshot(t *testing.T) {
 }
 
 // T17（节点侧半边）：多家族 canonicalizationVersion 不一致 → 拒绝比较
-//（服务端置 Unknown 并报 ProjectionVersionMismatch）。
+// （服务端置 Unknown 并报 ProjectionVersionMismatch）。
 func TestPipelineProjectionVersionMismatch(t *testing.T) {
 	n := newNode(t)
 	snap := domain.DesiredStateSnapshot{

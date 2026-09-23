@@ -323,7 +323,7 @@ func TestDeploymentPausesOnFailure(t *testing.T) {
 
 	dep := &domain.Deployment{
 		Metadata: domain.ObjectMeta{Name: "d-pause"},
-		Spec: depSpecFailFast([]string{"ws-1", "ws-2"}, 1),
+		Spec:     depSpecFailFast([]string{"ws-1", "ws-2"}, 1),
 	}
 	if err := f.dep.Create(f.ctx, dep); err != nil {
 		t.Fatal(err)

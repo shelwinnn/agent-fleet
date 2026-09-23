@@ -46,7 +46,7 @@ func TestSnapshotDigestDeterministic(t *testing.T) {
 	if d1 != d2 {
 		t.Fatalf("digest mismatch for semantically equal states:\n%s\n%s", d1, d2)
 	}
-	if len(d1) != len("sha256:") + 64 {
+	if len(d1) != len("sha256:")+64 {
 		t.Fatalf("digest format unexpected: %s", d1)
 	}
 	// 内容变化 → 摘要变化（generation 递增的基石）。
@@ -71,8 +71,8 @@ func TestRenderResolvesProvidersAndOverrides(t *testing.T) {
 	}
 	state, err := Render(RenderInputs{
 		Machine: machine, Profile: profile,
-		Providers: map[string]*domain.ModelProvider{"openai-main": provider},
-		Skills:    map[string]*domain.Skill{},
+		Providers:     map[string]*domain.ModelProvider{"openai-main": provider},
+		Skills:        map[string]*domain.Skill{},
 		SchemaVersion: "fixture/v1",
 	})
 	if err != nil {
@@ -134,10 +134,10 @@ func TestRenderResolvedSkills(t *testing.T) {
 		Status:   json.RawMessage(`{"resolvedRevision":"abc123","contentDigest":"sha256:aa"}`),
 	}
 	state, err := Render(RenderInputs{
-		Machine: testMachine(`{"profileRef":"default"}`),
-		Profile: testProfile(`{"skills":[{"name":"superpowers","skill":"skill-src"}]}`),
-		Skills:  map[string]*domain.Skill{"skill-src": skill},
-		Providers: map[string]*domain.ModelProvider{},
+		Machine:       testMachine(`{"profileRef":"default"}`),
+		Profile:       testProfile(`{"skills":[{"name":"superpowers","skill":"skill-src"}]}`),
+		Skills:        map[string]*domain.Skill{"skill-src": skill},
+		Providers:     map[string]*domain.ModelProvider{},
 		SchemaVersion: "fixture/v1",
 	})
 	if err != nil {
