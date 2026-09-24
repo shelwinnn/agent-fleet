@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ApiError, FleetClient } from '../src/lib/api/client.js';
 import { subscribeEvents, type StreamState } from '../src/lib/api/sse.js';
 import { driftInputFromApi, driftView } from '../src/lib/state/drift.js';
+import { formatSkippedHosts } from '../src/lib/state/ssh.js';
 import { actionAvailability, unresolvedOperations, viewOperations } from '../src/lib/state/operations.js';
 import { deploymentProgress, viewTarget } from '../src/lib/state/deployments.js';
 import { machineRow } from '../src/lib/state/machines.js';
@@ -333,6 +334,8 @@ describe.skipIf(!enabled)(`SSH 路径联调（${base}，KM-28）`, () => {
   const user = process.env.FLEET_SSH_USER ?? '';
   const profileName = `km28-ssh-p-${stamp}`;
   const machineName = `km28-ssh-m-${stamp}`;
+  /** 仅经 hostAlias 导入的机器：include 的文档化 skip 场景（FR-12.6）。 */
+  const aliasOnlyName = `km28-ssh-alias-${stamp}`;
 
   beforeAll(async () => {
     await client.createProfile({
@@ -351,10 +354,15 @@ describe.skipIf(!enabled)(`SSH 路径联调（${base}，KM-28）`, () => {
         ssh: { hostAlias: alias, hostName: alias, ...(user ? { user } : {}) },
       },
     });
+    await client.createMachine({
+      metadata: { name: aliasOnlyName },
+      spec: { managementMode: 'ssh', ssh: { hostAlias: alias } },
+    });
   });
 
   afterAll(async () => {
     await client.deleteMachine(machineName).catch(() => undefined);
+    await client.deleteMachine(aliasOnlyName).catch(() => undefined);
     await client.deleteProfile(profileName).catch(() => undefined);
   });
 
@@ -382,6 +390,7 @@ describe.skipIf(!enabled)(`SSH 路径联调（${base}，KM-28）`, () => {
     expect(preview.content).toContain(`Host ${machineName}`);
     expect(preview.content).toContain(`HostName ${alias}`);
     expect(preview.includedHosts, 'hostName 非空的机器必须被纳入').toBeGreaterThan(0);
+    expect(preview.skippedHosts, '仅 hostAlias 的机器记入 skipped（文档化场景）').toBeGreaterThan(0);
     console.log(`include preview → included=${preview.includedHosts} skipped=${preview.skippedHosts}，含 ${machineName} 段`);
   });
 
@@ -407,9 +416,17 @@ describe.skipIf(!enabled)(`SSH 路径联调（${base}，KM-28）`, () => {
     expect(result.contentDigest).toMatch(/^sha256:/);
     expect(result.includedHosts).toContain(machineName);
     expect(result.includeDirective).toContain('Include ~/.ssh/agent-fleet.conf');
+    // skippedHosts 是服务端 SkippedHost（{Name,Reason}）：呈现走 formatSkippedHosts，
+    // 绝不把对象直接 join（KM-28 复核回归：曾打出 [object Object]）。
+    expect(result.skippedHosts.length, 'alias-only 机器必须出现在 skipped 里').toBeGreaterThan(0);
+    for (const s of result.skippedHosts) {
+      expect(typeof s.Name).toBe('string');
+      expect(typeof s.Reason).toBe('string');
+    }
+    expect(formatSkippedHosts(result.skippedHosts)).not.toContain('[object Object]');
     const after = await client.sshIncludePreview();
     expect(after.content).toContain(`Host ${machineName}`);
-    console.log(`install → path=${result.path} digest=${result.contentDigest.slice(0, 19)}… included=[${result.includedHosts.join(',')}]`);
+    console.log(`install → path=${result.path} digest=${result.contentDigest.slice(0, 19)}… included=[${result.includedHosts.join(',')}] skipped=[${formatSkippedHosts(result.skippedHosts)}]`);
     console.log(`primaryConfigHint：${result.primaryConfigHint}`);
   });
 

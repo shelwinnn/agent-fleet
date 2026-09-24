@@ -23,8 +23,8 @@
     describeActionFailure,
     hostKeyNotice,
     PLAN_TIMEOUT_NOTICE,
-    UNIMPLEMENTED_ACTION_ENDPOINTS,
     UNIMPLEMENTED_NOTICE,
+    UNIMPLEMENTED_SSH_ENDPOINTS,
   } from '$lib/state/ssh.js';
   import { formatDuration, formatRelativeTime, formatTime, prettyJSON, shortDigest } from '$lib/state/format.js';
   import { untrack } from 'svelte';
@@ -204,9 +204,7 @@
         size="sm"
         variant="outline"
         disabled
-        title={UNIMPLEMENTED_ACTION_ENDPOINTS.filter((e) => e.includes('/machines/')).join('、') +
-          ' ' +
-          UNIMPLEMENTED_NOTICE}
+        title={UNIMPLEMENTED_SSH_ENDPOINTS.join('、') + ' ' + UNIMPLEMENTED_NOTICE}
       >
         Bootstrap / Repair agentd
       </Button>
@@ -640,10 +638,10 @@
           <Button size="sm" variant="outline" disabled={busy !== null || availability.actions[1].blocked} onclick={rollback}>
             Rollback
           </Button>
-          <Button size="sm" variant="outline" disabled title="POST /machines/:name/bootstrap 未实现，见 docs/ssh-only-oneshot.md">
+          <Button size="sm" variant="outline" disabled title="POST /machines/:name/ssh/bootstrap 未实现，见 docs/ssh-only-oneshot.md">
             Bootstrap
           </Button>
-          <Button size="sm" variant="outline" disabled title="POST /machines/:name/repair-agentd 未实现，见 docs/ssh-only-oneshot.md">
+          <Button size="sm" variant="outline" disabled title="POST /machines/:name/ssh/repair-agentd 未实现，见 docs/ssh-only-oneshot.md">
             Repair agentd
           </Button>
           <Button

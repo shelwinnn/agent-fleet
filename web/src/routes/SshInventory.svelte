@@ -9,7 +9,8 @@
    *  - 服务端只写 ~/.ssh/agent-fleet.conf，绝不改写操作者主配置——主配置里的
    *    Include 行由操作者自己加（响应回显该指令）；
    *  - spec 连接值（User/HostName/ProxyJump/IdentityFile）含空白或引号会被服务端
-   *    拒绝渲染（400 Invalid），UI 原样呈现该错误，不在前端猜测改写；
+   *    拒绝渲染，UI 按 §6.4 错误体原样呈现该错误（状态码以后端实际返回为准，
+   *    目前落在 502 Internal；映射修复已登记 KM-29），不在前端猜测改写；
    *  - host-key 校验保持标准策略（FR-12.3），不出现 StrictHostKeyChecking=no。
    */
   import type { FleetStore } from '$lib/state/store.svelte.js';
@@ -23,7 +24,8 @@
   import { machineRows } from '$lib/state/machines.js';
   import { createClock } from '$lib/state/clock.svelte.js';
   import { navigate } from '$lib/state/router.svelte.js';
-  import { describeActionFailure } from '$lib/state/ssh.js';
+  import { describeActionFailure, formatSkippedHosts } from '$lib/state/ssh.js';
+  import { shortDigest } from '$lib/state/format.js';
   import type { IncludeInstallResult, IncludePreview } from '$lib/api/types.js';
 
   interface Props {
@@ -192,7 +194,8 @@
       <CardTitle class="text-sm">OpenSSH include 预览（服务端渲染）</CardTitle>
       <p class="text-xs text-muted-foreground">
         内容由控制面渲染（GET /api/v1/ssh/include）：仅导出 Fleet 持有显式连接字段的机器，
-        字段顺序固定、空值不输出；拒绝注入——值含空白或引号会以 400 Invalid 拒绝渲染。
+        字段顺序固定、空值不输出；拒绝注入——值含空白或引号会被服务端拒绝渲染，
+        拒绝理由按 §6.4 错误体原样呈现（状态码以后端实际返回为准）。
       </p>
     </CardHeader>
     <CardContent class="grid gap-3">
@@ -246,9 +249,9 @@
       <CardHeader><CardTitle class="text-sm">最近一次安装结果（POST /api/v1/ssh/include）</CardTitle></CardHeader>
       <CardContent class="grid gap-1 font-mono text-xs">
         <div>path：{installResult.path}</div>
-        <div>contentDigest：{installResult.contentDigest}</div>
+        <div>contentDigest：{shortDigest(installResult.contentDigest)}</div>
         <div>includedHosts：{installResult.includedHosts.join('、') || '—'}</div>
-        <div>skippedHosts：{installResult.skippedHosts.join('、') || '—'}</div>
+        <div>skippedHosts：{formatSkippedHosts(installResult.skippedHosts) || '—'}</div>
         <div>includeDirective：<code>{installResult.includeDirective}</code></div>
         <div class="text-muted-foreground">{installResult.primaryConfigHint}</div>
       </CardContent>
@@ -261,7 +264,8 @@
       安装只写 ~/.ssh/agent-fleet.conf（控制面侧同一文件的生成副本留在 data-dir 的 generated/ssh/ 供审计与
       diff），绝不改写操作者的主 SSH 配置；要让 ssh/scp 生效，主配置需包含
       <code class="font-mono">Include ~/.ssh/agent-fleet.conf</code>，这一行由操作者自己添加。
-      值含空白或引号的连接字段会被服务端拒绝（400 Invalid，UI 原样呈现）；host-key 校验保持标准策略（FR-12.3）。
+      值含空白或引号的连接字段会被服务端拒绝，UI 按 §6.4 错误体原样呈现拒绝理由；
+      host-key 校验保持标准策略（FR-12.3）。
     </Alert.Description>
   </Alert.Root>
 </div>

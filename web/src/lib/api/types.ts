@@ -320,6 +320,15 @@ export interface IncludePreview {
 }
 
 /**
+ * 未被导出到 include 文件的机器及原因（服务端 internal/sshtransport.SkippedHost：
+ * 无 json 标签，JSON 键与 Go 字段名一致）。
+ */
+export interface SkippedHostEntry {
+  Name: string;
+  Reason: string;
+}
+
+/**
  * POST /api/v1/ssh/include（显式确认安装）的响应（FR-12.6）：只写
  * `~/.ssh/agent-fleet.conf`，绝不改写主配置——`includeDirective` 由操作者自己加。
  */
@@ -328,7 +337,7 @@ export interface IncludeInstallResult {
   includeDirective: string;
   contentDigest: string;
   includedHosts: string[];
-  skippedHosts: string[];
+  skippedHosts: SkippedHostEntry[];
   primaryConfigHint: string;
 }
 

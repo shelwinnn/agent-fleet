@@ -131,14 +131,29 @@ export function describeActionFailure(err: unknown): ActionFailure {
 }
 
 /**
- * 仍未实现的动作端点（KM-28 起的口径：不再按"切片"叙述，也不暗示后续会自动有），
- * 登记见 docs/ssh-only-oneshot.md。UI 禁用入口并如实标注，不假装可用。
+ * 仍未实现的 SSH 路径动作端点（登记见 docs/ssh-only-oneshot.md）——UI 禁用入口并
+ * 如实标注，不假装可用，也不暗示后续切片会自动有。
  */
-export const UNIMPLEMENTED_ACTION_ENDPOINTS = [
-  'POST /machines/{name}/bootstrap',
-  'POST /machines/{name}/repair-agentd',
-  'POST /skills/{name}/resolve',
+export const UNIMPLEMENTED_SSH_ENDPOINTS = [
+  'POST /machines/{name}/ssh/bootstrap',
+  'POST /machines/{name}/ssh/repair-agentd',
 ];
 
-/** 未实现禁用入口的统一口径。 */
+/** SSH 路径未实现禁用入口的统一口径。 */
 export const UNIMPLEMENTED_NOTICE = '未实现，见 docs/ssh-only-oneshot.md';
+
+/**
+ * 未实现的 Skill 端点（POST /skills/{name}/resolve）的口径：它不在
+ * docs/ssh-only-oneshot.md 的登记范围，UI 侧的 doc-of-record 是 docs/web-ui.md §6。
+ */
+export const UNIMPLEMENTED_SKILL_NOTICE = '未实现，见 docs/web-ui.md';
+
+/**
+ * install 结果里 skippedHosts（服务端 SkippedHost：{Name,Reason}，JSON 键为 Go
+ * 字段名）的呈现：`Name（Reason）`——绝不把对象直接 join 成 [object Object]。
+ */
+export function formatSkippedHosts(skipped: { Name: string; Reason: string }[]): string {
+  return skipped
+    .map((s) => (s.Reason ? `${s.Name}（${s.Reason}）` : s.Name))
+    .join('、');
+}

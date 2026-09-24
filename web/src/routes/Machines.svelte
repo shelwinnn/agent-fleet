@@ -19,7 +19,7 @@
   import { machineRows } from '$lib/state/machines.js';
   import { createClock } from '$lib/state/clock.svelte.js';
   import { navigate } from '$lib/state/router.svelte.js';
-  import { describeActionFailure, UNIMPLEMENTED_ACTION_ENDPOINTS, UNIMPLEMENTED_NOTICE } from '$lib/state/ssh.js';
+  import { describeActionFailure, UNIMPLEMENTED_SSH_ENDPOINTS, UNIMPLEMENTED_NOTICE } from '$lib/state/ssh.js';
 
   interface Props {
     store: FleetStore;
@@ -150,7 +150,7 @@
     </div>
     <div class="flex items-center gap-2">
       <Button size="sm" variant="outline" onclick={() => (showAdd = !showAdd)}>Add Machine</Button>
-      <Button size="sm" variant="outline" disabled title="POST /machines/:name/bootstrap、POST /machines/:name/repair-agentd 未实现，见 docs/ssh-only-oneshot.md">
+      <Button size="sm" variant="outline" disabled title="POST /machines/:name/ssh/bootstrap、POST /machines/:name/ssh/repair-agentd 未实现，见 docs/ssh-only-oneshot.md">
         Bootstrap / Repair agentd
       </Button>
     </div>
@@ -302,9 +302,9 @@
   <Alert.Root>
     <Alert.Title>仍未实现的动作端点</Alert.Title>
     <Alert.Description>
-      {UNIMPLEMENTED_ACTION_ENDPOINTS.join('、')} {UNIMPLEMENTED_NOTICE}。按钮保持禁用并标注原因，不提供假入口。
-      SSH 路径的 probe 与 inventory 已注册并接通（KM-26/KM-28）：Probe SSH 逐行可用，Inventory 仅
-      SSH 通道机器可用。
+      {UNIMPLEMENTED_SSH_ENDPOINTS.join('、')} {UNIMPLEMENTED_NOTICE}。按钮保持禁用并标注原因，不提供假入口。
+      Skill 的 resolve 未实现（见 docs/web-ui.md）。SSH 路径的 probe 与 inventory
+      已注册并接通（KM-26/KM-28）：Probe SSH 逐行可用，Inventory 仅 SSH 通道机器可用。
     </Alert.Description>
   </Alert.Root>
 </div>
