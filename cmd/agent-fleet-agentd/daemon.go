@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"time"
@@ -30,6 +31,13 @@ const (
 
 // renewWindow 是证书续期窗口（到期前该时长内触发；窗口带随机抖动，§4.6）。
 const renewWindow = 7 * 24 * time.Hour
+
+// renewRetryBackoff 是续期失败/未生效后的重试退避（§4.6：续期失败不终止 daemon，
+// 旧证书在有效期内仍可用；退避避免忙等）。
+const renewRetryBackoff = time.Minute
+
+// renewTimeout 是单次 RenewCertificate RPC 的超时。
+const renewTimeout = 30 * time.Second
 
 // runDaemon 实现常驻模式（§5.2 本片子集）：出站 mTLS gRPC Connect 长连接，
 // 指数退避 + 抖动重连（spec §11.5）；每次（重）连接先 Hello + 全量 ObservedState；
@@ -79,7 +87,15 @@ func runDaemon(ctx context.Context, cfg *Config, log *slog.Logger) error {
 		Registry:      reg,
 		Home:          home,
 	}
-	maybeRenewCertificate(cfg, conn, log)
+	// 证书续期循环（§4.6 续期窗口抖动、FR-11.2）：仅经既有有效 mTLS 通道；
+	// 每次尝试后按磁盘上 pki/client.crt 的到期时刻重排；失败不终止 daemon；
+	// ctx 取消即退出（runDaemon 返回前等它收尾，不泄漏 goroutine）。
+	renewDone := make(chan struct{})
+	go func() {
+		defer close(renewDone)
+		runRenewLoop(ctx, cfg, conn, log)
+	}()
+	defer func() { <-renewDone }()
 	exec := newExecutor(home, cfg.DataDir, reg, collector, log)
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
@@ -389,46 +405,151 @@ func observedToProto(obs domain.ObservedState) *fleetv1.ObservedState {
 	return m
 }
 
-// maybeRenewCertificate 在证书进入续期窗口时经既有 mTLS 通道续期（spec §12.2），
-// 窗口内随机取触发时刻（§4.6 抖动）。续期失败不阻断 daemon（旧证书在有效期内仍可用）。
-func maybeRenewCertificate(cfg *Config, conn *grpc.ClientConn, log *slog.Logger) {
-	notAfter, err := certNotAfter(cfg.clientCertPath())
-	if err != nil {
-		log.Warn("read client cert expiry failed", "err", err)
-		return
-	}
-	delay := renewalDelay(notAfter, renewWindow)
-	if delay > 0 {
-		log.Info("certificate renewal scheduled", "not_after", notAfter.Format(time.RFC3339),
-			"renew_in", delay.Round(time.Minute).String())
-		go func() {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
-			<-timer.C
-			renewCertificate(cfg, conn, log)
-		}()
-		return
-	}
-	renewCertificate(cfg, conn, log)
+// renewDeps 是续期循环的可注入依赖（默认值见 withDefaults；测试用假实现替换
+// 磁盘/网络/时间，覆盖"续期后重排"与"ctx 取消退出"）。
+type renewDeps struct {
+	log          *slog.Logger
+	window       time.Duration
+	retryBackoff time.Duration
+	// notAfter 读取磁盘上 pki/client.crt 的到期时刻；每次续期尝试后都会重新读取，
+	// 作为下一次排期的依据（一次性的旧实现不重排 → 证书最终会过期）。
+	notAfter func() (time.Time, error)
+	// renew 经既有有效 mTLS 通道执行一次续期（§4.6：RenewCertificate 仅接受既有
+	// 有效 mTLS 通道上的请求，spec §12.2）。
+	renew func(ctx context.Context) error
+	now   func() time.Time
+	rnd   *rand.Rand
+	// wait 等待给定延迟；ctx 取消时返回 false（循环据此退出）。
+	wait func(ctx context.Context, d time.Duration) bool
 }
 
-func renewCertificate(cfg *Config, conn *grpc.ClientConn, log *slog.Logger) {
+// withDefaults 补齐未注入的依赖；生产路径只提供 notAfter/renew。
+func (d renewDeps) withDefaults() renewDeps {
+	if d.log == nil {
+		d.log = slog.Default()
+	}
+	if d.window <= 0 {
+		d.window = renewWindow
+	}
+	if d.retryBackoff <= 0 {
+		d.retryBackoff = renewRetryBackoff
+	}
+	if d.now == nil {
+		d.now = time.Now
+	}
+	if d.rnd == nil {
+		// 局部随机源：抖动可注入、可测，不使用 math/rand 全局源。
+		d.rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+	if d.wait == nil {
+		d.wait = waitContext
+	}
+	return d
+}
+
+// waitContext 等待 d，或在 ctx 取消时提前返回（返回 false 表示已取消）。
+func waitContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// run 是证书续期循环（§4.6 续期窗口抖动、§5.2 daemon 运行时）：
+//  1. 按磁盘上 pki/client.crt 的到期时刻在续期窗口内随机排期；
+//  2. 到点后经既有 mTLS 通道续期一次（RenewCertificate，spec §12.2）；
+//  3. 每次尝试结束后重新读取磁盘到期时刻，据此排下一次（成功=新证书，失败=旧证书）。
+//     续期失败不终止 daemon（旧证书在有效期内仍可用）；未取得进展时退避重试，
+//     绝不忙等；
+//  4. ctx 取消立即退出，不泄漏 goroutine。
+func (d renewDeps) run(ctx context.Context) {
+	d = d.withDefaults()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		notAfter, err := d.notAfter()
+		if err != nil {
+			d.log.Warn("read client cert expiry failed; retrying", "err", err,
+				"retry_in", d.retryBackoff.String())
+			if !d.wait(ctx, d.retryBackoff) {
+				return
+			}
+			continue
+		}
+
+		if delay := renewalDelay(d.now(), notAfter, d.window, d.rnd); delay > 0 {
+			d.log.Info("certificate renewal scheduled", "not_after", notAfter.Format(time.RFC3339),
+				"renew_in", delay.Round(time.Minute).String())
+			if !d.wait(ctx, delay) {
+				return
+			}
+		}
+
+		renewErr := d.renew(ctx)
+		if renewErr != nil {
+			// 失败不终止 daemon：旧证书在有效期内仍可用。
+			d.log.Warn("certificate renewal failed (old certificate remains in use)", "err", renewErr)
+		}
+
+		// 下一轮排期只看磁盘上的实际到期时刻：续期成功即新证书，失败则仍是旧证书。
+		next, err := d.notAfter()
+		if err != nil {
+			d.log.Warn("read client cert expiry after renewal failed; retrying", "err", err,
+				"retry_in", d.retryBackoff.String())
+			if !d.wait(ctx, d.retryBackoff) {
+				return
+			}
+			continue
+		}
+		if !next.After(notAfter) {
+			// 续期未生效（失败或磁盘证书未更新）：退避后重试。
+			d.log.Warn("certificate not renewed; retrying after backoff", "renew_err", renewErr,
+				"not_after", next.Format(time.RFC3339), "retry_in", d.retryBackoff.String())
+			if !d.wait(ctx, d.retryBackoff) {
+				return
+			}
+			continue
+		}
+		if renewErr == nil {
+			d.log.Info("client certificate renewed", "not_after", next.Format(time.RFC3339))
+		}
+	}
+}
+
+// runRenewLoop 启动 daemon 的证书续期循环：续期只走既有有效 mTLS 通道（§4.6），
+// 循环按磁盘证书到期时刻重排（§5.2）；失败不终止 daemon，ctx 取消即退出。
+func runRenewLoop(ctx context.Context, cfg *Config, conn *grpc.ClientConn, log *slog.Logger) {
+	deps := renewDeps{
+		log:      log,
+		notAfter: func() (time.Time, error) { return certNotAfter(cfg.clientCertPath()) },
+		renew: func(ctx context.Context) error {
+			return renewCertificate(ctx, cfg, conn)
+		},
+	}
+	deps.run(ctx)
+}
+
+// renewCertificate 经既有 mTLS 通道调用 RenewCertificate 并把签发结果落盘
+// （§4.6、spec §12.2：私钥不轮换，复用本地已有密钥与 CSR）。返回错误供循环退避重试。
+func renewCertificate(ctx context.Context, cfg *Config, conn *grpc.ClientConn) error {
 	csrPEM, _, err := ensureKeyAndCSR(cfg)
 	if err != nil {
-		log.Warn("renew: prepare csr failed", "err", err)
-		return
+		return fmt.Errorf("prepare csr: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, renewTimeout)
 	defer cancel()
 	client := fleetv1.NewFleetEnrollmentServiceClient(conn)
 	resp, err := client.RenewCertificate(ctx, &fleetv1.RenewCertificateRequest{CsrPem: csrPEM})
 	if err != nil {
-		log.Warn("certificate renewal failed (old certificate remains in use)", "err", err)
-		return
+		return fmt.Errorf("renew certificate: %w", err)
 	}
 	if err := storeClientCert(cfg, resp.GetCertPem()); err != nil {
-		log.Warn("renew: store certificate failed", "err", err)
-		return
+		return fmt.Errorf("store certificate: %w", err)
 	}
-	log.Info("client certificate renewed", "not_after_unix", resp.GetNotAfterUnix())
+	return nil
 }

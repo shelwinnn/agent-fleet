@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1",
+  "machine": "node-1",
+  "generation": 7,
+  "snapshotDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "snapshot": {
+    "machine": "node-1",
+    "generation": 7,
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "protocolVersion": "1",
+    "canonicalizationVersion": "1",
+    "desired": {
+      "schemaVersion": "1",
+      "agents": {
+        "codex": {
+          "version": "1.2.3"
+        }
+      },
+      "skills": {
+        "tool": {
+          "revision": "r1",
+          "contentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    }
+  },
+  "artifacts": [
+    {
+      "name": "tool",
+      "contentDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "treeDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "path": "artifacts/skills/./2222222222222222222222222222222222222222222222222222222222222222",
+      "size": 12,
+      "files": 1
+    }
+  ],
+  "bundleDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

@@ -731,19 +731,78 @@ func (x *DesiredStateSnapshot) GetSnapshotJson() []byte {
 	return nil
 }
 
-// ExecuteOperation 携带完整快照（随第 3 片派发；本片仅定义消息）。
+// PlanBaseline 是"计划所基于的观测基线"（FR-12.7 点名的两项：观测受管摘要 +
+// inventorySeq）。KM-26 补入协议：apply 前重算基线必须与之比对，不一致即拒绝执行、
+// 零变更、报 ReplanRequired。
+type PlanBaseline struct {
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	ObservedProjectionDigest string                 `protobuf:"bytes,1,opt,name=observed_projection_digest,json=observedProjectionDigest,proto3" json:"observed_projection_digest,omitempty"`
+	InventorySeq             int64                  `protobuf:"varint,2,opt,name=inventory_seq,json=inventorySeq,proto3" json:"inventory_seq,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *PlanBaseline) Reset() {
+	*x = PlanBaseline{}
+	mi := &file_fleet_v1_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlanBaseline) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlanBaseline) ProtoMessage() {}
+
+func (x *PlanBaseline) ProtoReflect() protoreflect.Message {
+	mi := &file_fleet_v1_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlanBaseline.ProtoReflect.Descriptor instead.
+func (*PlanBaseline) Descriptor() ([]byte, []int) {
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PlanBaseline) GetObservedProjectionDigest() string {
+	if x != nil {
+		return x.ObservedProjectionDigest
+	}
+	return ""
+}
+
+func (x *PlanBaseline) GetInventorySeq() int64 {
+	if x != nil {
+		return x.InventorySeq
+	}
+	return 0
+}
+
+// ExecuteOperation 携带完整快照（FR-13.6：一律自包含）。
 type ExecuteOperation struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	OperationId       string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	DesiredGeneration int64                  `protobuf:"varint,2,opt,name=desired_generation,json=desiredGeneration,proto3" json:"desired_generation,omitempty"`
 	Snapshot          *DesiredStateSnapshot  `protobuf:"bytes,3,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// plan_digest 是操作者确认的那份计划（确认对象是具体计划，不是仅目标代）。
+	PlanDigest string `protobuf:"bytes,4,opt,name=plan_digest,json=planDigest,proto3" json:"plan_digest,omitempty"`
+	// baseline 非空时，节点必须重取观测、重算基线并与它比对（FR-12.7）。
+	Baseline      *PlanBaseline `protobuf:"bytes,5,opt,name=baseline,proto3" json:"baseline,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExecuteOperation) Reset() {
 	*x = ExecuteOperation{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[8]
+	mi := &file_fleet_v1_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +814,7 @@ func (x *ExecuteOperation) String() string {
 func (*ExecuteOperation) ProtoMessage() {}
 
 func (x *ExecuteOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[8]
+	mi := &file_fleet_v1_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +827,7 @@ func (x *ExecuteOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteOperation.ProtoReflect.Descriptor instead.
 func (*ExecuteOperation) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{8}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ExecuteOperation) GetOperationId() string {
@@ -792,6 +851,20 @@ func (x *ExecuteOperation) GetSnapshot() *DesiredStateSnapshot {
 	return nil
 }
 
+func (x *ExecuteOperation) GetPlanDigest() string {
+	if x != nil {
+		return x.PlanDigest
+	}
+	return ""
+}
+
+func (x *ExecuteOperation) GetBaseline() *PlanBaseline {
+	if x != nil {
+		return x.Baseline
+	}
+	return nil
+}
+
 // OperationStarted / OperationProgress / OperationResult 为变更流水线上报
 // （本片仅定义消息并做幂等接收；执行流水线随第 3 片实现）。
 type OperationStarted struct {
@@ -803,7 +876,7 @@ type OperationStarted struct {
 
 func (x *OperationStarted) Reset() {
 	*x = OperationStarted{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[9]
+	mi := &file_fleet_v1_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -815,7 +888,7 @@ func (x *OperationStarted) String() string {
 func (*OperationStarted) ProtoMessage() {}
 
 func (x *OperationStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[9]
+	mi := &file_fleet_v1_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -828,7 +901,7 @@ func (x *OperationStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationStarted.ProtoReflect.Descriptor instead.
 func (*OperationStarted) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{9}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *OperationStarted) GetOperationId() string {
@@ -850,7 +923,7 @@ type OperationProgress struct {
 
 func (x *OperationProgress) Reset() {
 	*x = OperationProgress{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[10]
+	mi := &file_fleet_v1_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -862,7 +935,7 @@ func (x *OperationProgress) String() string {
 func (*OperationProgress) ProtoMessage() {}
 
 func (x *OperationProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[10]
+	mi := &file_fleet_v1_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -875,7 +948,7 @@ func (x *OperationProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationProgress.ProtoReflect.Descriptor instead.
 func (*OperationProgress) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *OperationProgress) GetOperationId() string {
@@ -926,7 +999,7 @@ type OperationResult struct {
 
 func (x *OperationResult) Reset() {
 	*x = OperationResult{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[11]
+	mi := &file_fleet_v1_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -938,7 +1011,7 @@ func (x *OperationResult) String() string {
 func (*OperationResult) ProtoMessage() {}
 
 func (x *OperationResult) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[11]
+	mi := &file_fleet_v1_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -951,7 +1024,7 @@ func (x *OperationResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationResult.ProtoReflect.Descriptor instead.
 func (*OperationResult) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *OperationResult) GetOperationId() string {
@@ -1031,7 +1104,7 @@ type VerifyEvidence struct {
 
 func (x *VerifyEvidence) Reset() {
 	*x = VerifyEvidence{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[12]
+	mi := &file_fleet_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1043,7 +1116,7 @@ func (x *VerifyEvidence) String() string {
 func (*VerifyEvidence) ProtoMessage() {}
 
 func (x *VerifyEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[12]
+	mi := &file_fleet_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1056,7 +1129,7 @@ func (x *VerifyEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerifyEvidence.ProtoReflect.Descriptor instead.
 func (*VerifyEvidence) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *VerifyEvidence) GetDesiredProjectionDigest() string {
@@ -1104,7 +1177,7 @@ type CancelOperation struct {
 
 func (x *CancelOperation) Reset() {
 	*x = CancelOperation{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[13]
+	mi := &file_fleet_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1116,7 +1189,7 @@ func (x *CancelOperation) String() string {
 func (*CancelOperation) ProtoMessage() {}
 
 func (x *CancelOperation) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[13]
+	mi := &file_fleet_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1129,7 +1202,7 @@ func (x *CancelOperation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelOperation.ProtoReflect.Descriptor instead.
 func (*CancelOperation) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CancelOperation) GetOperationId() string {
@@ -1149,7 +1222,7 @@ type OperationResultAck struct {
 
 func (x *OperationResultAck) Reset() {
 	*x = OperationResultAck{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[14]
+	mi := &file_fleet_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1161,7 +1234,7 @@ func (x *OperationResultAck) String() string {
 func (*OperationResultAck) ProtoMessage() {}
 
 func (x *OperationResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[14]
+	mi := &file_fleet_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1174,7 +1247,7 @@ func (x *OperationResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationResultAck.ProtoReflect.Descriptor instead.
 func (*OperationResultAck) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *OperationResultAck) GetOperationId() string {
@@ -1193,7 +1266,7 @@ type RequestInventory struct {
 
 func (x *RequestInventory) Reset() {
 	*x = RequestInventory{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[15]
+	mi := &file_fleet_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1205,7 +1278,7 @@ func (x *RequestInventory) String() string {
 func (*RequestInventory) ProtoMessage() {}
 
 func (x *RequestInventory) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[15]
+	mi := &file_fleet_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1218,7 +1291,7 @@ func (x *RequestInventory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestInventory.ProtoReflect.Descriptor instead.
 func (*RequestInventory) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RequestInventory) GetFull() bool {
@@ -1240,7 +1313,7 @@ type LogEvent struct {
 
 func (x *LogEvent) Reset() {
 	*x = LogEvent{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[16]
+	mi := &file_fleet_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1252,7 +1325,7 @@ func (x *LogEvent) String() string {
 func (*LogEvent) ProtoMessage() {}
 
 func (x *LogEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[16]
+	mi := &file_fleet_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1265,7 +1338,7 @@ func (x *LogEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEvent.ProtoReflect.Descriptor instead.
 func (*LogEvent) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *LogEvent) GetLevel() string {
@@ -1303,7 +1376,7 @@ type EnrollRequest struct {
 
 func (x *EnrollRequest) Reset() {
 	*x = EnrollRequest{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[17]
+	mi := &file_fleet_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1315,7 +1388,7 @@ func (x *EnrollRequest) String() string {
 func (*EnrollRequest) ProtoMessage() {}
 
 func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[17]
+	mi := &file_fleet_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1328,7 +1401,7 @@ func (x *EnrollRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollRequest.ProtoReflect.Descriptor instead.
 func (*EnrollRequest) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *EnrollRequest) GetMachineId() string {
@@ -1366,7 +1439,7 @@ type EnrollResponse struct {
 
 func (x *EnrollResponse) Reset() {
 	*x = EnrollResponse{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[18]
+	mi := &file_fleet_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1378,7 +1451,7 @@ func (x *EnrollResponse) String() string {
 func (*EnrollResponse) ProtoMessage() {}
 
 func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[18]
+	mi := &file_fleet_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1391,7 +1464,7 @@ func (x *EnrollResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollResponse.ProtoReflect.Descriptor instead.
 func (*EnrollResponse) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{18}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *EnrollResponse) GetCertPem() []byte {
@@ -1424,7 +1497,7 @@ type RenewCertificateRequest struct {
 
 func (x *RenewCertificateRequest) Reset() {
 	*x = RenewCertificateRequest{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[19]
+	mi := &file_fleet_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1436,7 +1509,7 @@ func (x *RenewCertificateRequest) String() string {
 func (*RenewCertificateRequest) ProtoMessage() {}
 
 func (x *RenewCertificateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[19]
+	mi := &file_fleet_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1449,7 +1522,7 @@ func (x *RenewCertificateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertificateRequest.ProtoReflect.Descriptor instead.
 func (*RenewCertificateRequest) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{19}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RenewCertificateRequest) GetCsrPem() []byte {
@@ -1469,7 +1542,7 @@ type RenewCertificateResponse struct {
 
 func (x *RenewCertificateResponse) Reset() {
 	*x = RenewCertificateResponse{}
-	mi := &file_fleet_v1_agent_proto_msgTypes[20]
+	mi := &file_fleet_v1_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1481,7 +1554,7 @@ func (x *RenewCertificateResponse) String() string {
 func (*RenewCertificateResponse) ProtoMessage() {}
 
 func (x *RenewCertificateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fleet_v1_agent_proto_msgTypes[20]
+	mi := &file_fleet_v1_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1494,7 +1567,7 @@ func (x *RenewCertificateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewCertificateResponse.ProtoReflect.Descriptor instead.
 func (*RenewCertificateResponse) Descriptor() ([]byte, []int) {
-	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{20}
+	return file_fleet_v1_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RenewCertificateResponse) GetCertPem() []byte {
@@ -1567,11 +1640,17 @@ const file_fleet_v1_agent_proto_rawDesc = "" +
 	"generation\x18\x01 \x01(\x03R\n" +
 	"generation\x12\x16\n" +
 	"\x06digest\x18\x02 \x01(\tR\x06digest\x12#\n" +
-	"\rsnapshot_json\x18\x03 \x01(\fR\fsnapshotJson\"\xa0\x01\n" +
+	"\rsnapshot_json\x18\x03 \x01(\fR\fsnapshotJson\"q\n" +
+	"\fPlanBaseline\x12<\n" +
+	"\x1aobserved_projection_digest\x18\x01 \x01(\tR\x18observedProjectionDigest\x12#\n" +
+	"\rinventory_seq\x18\x02 \x01(\x03R\finventorySeq\"\xf5\x01\n" +
 	"\x10ExecuteOperation\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12-\n" +
 	"\x12desired_generation\x18\x02 \x01(\x03R\x11desiredGeneration\x12:\n" +
-	"\bsnapshot\x18\x03 \x01(\v2\x1e.fleet.v1.DesiredStateSnapshotR\bsnapshot\"5\n" +
+	"\bsnapshot\x18\x03 \x01(\v2\x1e.fleet.v1.DesiredStateSnapshotR\bsnapshot\x12\x1f\n" +
+	"\vplan_digest\x18\x04 \x01(\tR\n" +
+	"planDigest\x122\n" +
+	"\bbaseline\x18\x05 \x01(\v2\x16.fleet.v1.PlanBaselineR\bbaseline\"5\n" +
 	"\x10OperationStarted\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\"z\n" +
 	"\x11OperationProgress\x12!\n" +
@@ -1638,7 +1717,7 @@ func file_fleet_v1_agent_proto_rawDescGZIP() []byte {
 	return file_fleet_v1_agent_proto_rawDescData
 }
 
-var file_fleet_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_fleet_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_fleet_v1_agent_proto_goTypes = []any{
 	(*AgentToServer)(nil),            // 0: fleet.v1.AgentToServer
 	(*ServerToAgent)(nil),            // 1: fleet.v1.ServerToAgent
@@ -1648,49 +1727,51 @@ var file_fleet_v1_agent_proto_goTypes = []any{
 	(*Heartbeat)(nil),                // 5: fleet.v1.Heartbeat
 	(*DesiredStateChanged)(nil),      // 6: fleet.v1.DesiredStateChanged
 	(*DesiredStateSnapshot)(nil),     // 7: fleet.v1.DesiredStateSnapshot
-	(*ExecuteOperation)(nil),         // 8: fleet.v1.ExecuteOperation
-	(*OperationStarted)(nil),         // 9: fleet.v1.OperationStarted
-	(*OperationProgress)(nil),        // 10: fleet.v1.OperationProgress
-	(*OperationResult)(nil),          // 11: fleet.v1.OperationResult
-	(*VerifyEvidence)(nil),           // 12: fleet.v1.VerifyEvidence
-	(*CancelOperation)(nil),          // 13: fleet.v1.CancelOperation
-	(*OperationResultAck)(nil),       // 14: fleet.v1.OperationResultAck
-	(*RequestInventory)(nil),         // 15: fleet.v1.RequestInventory
-	(*LogEvent)(nil),                 // 16: fleet.v1.LogEvent
-	(*EnrollRequest)(nil),            // 17: fleet.v1.EnrollRequest
-	(*EnrollResponse)(nil),           // 18: fleet.v1.EnrollResponse
-	(*RenewCertificateRequest)(nil),  // 19: fleet.v1.RenewCertificateRequest
-	(*RenewCertificateResponse)(nil), // 20: fleet.v1.RenewCertificateResponse
-	(*ObservedState)(nil),            // 21: fleet.v1.ObservedState
+	(*PlanBaseline)(nil),             // 8: fleet.v1.PlanBaseline
+	(*ExecuteOperation)(nil),         // 9: fleet.v1.ExecuteOperation
+	(*OperationStarted)(nil),         // 10: fleet.v1.OperationStarted
+	(*OperationProgress)(nil),        // 11: fleet.v1.OperationProgress
+	(*OperationResult)(nil),          // 12: fleet.v1.OperationResult
+	(*VerifyEvidence)(nil),           // 13: fleet.v1.VerifyEvidence
+	(*CancelOperation)(nil),          // 14: fleet.v1.CancelOperation
+	(*OperationResultAck)(nil),       // 15: fleet.v1.OperationResultAck
+	(*RequestInventory)(nil),         // 16: fleet.v1.RequestInventory
+	(*LogEvent)(nil),                 // 17: fleet.v1.LogEvent
+	(*EnrollRequest)(nil),            // 18: fleet.v1.EnrollRequest
+	(*EnrollResponse)(nil),           // 19: fleet.v1.EnrollResponse
+	(*RenewCertificateRequest)(nil),  // 20: fleet.v1.RenewCertificateRequest
+	(*RenewCertificateResponse)(nil), // 21: fleet.v1.RenewCertificateResponse
+	(*ObservedState)(nil),            // 22: fleet.v1.ObservedState
 }
 var file_fleet_v1_agent_proto_depIdxs = []int32{
 	2,  // 0: fleet.v1.AgentToServer.hello:type_name -> fleet.v1.Hello
 	5,  // 1: fleet.v1.AgentToServer.heartbeat:type_name -> fleet.v1.Heartbeat
-	21, // 2: fleet.v1.AgentToServer.observed_state:type_name -> fleet.v1.ObservedState
-	9,  // 3: fleet.v1.AgentToServer.operation_started:type_name -> fleet.v1.OperationStarted
-	10, // 4: fleet.v1.AgentToServer.operation_progress:type_name -> fleet.v1.OperationProgress
-	11, // 5: fleet.v1.AgentToServer.operation_result:type_name -> fleet.v1.OperationResult
-	16, // 6: fleet.v1.AgentToServer.log_event:type_name -> fleet.v1.LogEvent
+	22, // 2: fleet.v1.AgentToServer.observed_state:type_name -> fleet.v1.ObservedState
+	10, // 3: fleet.v1.AgentToServer.operation_started:type_name -> fleet.v1.OperationStarted
+	11, // 4: fleet.v1.AgentToServer.operation_progress:type_name -> fleet.v1.OperationProgress
+	12, // 5: fleet.v1.AgentToServer.operation_result:type_name -> fleet.v1.OperationResult
+	17, // 6: fleet.v1.AgentToServer.log_event:type_name -> fleet.v1.LogEvent
 	4,  // 7: fleet.v1.ServerToAgent.welcome:type_name -> fleet.v1.Welcome
 	6,  // 8: fleet.v1.ServerToAgent.desired_state_changed:type_name -> fleet.v1.DesiredStateChanged
-	8,  // 9: fleet.v1.ServerToAgent.execute_operation:type_name -> fleet.v1.ExecuteOperation
-	13, // 10: fleet.v1.ServerToAgent.cancel_operation:type_name -> fleet.v1.CancelOperation
-	14, // 11: fleet.v1.ServerToAgent.operation_result_ack:type_name -> fleet.v1.OperationResultAck
-	15, // 12: fleet.v1.ServerToAgent.request_inventory:type_name -> fleet.v1.RequestInventory
+	9,  // 9: fleet.v1.ServerToAgent.execute_operation:type_name -> fleet.v1.ExecuteOperation
+	14, // 10: fleet.v1.ServerToAgent.cancel_operation:type_name -> fleet.v1.CancelOperation
+	15, // 11: fleet.v1.ServerToAgent.operation_result_ack:type_name -> fleet.v1.OperationResultAck
+	16, // 12: fleet.v1.ServerToAgent.request_inventory:type_name -> fleet.v1.RequestInventory
 	3,  // 13: fleet.v1.Hello.capabilities:type_name -> fleet.v1.AdapterCapability
 	7,  // 14: fleet.v1.ExecuteOperation.snapshot:type_name -> fleet.v1.DesiredStateSnapshot
-	12, // 15: fleet.v1.OperationResult.verify:type_name -> fleet.v1.VerifyEvidence
-	0,  // 16: fleet.v1.FleetAgentService.Connect:input_type -> fleet.v1.AgentToServer
-	17, // 17: fleet.v1.FleetEnrollmentService.Enroll:input_type -> fleet.v1.EnrollRequest
-	19, // 18: fleet.v1.FleetEnrollmentService.RenewCertificate:input_type -> fleet.v1.RenewCertificateRequest
-	1,  // 19: fleet.v1.FleetAgentService.Connect:output_type -> fleet.v1.ServerToAgent
-	18, // 20: fleet.v1.FleetEnrollmentService.Enroll:output_type -> fleet.v1.EnrollResponse
-	20, // 21: fleet.v1.FleetEnrollmentService.RenewCertificate:output_type -> fleet.v1.RenewCertificateResponse
-	19, // [19:22] is the sub-list for method output_type
-	16, // [16:19] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	8,  // 15: fleet.v1.ExecuteOperation.baseline:type_name -> fleet.v1.PlanBaseline
+	13, // 16: fleet.v1.OperationResult.verify:type_name -> fleet.v1.VerifyEvidence
+	0,  // 17: fleet.v1.FleetAgentService.Connect:input_type -> fleet.v1.AgentToServer
+	18, // 18: fleet.v1.FleetEnrollmentService.Enroll:input_type -> fleet.v1.EnrollRequest
+	20, // 19: fleet.v1.FleetEnrollmentService.RenewCertificate:input_type -> fleet.v1.RenewCertificateRequest
+	1,  // 20: fleet.v1.FleetAgentService.Connect:output_type -> fleet.v1.ServerToAgent
+	19, // 21: fleet.v1.FleetEnrollmentService.Enroll:output_type -> fleet.v1.EnrollResponse
+	21, // 22: fleet.v1.FleetEnrollmentService.RenewCertificate:output_type -> fleet.v1.RenewCertificateResponse
+	20, // [20:23] is the sub-list for method output_type
+	17, // [17:20] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_fleet_v1_agent_proto_init() }
@@ -1722,7 +1803,7 @@ func file_fleet_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fleet_v1_agent_proto_rawDesc), len(file_fleet_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

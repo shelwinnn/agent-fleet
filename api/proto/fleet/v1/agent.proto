@@ -108,11 +108,23 @@ message DesiredStateSnapshot {
   bytes snapshot_json = 3;
 }
 
-// ExecuteOperation 携带完整快照（随第 3 片派发；本片仅定义消息）。
+// PlanBaseline 是"计划所基于的观测基线"（FR-12.7 点名的两项：观测受管摘要 +
+// inventorySeq）。KM-26 补入协议：apply 前重算基线必须与之比对，不一致即拒绝执行、
+// 零变更、报 ReplanRequired。
+message PlanBaseline {
+  string observed_projection_digest = 1;
+  int64 inventory_seq = 2;
+}
+
+// ExecuteOperation 携带完整快照（FR-13.6：一律自包含）。
 message ExecuteOperation {
   string operation_id = 1;
   int64 desired_generation = 2;
   DesiredStateSnapshot snapshot = 3;
+  // plan_digest 是操作者确认的那份计划（确认对象是具体计划，不是仅目标代）。
+  string plan_digest = 4;
+  // baseline 非空时，节点必须重取观测、重算基线并与它比对（FR-12.7）。
+  PlanBaseline baseline = 5;
 }
 
 // OperationStarted / OperationProgress / OperationResult 为变更流水线上报

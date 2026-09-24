@@ -75,10 +75,22 @@ type Result struct {
 	Verify           *domain.VerifyEvidence
 	PlanDigest       string
 	// Baseline 是计划所基于的观测基线（FR-12.7：确认窗口内的 apply 以此比对）。
-	Baseline   *Baseline
+	Baseline *Baseline
+	// Projection 是本次流水线观测的双侧投影摘要与序列（§7.1）。只读路径
+	// （oneshot plan）据此组装观测上报；它**不**进 Verify，避免把"看过一眼"
+	// 当成"收敛证据"（§6.2 的 Reconciled=True 需要 apply 后观测）。
+	Projection *Projection
 	ReadOnly   bool
 	StartedAt  time.Time
 	FinishedAt time.Time
+}
+
+// Projection 是一次观测的双侧投影摘要与序列（只读路径与观测上报共用）。
+type Projection struct {
+	DesiredDigest           string
+	ObservedDigest          string
+	CanonicalizationVersion string
+	Seq                     int64
 }
 
 // AggregatedProjection 是一次 inventory 的多家族聚合投影（ADR-1：单机单判据）。
@@ -188,12 +200,26 @@ func (e *Executor) Run(ctx context.Context, home string, ex Execution) Result {
 	}
 	progress(StepInventory, "Succeeded", fmt.Sprintf("seq=%d observed=%s", proj.Seq, short(proj.ObservedDigest)))
 	res.Baseline = &Baseline{ObservedProjectionDigest: proj.ObservedDigest, InventorySeq: proj.Seq}
+	res.Projection = projection(proj)
 
 	// FR-12.7 / T8：apply 前基线比对——重算观测与计划基线不一致即拒绝、零变更。
-	if ex.RequireBaseline != nil && proj.ObservedDigest != ex.RequireBaseline.ObservedProjectionDigest {
-		return fail(domain.ReasonReplanRequired,
-			fmt.Sprintf("baseline changed since plan (plan=%s now=%s); re-plan and re-confirm required",
-				short(ex.RequireBaseline.ObservedProjectionDigest), short(proj.ObservedDigest)))
+	// 基线判据含两项（FR-12.7 点名"观测受管摘要 + inventorySeq"）：
+	//  1. 受管投影摘要必须相同（内容没被别人改过）；
+	//  2. 本次采集的 inventorySeq 必须**大于**计划时的 seq——它是"apply 真的重新
+	//     采集了观测"的证明。只比摘要会漏掉"复用了缓存观测"这一情形：节点若直接
+	//     拿 state/last-observed.json 里的旧摘要来比对，摘要相同却被当成新鲜证据。
+	//     seq 是节点本地单调序（FR-8.7），故只可能是"更小/相等 = 没重采"。
+	if ex.RequireBaseline != nil {
+		if proj.ObservedDigest != ex.RequireBaseline.ObservedProjectionDigest {
+			return fail(domain.ReasonReplanRequired,
+				fmt.Sprintf("baseline changed since plan (plan=%s now=%s); re-plan and re-confirm required",
+					short(ex.RequireBaseline.ObservedProjectionDigest), short(proj.ObservedDigest)))
+		}
+		if proj.Seq <= ex.RequireBaseline.InventorySeq {
+			return fail(domain.ReasonReplanRequired,
+				fmt.Sprintf("observation was not re-collected for apply (plan seq=%d now seq=%d); re-plan and re-confirm required",
+					ex.RequireBaseline.InventorySeq, proj.Seq))
+		}
 	}
 
 	// —— 阶段 3：calculate plan（产出 planDigest；空计划仍走阶段 10/12，§5.3 契约）——
@@ -328,6 +354,7 @@ func (e *Executor) Run(ctx context.Context, home string, ex Execution) Result {
 		return restore(domain.ProjectionVersionMismatch, "", fmt.Sprintf("post-apply inventory failed: %v", err))
 	}
 	proj = proj2
+	res.Projection = projection(proj)
 
 	// —— 阶段 12：verify desired == observed（投影摘要比对；不等 → VerifyFailed）——
 	progress(StepVerify, "Running", "")
@@ -572,6 +599,16 @@ func (e *Executor) ownerFor(home, relPath string) FileOwner {
 		}
 	}
 	return nil
+}
+
+// projection 把聚合投影映射为上报用的摘要三元组（只读路径用）。
+func projection(proj AggregatedProjection) *Projection {
+	return &Projection{
+		DesiredDigest:           proj.DesiredDigest,
+		ObservedDigest:          proj.ObservedDigest,
+		CanonicalizationVersion: proj.CanonicalizationVersion,
+		Seq:                     proj.Seq,
+	}
 }
 
 func evidence(proj AggregatedProjection, health string) *domain.VerifyEvidence {

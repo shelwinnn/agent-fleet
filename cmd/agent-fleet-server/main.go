@@ -16,12 +16,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shelwinnn/agent-fleet/internal/bundle"
 	deployctl "github.com/shelwinnn/agent-fleet/internal/controller/deployment"
 	machine "github.com/shelwinnn/agent-fleet/internal/controller/machine"
 	reconcilectl "github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
+	"github.com/shelwinnn/agent-fleet/internal/controller/sshops"
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"
 	grpcagent "github.com/shelwinnn/agent-fleet/internal/server/grpcagent"
 	"github.com/shelwinnn/agent-fleet/internal/server/httpapi"
+	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
 	"github.com/shelwinnn/agent-fleet/internal/server/sse"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
 )
@@ -66,6 +69,19 @@ func run() error {
 		"Web UI 静态产物目录（§3.6：控制面同时托管 SPA；目录不存在则只提供 API）")
 	adapterSchemaVersion := fs.String("adapter-schema-version", "fixture/v1",
 		"适配器 schema 版本（渲染输入五要素之一，§9；随适配器切片对齐）")
+	// —— SSH-only 通道（§4.5/§7.4，KM-26）——
+	sshBinary := fs.String("ssh-binary", "ssh", "系统 OpenSSH 客户端路径（FR-12.1）")
+	scpBinary := fs.String("scp-binary", "scp", "系统 scp 路径（FR-12.1）")
+	sshClientConfig := fs.String("ssh-client-config", "",
+		"传给 ssh/scp 的 -F 客户端配置；为空时沿用系统默认（保留既有 Host/Include/known_hosts）")
+	sshConnectTimeout := fs.Duration("ssh-connect-timeout", sshtransport.DefaultConnectTimeout,
+		"SSH 连接超时（§4.5 默认 10s）")
+	sshCommandTimeout := fs.Duration("ssh-command-timeout", sshtransport.DefaultCommandTimeout,
+		"SSH 命令超时（§4.5 默认 60s）")
+	agentdBinDir := fs.String("agentd-bin-dir", filepath.Join(*dataDir, "agentd"),
+		"按平台预构建的 agentd 二进制目录（agentd-<goos>-<goarch>，§7.4 临时二进制上传）")
+	artifactDir := fs.String("skill-artifact-dir", filepath.Join(*dataDir, "artifacts", "skills"),
+		"Skill 工件缓存目录（§4.7；bundle 只打包被引用的工件）")
 	fs.Parse(os.Args[1:]) //nolint:errcheck // ExitOnError
 
 	if *dbPath == "" {
@@ -150,6 +166,29 @@ func run() error {
 	recCtrl.SetDispatcher(agentSrv)
 	agentSrv.SetResultSink(recCtrl)
 
+	// SSH-only 通道（§4.5/§7.4/§9.3）：受限执行器 + 操作编排 + OpenSSH include 导出。
+	sshTransport := sshtransport.New(sshtransport.Config{
+		SSHBinary:      *sshBinary,
+		SCPBinary:      *scpBinary,
+		ClientConfig:   *sshClientConfig,
+		ConnectTimeout: *sshConnectTimeout,
+		CommandTimeout: *sshCommandTimeout,
+		Log:            log,
+	})
+	sshOrch := sshops.New(sshops.Config{
+		Transport:    sshTransport,
+		Machines:     machineStore,
+		Status:       statusStore,
+		Ops:          operationStore,
+		Inventory:    ctrl,
+		Artifacts:    bundleLocalSource(*artifactDir),
+		AgentdBinDir: *agentdBinDir,
+		OperatorHome: operatorHome(),
+		GeneratedDir: filepath.Join(*dataDir, "generated"),
+		Log:          log,
+	})
+	recCtrl.SetSSHPlanner(sshOrch)
+
 	// 重启自愈（§4.3 第 4 条/FR-15.3）：Pending/Running → Unknown（不移出未决集合）。
 	if err := recCtrl.RecoverInflight(ctx); err != nil {
 		return fmt.Errorf("recover in-flight operations: %w", err)
@@ -202,6 +241,9 @@ func run() error {
 	},
 		machineStore, profileStore, skillStore, providerStore, deploymentStore,
 		operationStore, recCtrl, depCtrl, *adapterSchemaVersion, db.PingContext, log)
+
+	api.SetSSH(sshOrch)
+	api.SetInclude(sshOrch)
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -258,6 +300,20 @@ func defaultDataDir() string {
 }
 
 // checkBindSecurity 落实 §29.14：HTTP 绑定非回环地址时必须配置 admin token。
+// bundleLocalSource 是控制面工件缓存作为 bundle 工件来源（§4.7 的
+// <data-dir>/artifacts/skills/<digest>/ 布局）。
+func bundleLocalSource(root string) bundle.ArtifactSource {
+	return bundle.LocalArtifactSource{Root: root}
+}
+
+// operatorHome 是 include 安装目标所在的操作者 home。
+func operatorHome() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return ""
+}
+
 func checkBindSecurity(addr, adminToken string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

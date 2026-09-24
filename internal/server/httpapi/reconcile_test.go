@@ -19,11 +19,14 @@ import (
 
 // apiFixture 装配完整 HTTP 栈（真实 SQLite + 控制器 + fake 派发）。
 type apiFixture struct {
-	t    *testing.T
-	srv  *httptest.Server
-	rec  *reconcile.Controller
-	ops  domain.OperationRepository
-	disp *fakeDispatch
+	t        *testing.T
+	srv      *httptest.Server
+	api      *Server
+	rec      *reconcile.Controller
+	ops      domain.OperationRepository
+	observed domain.ObservedStateRepository
+	mstatus  domain.MachineStatusRepository
+	disp     *fakeDispatch
 }
 
 type fakeDispatch struct{ fail bool }
@@ -66,7 +69,8 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		rec, dep, "fixture/v1", db.PingContext, log)
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
-	return &apiFixture{t: t, srv: srv, rec: rec, ops: ops, disp: disp}
+	return &apiFixture{t: t, srv: srv, api: api, rec: rec, ops: ops,
+		observed: observed, mstatus: sqlite.NewMachineStatusStore(db), disp: disp}
 }
 
 type noopDeploymentAPI struct{}

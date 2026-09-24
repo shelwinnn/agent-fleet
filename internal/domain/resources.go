@@ -11,8 +11,23 @@ const (
 // MachineCoreSpec 抽取 Machine spec 中控制面需要查询的字段（§10.1：查询列）。
 // spec 以原始 JSON 透传存储，未知字段保留给后续切片（控制器、期望状态）。
 type MachineCoreSpec struct {
-	ManagementMode string `json:"managementMode,omitempty"` // agentd|ssh，缺省按 agentd
-	ProfileRef     string `json:"profileRef,omitempty"`
+	ManagementMode string         `json:"managementMode,omitempty"` // agentd|ssh，缺省按 agentd
+	ProfileRef     string         `json:"profileRef,omitempty"`
+	SSH            MachineSSHSpec `json:"ssh,omitempty"`
+}
+
+// MachineSSHSpec 是 Machine spec.ssh 块的解析结果（spec §8.2、FR-12.6）。
+// 两种来源互斥或叠加：hostAlias 表示机器经操作者既有 OpenSSH 配置导入；
+// 显式连接字段（hostName/user/port/proxyJump/identityFile）表示 Fleet 自己
+// 持有连接信息——后者才是 include 导出的来源（架构 §7.7、spec §13.5）。
+// identityFile 只存路径引用，服务端不摄取私钥内容（FR-12.2、§29.2）。
+type MachineSSHSpec struct {
+	HostAlias    string `json:"hostAlias,omitempty"`
+	HostName     string `json:"hostName,omitempty"`
+	User         string `json:"user,omitempty"`
+	Port         int    `json:"port,omitempty"`
+	ProxyJump    string `json:"proxyJump,omitempty"`
+	IdentityFile string `json:"identityFile,omitempty"`
 }
 
 // Machine 是受管工作站（§6.2）。

@@ -228,6 +228,18 @@ func (c *Controller) EvaluateDrift(ctx context.Context, machine string) (*domain
 			DriftReason: domain.DriftReasonObservationPredatesDesir}, nil
 	}
 
+	// 观测新鲜度（§6.2 契约）：超出 driftFreshnessWindow 且当前无未决操作时，
+	// Drifted/Reconciled 必须是 Unknown(StaleObservation)——**任何**求值入口都
+	// 不得在这之后给出 True/False 的确定判决，否则一次 `GET /machines/{id}/drift`
+	// 就能把扫描刚置上的 Unknown 改写成"一致"（响应与库还会互相矛盾）。
+	if stale, at := c.observationIsStale(ctx, machine); stale {
+		c.writeUnknownDrift(ctx, machine, domain.DriftReasonStaleObservation,
+			fmt.Sprintf("last observation at %s exceeded freshness window %s",
+				at.Format(time.RFC3339), c.cfg.FreshnessWindow))
+		return &domain.DriftEvaluation{DriftStatus: domain.ConditionUnknown,
+			DriftReason: domain.DriftReasonStaleObservation}, nil
+	}
+
 	// 投影契约不可比（§7.1/T17）：不产生 drift 判定，置 Unknown。
 	if obs.DesiredProjectionDigest == "" || obs.ObservedProjectionDigest == "" {
 		c.writeUnknownDrift(ctx, machine, domain.ProjectionVersionMismatch,
@@ -286,6 +298,21 @@ func (c *Controller) EvaluateDrift(ctx context.Context, machine string) (*domain
 			ObservedProjectionDigest: obs.ObservedProjectionDigest,
 			CanonicalizationVersion:  obs.CanonicalizationVersion}, nil
 	}
+}
+
+// observationIsStale 判断最新观测是否已超出 driftFreshnessWindow（§6.2 契约）。
+// 以下情形不判定过期（保持既有求值语义）：
+//   - 从未采集（lastInventoryAt 缺省）：由 NeverInventoried 分支负责；
+//   - 存在未决操作：§6.2 明确"存在未决操作时不按新鲜度改写"。
+func (c *Controller) observationIsStale(ctx context.Context, machine string) (bool, time.Time) {
+	st, err := domain.ParseMachineStatus(c.statusSnapshot(ctx, machine))
+	if err != nil || st.LastInventoryAt == nil || st.UnresolvedOperation != nil {
+		return false, time.Time{}
+	}
+	if c.now().Sub(*st.LastInventoryAt) <= c.cfg.FreshnessWindow {
+		return false, time.Time{}
+	}
+	return true, *st.LastInventoryAt
 }
 
 // ScanFreshness 是新鲜度扫描（§6.2 契约：超出 driftFreshnessWindow 且当前无

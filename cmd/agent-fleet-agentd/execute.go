@@ -29,9 +29,27 @@ type queuedOp struct {
 	OperationID  string
 	Generation   int64
 	SnapshotJSON []byte
+	// Baseline 是控制面随 ExecuteOperation 下发的计划基线（FR-12.7，可为空）。
+	Baseline *reconciler.Baseline
 }
 
 // workerMsg 是 worker → 主循环的上行消息（主循环是流的唯一发送者，P1-2）。
+// baselineFromProto 把协议里的计划基线转换为流水线基线（FR-12.7）：为空时返回
+// nil（无基线可比），非空时 apply 前的重算基线必须与它一致，否则零变更拒绝。
+//
+// 【已知取舍】当前返回 nil = fail-open：控制面还没有生产者在 AutoPlan→apply 流程里
+// 填充 baseline（见 docs/ssh-only-oneshot.md 遗留项 4）。补上生产者时必须同时改成
+// fail-closed（缺 baseline 即拒绝执行），否则"确认后 apply"会退化成"目标代确认"。
+func baselineFromProto(b *fleetv1.PlanBaseline) *reconciler.Baseline {
+	if b == nil || b.GetObservedProjectionDigest() == "" {
+		return nil
+	}
+	return &reconciler.Baseline{
+		ObservedProjectionDigest: b.GetObservedProjectionDigest(),
+		InventorySeq:             b.GetInventorySeq(),
+	}
+}
+
 type workerMsg struct {
 	progress *fleetv1.OperationProgress
 	result   *fleetv1.OperationResult
@@ -121,6 +139,7 @@ func (x *executor) Enqueue(op *fleetv1.ExecuteOperation) *reconciler.Result {
 		OperationID:  id,
 		Generation:   op.GetDesiredGeneration(),
 		SnapshotJSON: op.GetSnapshot().GetSnapshotJson(),
+		Baseline:     baselineFromProto(op.GetBaseline()),
 	})
 	x.mu.Unlock()
 	x.log.Info("operation queued", "operation_id", id, "generation", op.GetDesiredGeneration())
@@ -237,9 +256,10 @@ func (x *executor) runOne(ctx context.Context, q queuedOp, cancelCh chan struct{
 	sendProgress(msgs, q.OperationID, "start", "Running", "")
 
 	res := x.exec.Run(ctx, x.home, reconciler.Execution{
-		OperationID:  q.OperationID,
-		Generation:   q.Generation,
-		SnapshotJSON: q.SnapshotJSON,
+		OperationID:     q.OperationID,
+		Generation:      q.Generation,
+		SnapshotJSON:    q.SnapshotJSON,
+		RequireBaseline: q.Baseline,
 		Cancelled: func() bool {
 			select {
 			case <-cancelCh:

@@ -1,20 +1,18 @@
 // agent-fleet-agentd 是节点侧 agent（架构 v1.1.2 §5.1/§3.6 cmd 布局）。
-// 本片实现子命令：daemon（常驻 mTLS 长连接 + 心跳 + 全量 inventory）、
-// enroll（一次性 enrollment）、oneshot inventory（输出观测 JSON）、version。
-// oneshot plan|apply、doctor 随第 3/4/6 片引入。
+// 子命令：daemon（常驻 mTLS 长连接 + 心跳 + 全量 inventory）、enroll、
+// oneshot inventory|plan|apply（SSH-only 路径，第 6 片）、doctor（诊断与
+// --recover-lock 显式恢复陈旧执行权锁）、version。
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
 )
 
 func main() {
@@ -33,6 +31,8 @@ func main() {
 		err = cmdEnroll(os.Args[2:], log)
 	case "oneshot":
 		err = cmdOneshot(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
 	case "version":
 		fmt.Println("agent-fleet-agentd " + agentdVersion)
 	default:
@@ -41,6 +41,12 @@ func main() {
 	}
 	if err != nil {
 		log.Error("agent-fleet-agentd exited", "err", err)
+		// oneshot 需要把"结果已产出但操作失败"与"基础设施错误"用退出码区分开
+		// （控制面据此决定是写终态还是报错），见 oneshot.go 的退出码约定。
+		var ee *exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -49,7 +55,10 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   agent-fleet-agentd enroll    [--config P] [--server A] [--machine M] [--ca P] [--data-dir P] [--token T]
   agent-fleet-agentd daemon    [--config P] [--server A] [--machine M] [--ca P] [--data-dir P]
-  agent-fleet-agentd oneshot inventory
+  agent-fleet-agentd oneshot inventory [--home P] [--data-dir P]
+  agent-fleet-agentd oneshot plan      --bundle P --operation-id ID [--staging P]
+  agent-fleet-agentd oneshot apply     --bundle P --operation-id ID [--plan-digest D]
+  agent-fleet-agentd doctor [--json] [--recover-lock]
   agent-fleet-agentd version
 `)
 }
@@ -92,21 +101,21 @@ func cmdDaemon(args []string, log *slog.Logger) error {
 	return runDaemon(ctx, cfg, log)
 }
 
-// cmdOneshot 本片仅支持 inventory：输出观测状态 JSON（§5.1）。
+// cmdOneshot 分发 oneshot 子命令（§5.1）：inventory / plan / apply。
+// 三者与控制面共用同一 reconciler 与同一把节点执行权锁（AD-5/§5.6）。
 func cmdOneshot(args []string) error {
-	if len(args) != 1 || args[0] != "inventory" {
-		return fmt.Errorf("oneshot: only `inventory` is implemented in this slice (plan/apply land with slice 3)")
+	if len(args) == 0 {
+		return errors.New("oneshot: subcommand required (inventory|plan|apply)")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "inventory":
+		return cmdOneshotInventory(rest)
+	case "plan":
+		return cmdOneshotPlan(rest)
+	case "apply":
+		return cmdOneshotApply(rest)
+	default:
+		return fmt.Errorf("oneshot: unknown subcommand %q (want inventory|plan|apply)", sub)
 	}
-	collector := &inventory.Collector{DataDir: home + "/.local/share/agent-fleet", AgentdVersion: agentdVersion}
-	obs, err := collector.Collect(context.Background())
-	if err != nil {
-		return err
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(obs)
 }
