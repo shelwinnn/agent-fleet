@@ -1,0 +1,34 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["svelte", "vite/client", "node"],
+    "allowArbitraryExtensions": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": true,
+    "moduleDetection": "force",
+    "paths": {
+      "$lib": ["./src/lib"],
+      "$lib/*": ["./src/lib/*"],
+      "$lib/components": ["./src/lib/components"],
+      "$lib/components/*": ["./src/lib/components/*"],
+      "$lib/components/ui": ["./src/lib/components/ui"],
+      "$lib/components/ui/*": ["./src/lib/components/ui/*"],
+      "$lib/utils": ["./src/lib/utils"],
+      "$lib/utils/*": ["./src/lib/utils/*"],
+      "$lib/hooks": ["./src/lib/hooks"],
+      "$lib/hooks/*": ["./src/lib/hooks/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.js",
+    "src/**/*.svelte",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "vite.config.ts"
+  ]
+}

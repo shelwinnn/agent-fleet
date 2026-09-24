@@ -223,6 +223,10 @@ func (s *Server) handleDeploymentRollback(w http.ResponseWriter, r *http.Request
 		writeStoreError(w, err)
 		return
 	}
+	if err := s.attachDeploymentTargets(r.Context(), dep); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, dep)
 }
 
@@ -283,6 +287,9 @@ func decodeBody(r *http.Request, v any) error {
 
 // DeploymentAPI 是 httpapi 对 Deployment 控制器的窄依赖。
 type DeploymentAPI interface {
+	// Create 是发布的唯一创建入口（FR-10.1/§4.4）：校验显式 machineNames 与
+	// 可解析的 targetGeneration，落库并物化 deployment_targets 与初始 status。
+	Create(ctx context.Context, d *domain.Deployment) error
 	CreateRollback(ctx context.Context, sourceName string, targetGeneration int64) (*domain.Deployment, error)
 	SkipTarget(ctx context.Context, deploymentName, machine, reason string) error
 }

@@ -25,6 +25,7 @@ import (
 	grpcagent "github.com/shelwinnn/agent-fleet/internal/server/grpcagent"
 	"github.com/shelwinnn/agent-fleet/internal/server/httpapi"
 	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
+	"github.com/shelwinnn/agent-fleet/internal/server/sse"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
 )
 
@@ -64,6 +65,8 @@ func run() error {
 		"观测新鲜度阈值（§6.2 默认 3×inventory 间隔 = 15min）")
 	deployScanEvery := fs.Duration("deploy-scan-every", 2*time.Second,
 		"Deployment 推进循环周期")
+	spaDir := fs.String("spa-dir", "web/dist",
+		"Web UI 静态产物目录（§3.6：控制面同时托管 SPA；目录不存在则只提供 API）")
 	adapterSchemaVersion := fs.String("adapter-schema-version", "fixture/v1",
 		"适配器 schema 版本（渲染输入五要素之一，§9；随适配器切片对齐）")
 	// —— SSH-only 通道（§4.5/§7.4，KM-26）——
@@ -115,6 +118,11 @@ func run() error {
 	if err := db.Migrate(ctx, log); err != nil {
 		return err
 	}
+
+	// SSE 事件枢纽（§8.1 `GET /api/v1/events`，§23.6）：接到持久层的写成功钩子上，
+	// 因此 REST、控制器与 agent 上报三条写入来源都自动产生事件（KM-25）。
+	events := sse.NewHub(log)
+	db.SetChangeSink(events.Publish)
 
 	machineStore := sqlite.NewMachineStore(db)
 	statusStore := sqlite.NewMachineStatusStore(db)
@@ -222,8 +230,11 @@ func run() error {
 	}()
 
 	api := httpapi.New(httpapi.Config{
-		AdminToken:   adminToken,
-		EnrollTokens: &tokenIssuer{tokens: tokens, ttl: *tokenTTL},
+		AdminToken:        adminToken,
+		SPADir:            *spaDir,
+		Events:            events.Handler(),
+		DeploymentTargets: targetStore.List,
+		EnrollTokens:      &tokenIssuer{tokens: tokens, ttl: *tokenTTL},
 		OnMachineDelete: func(ctx context.Context, name string) error {
 			return ctrl.OnMachineDeleted(ctx, name)
 		},

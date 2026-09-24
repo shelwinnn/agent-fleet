@@ -14,10 +14,12 @@ import (
 // IMMEDIATE 事务，配合有界重试规避写竞争（KM-21 核查发现 #2/§12.1）。
 type machineStatusStore struct {
 	db *sql.DB
+	// changes 写成功后发布变更（§23.6 SSE 事件源）。
+	changes *changeNotifier
 }
 
 func NewMachineStatusStore(db *DB) domain.MachineStatusRepository {
-	return &machineStatusStore{db: db.sql}
+	return &machineStatusStore{db: db.sql, changes: db.changes}
 }
 
 func (s *machineStatusStore) UpdateStatus(ctx context.Context, machine string, mutate func(*domain.MachineStatus) error) error {
@@ -56,6 +58,12 @@ func (s *machineStatusStore) UpdateStatus(ctx context.Context, machine string, m
 			string(newJSON), nowStamp(), machine); err != nil {
 			return fmt.Errorf("sqlite: update machine %q status: %w", machine, err)
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		// 状态写入同样是一次可见变更（conditions/新鲜度/未决操作都走这里），
+		// 事件版本 = 事务内读到的 rv + 1（与上面的 UPDATE 一致）。
+		s.changes.emit(resourceMachines, machine, rv+1)
+		return nil
 	})
 }

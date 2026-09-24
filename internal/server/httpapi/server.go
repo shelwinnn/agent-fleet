@@ -38,6 +38,16 @@ type Config struct {
 	// OnMachineDelete 在机器删除成功后调用（KM-22：退役该机证书，§4.6）。
 	// 失败只记日志，不影响 204——"删除即拒绝"由 Connect 的机器存在性检查兜底。
 	OnMachineDelete func(ctx context.Context, name string) error
+	// Events 是 SSE 事件枢纽处理器（KM-25：§8.1 `GET /api/v1/events`，格式见 §23.6）；
+	// nil 时该路由按骨架语义返回 501。
+	Events http.Handler
+	// SPADir 是 Web UI 静态产物目录（默认 web/dist，见 cmd/agent-fleet-server）。
+	// 目录不存在时不注册静态托管（Go 构建与前端产物解耦），只保留 API。
+	SPADir string
+	// DeploymentTargets 读取某 Deployment 的逐机推进状态（deployment_targets 表）。
+	// 非 nil 时，GET /api/v1/deployments 与 /{name} 会把结果并入 status.targets
+	// （§6.1 已规定的字段；FR-14.5 第 3 组的数据来源）。
+	DeploymentTargets func(ctx context.Context, deployment string) ([]domain.DeploymentTargetStatus, error)
 }
 
 type Server struct {
@@ -98,6 +108,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/v1/machines/{name}", s.auth(machines.item()))
 	mux.Handle("POST /api/v1/machines/{name}/enroll-token", s.auth(http.HandlerFunc(s.handleEnrollToken)))
 
+	// SSE 事件枢纽（§8.1 `GET /events`，§23.6 事件格式；KM-25）。
+	// 路径按 §8.1 的 /api/v1 前缀约定解析为 /api/v1/events；鉴权与其余端点同一
+	// 中间件（§29.14），浏览器端用 fetch 流式读取以携带 Authorization 头。
+	events := s.cfg.Events
+	if events == nil {
+		events = notImplemented("events")
+	}
+	mux.Handle("GET /api/v1/events", s.auth(events))
+
 	// 动作端点（§8.1；KM-23）。confirm/cancel/skip 是机器级互斥的三个合法例外。
 	mux.Handle("POST /api/v1/machines/{name}/reconcile", s.auth(http.HandlerFunc(s.handleReconcile)))
 	mux.Handle("POST /api/v1/machines/{name}/rollback", s.auth(http.HandlerFunc(s.handleRollbackMachine)))
@@ -142,15 +161,28 @@ func (s *Server) Handler() http.Handler {
 		resource: "deployments",
 		repo:     s.deployments,
 		validate: func(d *domain.Deployment) error { return d.Validate() },
+		enrich:   s.attachDeploymentTargets,
+		onCreate: s.createDeployment,
 	}
 	mux.Handle("/api/v1/deployments", s.auth(deployments.collection()))
 	mux.Handle("/api/v1/deployments/{name}", s.auth(deployments.item()))
 	mux.Handle("POST /api/v1/deployments/{name}/rollback", s.auth(http.HandlerFunc(s.handleDeploymentRollback)))
 	mux.Handle("POST /api/v1/deployments/{name}/targets/{machine}/skip", s.auth(http.HandlerFunc(s.handleSkipDeploymentTarget)))
 
-	// catch-all：未匹配路径统一走 §6.4 错误体（KM-21 核查发现 #3：
-	// 不再回落 net/http 纯文本 "404 page not found"）。
+	// catch-all：/api 与探针命名空间未匹配时走 §6.4 错误体（KM-21 核查发现 #3：
+	// 不再回落 net/http 纯文本 "404 page not found"）；其余路径交给静态 SPA
+	// （§3.6/§4.1：控制面进程同时托管 Web UI），未配置或目录缺失时维持原 404 行为。
+	spa, spaEnabled := spaHandler(s.cfg.SPADir, s.log)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			writeError(w, http.StatusNotFound, domain.ReasonNotFound,
+				"no route for "+r.Method+" "+r.URL.Path, nil)
+			return
+		}
+		if spaEnabled {
+			spa.ServeHTTP(w, r)
+			return
+		}
 		writeError(w, http.StatusNotFound, domain.ReasonNotFound,
 			"no route for "+r.Method+" "+r.URL.Path, nil)
 	})
@@ -209,6 +241,14 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush 透传 http.Flusher：SSE 处理器（/api/v1/events）经本中间件时，若这里
+// 不实现 Flusher，事件会被缓冲到连接结束（KM-25）。底层不支持 Flush 时是空操作。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // notImplemented 返回骨架路由的 501 响应。
 func notImplemented(resource string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
@@ -228,6 +268,13 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		status, reason = http.StatusConflict, domain.ReasonAlreadyExists
 	case errors.Is(err, domain.ErrMachineBusy):
 		status, reason = http.StatusConflict, domain.ReasonMachineBusy
+	case errors.Is(err, domain.ErrRollbackUnsupported):
+		// 创建发布时目标代不可解析（控制器创建路径的入参校验，FR-10.1）。
+		status, reason = http.StatusConflict, domain.ReasonRollbackUnsupported
+	case errors.Is(err, domain.ErrReplanRequired):
+		status, reason = http.StatusConflict, domain.ReasonReplanRequired
+	case errors.Is(err, domain.ErrOpState):
+		status, reason = http.StatusConflict, domain.ReasonInvalid
 	case errors.Is(err, domain.ErrInvalid):
 		status, reason = http.StatusBadRequest, domain.ReasonInvalid
 	default:

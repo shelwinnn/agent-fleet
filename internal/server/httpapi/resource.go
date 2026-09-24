@@ -27,6 +27,15 @@ type resourceAPI[T any, PT resourceObject[T]] struct {
 	validate func(PT) error
 	// onDelete 在资源删除成功后调用（machines：退役证书，KM-22）。
 	onDelete func(ctx context.Context, name string) error
+	// onCreate 非空时，创建走该钩子而不是直接落库：deployments 的创建必须经控制器
+	// 路径（校验 machineNames/targetGeneration 并物化 deployment_targets 与初始 status，
+	// FR-10.1/§4.4）——直写仓储会让发布从入口就注定失败（KM-25 核查必改 M2）。
+	onCreate func(ctx context.Context, obj PT) error
+	// enrich 在读取与写入响应中补齐资源的派生字段。唯一使用者是
+	// deployments：逐机推进状态存在 deployment_targets 表，而 §6.1 规定它以
+	// status.targets 出现在 Deployment 资源里（FR-14.5 第 3 组的数据来源）。
+	// 不改契约，只把已规定但此前未实现的字段填上（KM-25 契约缺口 #2）。
+	enrich func(ctx context.Context, obj PT) error
 }
 
 func (h *resourceAPI[T, PT]) collection() http.HandlerFunc {
@@ -52,6 +61,12 @@ func (h *resourceAPI[T, PT]) item() http.HandlerFunc {
 			if err != nil {
 				writeStoreError(w, err)
 				return
+			}
+			if h.enrich != nil {
+				if err := h.enrich(r.Context(), obj); err != nil {
+					writeStoreError(w, err)
+					return
+				}
 			}
 			writeJSON(w, http.StatusOK, obj)
 		case http.MethodPut:
@@ -92,6 +107,14 @@ func (h *resourceAPI[T, PT]) list(w http.ResponseWriter, r *http.Request) {
 		}
 		items = filtered
 	}
+	if h.enrich != nil {
+		for _, it := range items {
+			if err := h.enrich(r.Context(), it); err != nil {
+				writeStoreError(w, err)
+				return
+			}
+		}
+	}
 	if items == nil {
 		items = []PT{}
 	}
@@ -115,9 +138,24 @@ func (h *resourceAPI[T, PT]) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := h.repo.Create(r.Context(), obj); err != nil {
+	if h.onCreate != nil {
+		if err := h.onCreate(r.Context(), obj); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		// 控制器路径会写初始 status（phase/targets）；以落库现值为准返回 201。
+		if fresh, err := h.repo.Get(r.Context(), obj.Meta().Name); err == nil {
+			obj = fresh
+		}
+	} else if err := h.repo.Create(r.Context(), obj); err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if h.enrich != nil {
+		if err := h.enrich(r.Context(), obj); err != nil {
+			writeStoreError(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, obj)
 }
@@ -151,6 +189,12 @@ func (h *resourceAPI[T, PT]) update(w http.ResponseWriter, r *http.Request, name
 	if err := h.repo.Update(r.Context(), obj); err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if h.enrich != nil {
+		if err := h.enrich(r.Context(), obj); err != nil {
+			writeStoreError(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, obj)
 }
