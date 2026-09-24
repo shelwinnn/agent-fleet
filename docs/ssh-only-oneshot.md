@@ -115,4 +115,6 @@ host-key/DNS/连接三类传输错误分类、SSH-only 新鲜度三态（`NeverI
 3. Deployment 驱动 SSH 机器时本片一律要求操作者确认（"按策略自动确认"的策略尚未定义，§9.3）。
 4. 控制面尚无生产者在 gRPC 路径上填充 `ExecuteOperation.baseline/plan_digest`（proto 与节点侧已就绪，SSH 路径已完整实现 FR-12.7）。
 5. 决议器 `internal/skills` 尚未落地：bundle 工件来源目前是 `<data-dir>/artifacts/skills/<contentDigest>/` 目录约定，工件树摘要由本片端到端校验，但"控制面解析器内容摘要算法"未参与复核。
-6. Web UI（第 5 片 PR #7）本片基线尚未包含，`Machines` 页的 `ssh/probe`、`ssh/inventory` 入口需在 PR #7 合并后从"禁用 + 原因"改为可用。
+6. ~~Web UI（第 5 片 PR #7）本片基线尚未包含，`Machines` 页的 `ssh/probe`、`ssh/inventory` 入口需在 PR #7 合并后从"禁用 + 原因"改为可用。~~ → **已闭环（KM-28/PR #10）**：PR #7 已合并，`Machines` 页的 Probe SSH / Inventory 入口改为可用（Inventory 仅 SSH 通道机器可用），SSH Inventory 页消费 `GET/POST /api/v1/ssh/include`；本片未实现的 SSH 动作端点至此只剩第 1 条的 `ssh/bootstrap` 与 `ssh/repair-agentd`。
+7. `POST /skills/{name}/resolve`、`GET /skills/{name}/revisions` 未注册（§8.1/§23.3、FR-6.5）：路由未注册 → §6.4 JSON 404（UI 侧登记在 `docs/web-ui.md` §6，Resolve 按钮禁用并标注原因）。根因见第 5 条——解析器 `internal/skills` 尚未落地，因此 `status.resolvedRevision` / `digest` 目前只能由既有数据带入，界面不伪造解析结果。
+8. ~~include 渲染拒绝返回 502 `Internal`（应为 400 `Invalid`）~~ → **已修正（KM-29）**：`ssh.user`/`hostName`/`proxyJump`/`identityFile` 含空白、引号、控制字符（或机器名含 Host 模式字符）时，渲染器返回的是**哨兵** `domain.ErrInvalid`（不带 §30 reason code），而 `writeSSHError` 原先只认 reason code，于是落进默认分支 → 502。现按 `writeStoreError` 的先例补 `errors.Is(err, domain.ErrInvalid)` 兜底，映射为 400 `Invalid` 且 `message` 保留渲染器原文；handler 级回归用例见 `internal/server/httpapi/ssh_test.go`。未确认安装（handler 直接拒绝）与 agentd 机器的 inventory 仍是 400 `Invalid`。

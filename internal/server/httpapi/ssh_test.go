@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shelwinnn/agent-fleet/internal/controller/sshops"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
 )
@@ -161,6 +162,64 @@ func TestIncludeInstallRequiresExplicitConfirmation(t *testing.T) {
 	}
 	if got := res.Header.Get("X-Agent-Fleet-Included-Hosts"); got != "1" {
 		t.Fatalf("included hosts header = %q, want 1", got)
+	}
+}
+
+// KM-29 回归：include 渲染拒绝（FR-12.6）此前落进 writeSSHError 的默认分支
+// → 502 Internal，与 §6.4 的 400 Invalid 相反。
+//
+// 装配的是**真实**链路（真实机器存储 → real orchestrator → sshtransport.RenderInclude
+// → handler），因为这条路径的 bug 恰恰在"渲染器返回的哨兵错误 vs HTTP 层只认
+// reason code"之间；手搓一个错误只会重复实现者的假设。
+func TestIncludeRenderRejectionIs400Invalid(t *testing.T) {
+	f := newAPIFixture(t)
+	// install 的成功路径会写文件：指向临时目录，测试不触碰真实 home。
+	dir := t.TempDir()
+	f.api.SetInclude(sshops.New(sshops.Config{
+		Machines: f.machines, OperatorHome: dir, GeneratedDir: dir,
+	}))
+
+	// 对照：一份合法的 ssh.user 能正常渲染（证明后面的 400 来自渲染拒绝本身）。
+	code, obj := f.do(http.MethodPost, "/api/v1/machines",
+		`{"metadata":{"name":"devbox-01"},"spec":{"managementMode":"ssh","ssh":{"hostName":"devbox.internal","user":"op"}}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("machine create = %d (%v)", code, obj)
+	}
+	// 成功路径是 text/plain，不走 f.do（它按 JSON 解码）：直接看状态码。
+	if res := f.get("/api/v1/ssh/include"); res != http.StatusOK {
+		t.Fatalf("preview with a renderable machine = %d, want 200", res)
+	}
+	// 复现夹具：一台 ssh.user = "o p" 的机器（空白会渲染出无法解析的 include 行）。
+	code, obj = f.do(http.MethodPost, "/api/v1/machines",
+		`{"metadata":{"name":"devbox-02"},"spec":{"managementMode":"ssh","ssh":{"hostName":"devbox.internal","user":"o p"}}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("machine create = %d (%v)", code, obj)
+	}
+
+	const wantMessage = `resource invalid: ssh.user "o p" contains whitespace; refusing to render an unparseable OpenSSH include line (FR-12.6)`
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/v1/ssh/include", ""},
+		{http.MethodPost, "/api/v1/ssh/include", `{"action":"install","confirm":true}`},
+	} {
+		status, body := f.do(tc.method, tc.path, tc.body)
+		if status != http.StatusBadRequest {
+			t.Fatalf("%s %s = %d, want 400 (%v)", tc.method, tc.path, status, body)
+		}
+		if body["reason"] != domain.ReasonInvalid {
+			t.Fatalf("%s %s reason = %v, want %s", tc.method, tc.path, body["reason"], domain.ReasonInvalid)
+		}
+		if body["message"] != wantMessage {
+			t.Fatalf("%s %s message = %q, want %q", tc.method, tc.path, body["message"], wantMessage)
+		}
+	}
+	// 渲染拒绝发生在任何写入之前：include 文件与生成产物都不得落盘。
+	for _, p := range []string{
+		filepath.Join(dir, ".ssh", "agent-fleet.conf"),
+		filepath.Join(dir, "ssh", "agent-fleet.conf"),
+	} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("render rejection must not write %s (err=%v)", p, err)
+		}
 	}
 }
 

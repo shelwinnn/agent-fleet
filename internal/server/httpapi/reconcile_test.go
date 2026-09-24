@@ -23,6 +23,7 @@ type apiFixture struct {
 	srv      *httptest.Server
 	api      *Server
 	rec      *reconcile.Controller
+	machines domain.MachineRepository
 	ops      domain.OperationRepository
 	observed domain.ObservedStateRepository
 	mstatus  domain.MachineStatusRepository
@@ -69,7 +70,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		rec, dep, "fixture/v1", db.PingContext, log)
 	srv := httptest.NewServer(api.Handler())
 	t.Cleanup(srv.Close)
-	return &apiFixture{t: t, srv: srv, api: api, rec: rec, ops: ops,
+	return &apiFixture{t: t, srv: srv, api: api, rec: rec, machines: machines, ops: ops,
 		observed: observed, mstatus: sqlite.NewMachineStatusStore(db), disp: disp}
 }
 
@@ -107,6 +108,18 @@ func (f *apiFixture) do(method, path, body string) (int, map[string]any) {
 		f.t.Fatalf("decode %s %s: %v", method, path, err)
 	}
 	return resp.StatusCode, obj
+}
+
+// get 只取状态码：用于响应体不是 JSON 的端点（如 text/plain 的 include preview）。
+func (f *apiFixture) get(path string) int {
+	f.t.Helper()
+	res, err := http.Get(f.srv.URL + path)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	_, _ = io.Copy(io.Discard, res.Body)
+	return res.StatusCode
 }
 
 func (f *apiFixture) seed() {
