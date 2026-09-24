@@ -14,10 +14,10 @@
 # internal/server/httpapi/ssh.go），FR-12.6 的 `GET/POST /api/v1/ssh/include`
 # 同批注册，KM-28（PR #10）已把 Web UI 接通；三者的请求/响应形状以
 # docs/ssh-only-oneshot.md 与实现为准（本文件未定义其 schema）。
-# 【仍未注册的端点】§23.1 的 ssh/bootstrap、ssh/repair-agentd 与 §23.3 的
-# skills/{id}/resolve、skills/{id}/revisions，以及 §8.1 的 deployments
-# pause/resume，属第 6 片（SSH 路径）遗留或后续切片，当前未注册：命中 catch-all
-# 返回 404 NotFound。本文件不为其编造契约。
+# 【仍未注册的端点】§23.1 的 ssh/bootstrap、ssh/repair-agentd（第 6 片/SSH 路径遗留），
+# 以及 §23.3 的 skills/{id}/resolve、skills/{id}/revisions 与 §8.1 的 deployments
+# pause/resume（后续切片），当前未注册：命中 catch-all 返回 404 NotFound。
+# 本文件不为其编造契约。
 # gRPC 契约以 api/proto/fleet/v1 为准。
 # 声明版本为 3.1.0（KM-21 核查发现 #1：本文件使用了 3.1 才有的
 # components.pathItems；3.0.3 声明与内容不符会卡严格校验器）。
