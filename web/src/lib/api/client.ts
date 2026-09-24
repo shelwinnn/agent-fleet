@@ -11,6 +11,8 @@ import type {
   ApiErrorBody,
   Deployment,
   DeploymentList,
+  IncludeInstallResult,
+  IncludePreview,
   Machine,
   MachineDrift,
   MachineList,
@@ -164,6 +166,43 @@ export class FleetClient {
       { reason, operator },
       opts,
     );
+
+  // ---- ssh（§8.1/FR-12.x；KM-26 注册，KM-28 接通 UI）----
+
+  /**
+   * SSH 探测（FR-12.1）：ssh -G + 远端平台采集。成功返回写回 status 后的
+   * Machine（SSHReachable=True + 静态信息）；不可达不是 200——错误体带 §30.1
+   * 六类 reason（传输分类），同时服务端已把 SSHReachable=False 落到该机条件。
+   */
+  sshProbe = (name: string, opts?: RequestOptions) =>
+    this.json<Machine>('POST', `/api/v1/machines/${encodeURIComponent(name)}/ssh/probe`, undefined, opts);
+
+  /** 经 SSH 采集观测（§8.1 的 inventory 动作）：202 + readOnly 的 Operation 资源。 */
+  sshInventory = (name: string, opts?: RequestOptions) =>
+    this.json<Operation>('POST', `/api/v1/machines/${encodeURIComponent(name)}/ssh/inventory`, undefined, opts);
+
+  /**
+   * OpenSSH include 导出（FR-12.6）：preview（GET）与 export（GET + `?download=1`）
+   * 同一端点，返回服务端渲染全文与 included/skipped 计数（text/plain，不走 JSON）。
+   */
+  private async sshIncludeText(query: string, opts?: RequestOptions): Promise<IncludePreview> {
+    const resp = await this.request('GET', `/api/v1/ssh/include${query}`, undefined, opts);
+    return {
+      content: await resp.text(),
+      includedHosts: Number(resp.headers.get('X-Agent-Fleet-Included-Hosts') ?? '0'),
+      skippedHosts: Number(resp.headers.get('X-Agent-Fleet-Skipped-Hosts') ?? '0'),
+    };
+  }
+
+  sshIncludePreview = (opts?: RequestOptions) => this.sshIncludeText('', opts);
+  sshIncludeExport = (opts?: RequestOptions) => this.sshIncludeText('?download=1', opts);
+
+  /**
+   * include 安装（FR-12.6）：必须显式确认（服务端对无 `confirm` 的请求返回 400 且
+   * 不落盘）。只写 `~/.ssh/agent-fleet.conf`，主配置的 Include 行由操作者自己加。
+   */
+  sshIncludeInstall = (opts?: RequestOptions) =>
+    this.json<IncludeInstallResult>('POST', '/api/v1/ssh/include', { action: 'install', confirm: true }, opts);
 
   // ---- profiles ----
   listProfiles = (opts?: RequestOptions) => this.json<AgentProfileList>('GET', '/api/v1/profiles', undefined, opts);

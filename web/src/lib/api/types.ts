@@ -308,6 +308,39 @@ export interface DeploymentList {
   items: Deployment[];
 }
 
+/**
+ * GET /api/v1/ssh/include 的预览/导出结果（FR-12.6）：服务端渲染的 include
+ * 全文（text/plain）加上 included/skipped 计数响应头。前端不自拼 include 内容，
+ * 以服务端渲染为唯一权威（架构 §7.7）。
+ */
+export interface IncludePreview {
+  content: string;
+  includedHosts: number;
+  skippedHosts: number;
+}
+
+/**
+ * 未被导出到 include 文件的机器及原因（服务端 internal/sshtransport.SkippedHost：
+ * 无 json 标签，JSON 键与 Go 字段名一致）。
+ */
+export interface SkippedHostEntry {
+  Name: string;
+  Reason: string;
+}
+
+/**
+ * POST /api/v1/ssh/include（显式确认安装）的响应（FR-12.6）：只写
+ * `~/.ssh/agent-fleet.conf`，绝不改写主配置——`includeDirective` 由操作者自己加。
+ */
+export interface IncludeInstallResult {
+  path: string;
+  includeDirective: string;
+  contentDigest: string;
+  includedHosts: string[];
+  skippedHosts: SkippedHostEntry[];
+  primaryConfigHint: string;
+}
+
 /** §6.4 五要素错误体。 */
 export interface ApiErrorBody {
   reason: string;

@@ -125,9 +125,16 @@ describe('页面渲染（状态呈现证据）', () => {
     }
     expect(body).toContain('未知或过期');
     expect(body).toContain('未决 AwaitingConfirmation');
-    // 第 6 片的动作必须标注为未实现，而不是给出假入口。
+    // KM-28：probe / inventory 是接通的真实动作（逐行按钮）；仍未实现的端点必须
+    // 标注"未实现，见 docs/ssh-only-oneshot.md"，不暗示后续切片会自动有。
     expect(body).toContain('Probe SSH');
-    expect(body).toContain('属第 6 片');
+    expect(body).toContain('Inventory');
+    expect(body).toContain('未实现，见 docs/ssh-only-oneshot.md');
+    expect(body).not.toContain('属第 6 片');
+    // 该夹具是 agentd 机器：inventory 入口必须禁用（仅 SSH 通道机器可用）。
+    const inventory = body.indexOf('>Inventory<');
+    expect(inventory, 'Inventory 按钮存在').toBeGreaterThan(-1);
+    expect(body.slice(inventory - 600, inventory)).toContain('disabled');
   });
 
   it('Machine Detail 渲染 9 个区块，含等待确认、plan 基线与阻塞说明', () => {
@@ -231,13 +238,20 @@ describe('页面渲染（状态呈现证据）', () => {
     expect(body).toContain('不计入失败'); // Blocked 的边界说明
   });
 
-  it('SSH Inventory 渲染别名与 include 预览，并标注"无证书吊销"限制', () => {
+  it('SSH Inventory 渲染别名与服务端渲染说明，安装入口默认禁用（需显式确认）', () => {
     const store = seededStore();
     const { body } = render(SshInventory, { props: { store } });
-    expect(body).toContain('OpenSSH include 预览');
-    expect(body).toContain('Host ws-drift-demo');
-    expect(body).toContain('StrictHostKeyChecking=no'); // 明示"不设置"，保持标准校验
+    // KM-28：include 内容改为服务端渲染（SSR 不跑 $effect，预览区为空属预期），
+    // 页面自身渲染别名表、导出/安装入口与 FR-12.6 边界说明。
+    expect(body).toContain('OpenSSH include 预览（服务端渲染）');
+    expect(body).toContain('ws-drift-demo'); // 别名表照常渲染
+    expect(body).toContain('Export（下载 .conf）');
     expect(body).toContain('无证书吊销');
+    expect(body).toContain('FR-12.3'); // host-key 保持标准策略的边界说明
+    // 安装按钮在未勾选确认时必须是禁用的（绝不提供绕过确认的入口）。
+    const install = body.indexOf('安装/更新 include 文件（需显式确认）');
+    expect(install, '安装按钮存在').toBeGreaterThan(-1);
+    expect(body.slice(install - 800, install)).toContain('disabled');
   });
 
   it.runIf(enabled)('连上真实控制面后，Machines 页面渲染真实机器名与三态', async () => {

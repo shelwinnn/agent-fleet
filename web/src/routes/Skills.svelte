@@ -3,8 +3,8 @@
    * Skills（spec §24.5）：Name | Source | Requested Ref | Resolved Revision |
    * Digest | Machines；动作 Resolve / 查看元数据 / 改 ref。
    *
-   * 可用性如实标注：Skill 的 spec 形态与 resolve 控制器属后续切片，`POST /skills/{id}/resolve`
-   * 与 `GET /skills/{id}/revisions` 当前未注册（404）。因此 Resolve 按钮禁用；
+   * 可用性如实标注：`POST /skills/{name}/resolve` 与 `GET /skills/{name}/revisions`
+   * 未实现，见 docs/web-ui.md（调用返回 404）。因此 Resolve 按钮禁用；
    * "改 ref" 只能改 spec 里已存在的键（不发明字段名）；解析结果在有值时照常显示。
    */
   import type { FleetStore } from '$lib/state/store.svelte.js';
@@ -108,7 +108,7 @@
                 </Table.Cell>
                 <Table.Cell>
                   <div class="flex flex-wrap items-center gap-1">
-                    <Button size="sm" variant="outline" disabled title="POST /skills/:id/resolve 属后续切片（当前未注册，调用返回 404）">
+                    <Button size="sm" variant="outline" disabled title="POST /skills/:name/resolve 未实现，见 docs/web-ui.md（调用返回 404）">
                       Resolve
                     </Button>
                     <Button size="sm" variant="ghost" onclick={() => (expanded = expanded === skill.metadata.name ? null : skill.metadata.name)}>
@@ -145,11 +145,11 @@
   </Card>
 
   <Alert.Root>
-    <Alert.Title>本片未实现的 Skill 端点</Alert.Title>
+    <Alert.Title>未实现的 Skill 端点</Alert.Title>
     <Alert.Description>
       POST /api/v1/skills/{'{'}name{'}'}/resolve 与 GET /api/v1/skills/{'{'}name{'}'}/revisions
-      在当前服务端未注册（返回 404）。因此"Resolved Revision / Digest"只有在 status 已有值时才显示，
-      界面不会伪造解析结果。
+      未实现，见 docs/web-ui.md（调用返回 404）。因此"Resolved Revision / Digest"只有在
+      status 已有值时才显示，界面不会伪造解析结果。
     </Alert.Description>
   </Alert.Root>
 </div>

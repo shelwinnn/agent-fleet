@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ApiError, FleetClient } from '../src/lib/api/client.js';
 import { subscribeEvents, type StreamState } from '../src/lib/api/sse.js';
 import { driftInputFromApi, driftView } from '../src/lib/state/drift.js';
+import { formatSkippedHosts } from '../src/lib/state/ssh.js';
 import { actionAvailability, unresolvedOperations, viewOperations } from '../src/lib/state/operations.js';
 import { deploymentProgress, viewTarget } from '../src/lib/state/deployments.js';
 import { machineRow } from '../src/lib/state/machines.js';
@@ -316,6 +317,137 @@ describe.skipIf(!enabled)(`与真实控制面联调（${base}）`, () => {
       console.log(`无 profileRef 的机器 reconcile → ${(invalid as ApiError).status} ${(invalid as ApiError).reason}：${(invalid as ApiError).message}`);
     } finally {
       await client.deleteMachine(name).catch(() => undefined);
+    }
+  });
+});
+
+/**
+ * SSH 路径联调（KM-28 验收证据）：KM-26 注册的 probe / inventory / include 三端点
+ * 在真实控制面上的成功与失败路径。前提：控制面以 SSH 通道装配启动（KM-26 的
+ * sshops/IncludeAPI 均非 nil），且 FLEET_SSH_ALIAS（默认 localhost）经控制面的
+ * OpenSSH 客户端配置可达（host-key 走严格校验，不允许放宽）。
+ */
+describe.skipIf(!enabled)(`SSH 路径联调（${base}，KM-28）`, () => {
+  const client = new FleetClient({ baseUrl: base, token });
+  const stamp = Date.now().toString(36);
+  const alias = process.env.FLEET_SSH_ALIAS ?? 'localhost';
+  const user = process.env.FLEET_SSH_USER ?? '';
+  const profileName = `km28-ssh-p-${stamp}`;
+  const machineName = `km28-ssh-m-${stamp}`;
+  /** 仅经 hostAlias 导入的机器：include 的文档化 skip 场景（FR-12.6）。 */
+  const aliasOnlyName = `km28-ssh-alias-${stamp}`;
+
+  beforeAll(async () => {
+    await client.createProfile({
+      metadata: { name: profileName },
+      // 节点侧 oneshot 只注册了真实适配器（codex/opencode/omp，KM-26 集成测试同款
+      // 夹具）：fixture 家族没有节点适配器；codex 适配器还要求期望 config 是
+      // JSON 对象，故与 KM-26 一致带 config.model。
+      spec: { agents: { codex: { enabled: true, version: '0.154.0', config: { model: 'gpt-5' } } } },
+    });
+    await client.createMachine({
+      metadata: { name: machineName },
+      spec: {
+        managementMode: 'ssh',
+        profileRef: profileName,
+        // hostName 非空的机器才会被 include 导出（FR-12.6 的纳入条件）。
+        ssh: { hostAlias: alias, hostName: alias, ...(user ? { user } : {}) },
+      },
+    });
+    await client.createMachine({
+      metadata: { name: aliasOnlyName },
+      spec: { managementMode: 'ssh', ssh: { hostAlias: alias } },
+    });
+  });
+
+  afterAll(async () => {
+    await client.deleteMachine(machineName).catch(() => undefined);
+    await client.deleteMachine(aliasOnlyName).catch(() => undefined);
+    await client.deleteProfile(profileName).catch(() => undefined);
+  });
+
+  it('1. probe 成功：200 + SSHReachable=True + 平台静态信息写回', async () => {
+    const m = await client.sshProbe(machineName);
+    const cond = m.status?.conditions?.find((c) => c.type === 'SSHReachable');
+    expect(cond?.status, '探测成功必须写 SSHReachable=True').toBe('True');
+    expect(m.status?.os, '探测必须带回远端平台（uname）').toBeTruthy();
+    expect(m.status?.homeDir, '探测必须带回远端 HOME（printenv）').toBeTruthy();
+    console.log(`probe ${machineName} → SSHReachable=${cond?.status} 平台=${m.status?.os}/${m.status?.arch} homeDir=${m.status?.homeDir ?? '—'}（SSH probe 只采 uname/printenv HOME，不含 hostname）`);
+  });
+
+  it('2. inventory 成功：202 + readOnly 的 AutoPlan（SSH 通道）Operation，终态 Succeeded', async () => {
+    const op = await client.sshInventory(machineName);
+    expect(op.spec.type, 'inventory 动作必须是只读 AutoPlan').toBe('AutoPlan');
+    expect(op.spec.readOnly, 'inventory 绝不产生变更（readOnly）').toBe(true);
+    expect(op.spec.transport).toBe('ssh');
+    const listed = (await client.listOperations(machineName)).items.find((o) => o.metadata.name === op.metadata.name);
+    expect(listed?.status.phase, '同步执行的采集在操作审计里可查且终态 Succeeded').toBe('Succeeded');
+    console.log(`inventory ${machineName} → operation ${op.metadata.name.slice(0, 8)} readOnly=${op.spec.readOnly} phase=${listed?.status.phase}`);
+  });
+
+  it('3. include preview 成功：服务端渲染全文 + 计数头包含该机', async () => {
+    const preview = await client.sshIncludePreview();
+    expect(preview.content).toContain(`Host ${machineName}`);
+    expect(preview.content).toContain(`HostName ${alias}`);
+    expect(preview.includedHosts, 'hostName 非空的机器必须被纳入').toBeGreaterThan(0);
+    expect(preview.skippedHosts, '仅 hostAlias 的机器记入 skipped（文档化场景）').toBeGreaterThan(0);
+    console.log(`include preview → included=${preview.includedHosts} skipped=${preview.skippedHosts}，含 ${machineName} 段`);
+  });
+
+  it('4. include install 未确认 → 400 Invalid（服务端不落盘，绝不静默改写）', async () => {
+    const resp = await fetch(`${base}/api/v1/ssh/include`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ action: 'install' }), // 无 confirm
+    });
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as { reason: string; message: string };
+    expect(body.reason).toBe('Invalid');
+    expect(body.message).toContain('confirm');
+    console.log(`install 未确认 → ${resp.status} ${body.reason}：${body.message}`);
+  });
+
+  it('5. include install 显式确认 → 200 + path/digest/Include 指令回显', async () => {
+    const result = await client.sshIncludeInstall();
+    expect(result.path, '安装目标只能是 ~/.ssh/agent-fleet.conf').toContain('agent-fleet.conf');
+    expect(result.contentDigest).toMatch(/^sha256:/);
+    expect(result.includedHosts).toContain(machineName);
+    expect(result.includeDirective).toContain('Include ~/.ssh/agent-fleet.conf');
+    // skippedHosts 是服务端 SkippedHost（{Name,Reason}）：呈现走 formatSkippedHosts，
+    // 绝不把对象直接 join（KM-28 复核回归：曾打出 [object Object]）。
+    expect(result.skippedHosts.length, 'alias-only 机器必须出现在 skipped 里').toBeGreaterThan(0);
+    for (const s of result.skippedHosts) {
+      expect(typeof s.Name).toBe('string');
+      expect(typeof s.Reason).toBe('string');
+    }
+    expect(formatSkippedHosts(result.skippedHosts)).not.toContain('[object Object]');
+    const after = await client.sshIncludePreview();
+    expect(after.content).toContain(`Host ${machineName}`);
+    console.log(`install → path=${result.path} digest=${result.contentDigest.slice(0, 19)}… included=[${result.includedHosts.join(',')}] skipped=[${formatSkippedHosts(result.skippedHosts)}]`);
+    console.log(`primaryConfigHint：${result.primaryConfigHint}`);
+  });
+
+  it('6. 失败路径：未知机器 probe → 404 NotFound；agentd 通道机器 inventory → 400 Invalid', async () => {
+    const missing = await client.sshProbe('definitely-not-a-machine').then(() => null).catch((err: unknown) => err);
+    expect(missing).toBeInstanceOf(ApiError);
+    expect((missing as ApiError).status).toBe(404);
+    expect((missing as ApiError).reason).toBe('NotFound');
+
+    // 该端点只服务 SSH 通道：agentd 机器的手动采集被显式拒绝（不是 5xx、不是静默成功）。
+    const stamp = Date.now().toString(36);
+    const agentdMachine = `km28-agentd-${stamp}`;
+    await client.createMachine({ metadata: { name: agentdMachine }, spec: { managementMode: 'agentd' } });
+    try {
+      const invalid = await client.sshInventory(agentdMachine).then(() => null).catch((err: unknown) => err);
+      expect(invalid).toBeInstanceOf(ApiError);
+      expect((invalid as ApiError).status).toBe(400);
+      expect((invalid as ApiError).reason).toBe('Invalid');
+      console.log(`未知机器 probe → 404 NotFound；agentd 机器 inventory → 400 Invalid：${(invalid as ApiError).message}`);
+    } finally {
+      await client.deleteMachine(agentdMachine).catch(() => undefined);
     }
   });
 });
