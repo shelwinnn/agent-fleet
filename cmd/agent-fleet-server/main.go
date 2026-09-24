@@ -24,8 +24,8 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"
 	grpcagent "github.com/shelwinnn/agent-fleet/internal/server/grpcagent"
 	"github.com/shelwinnn/agent-fleet/internal/server/httpapi"
-	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
 	"github.com/shelwinnn/agent-fleet/internal/server/sse"
+	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
 )
 
