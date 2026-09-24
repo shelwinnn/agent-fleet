@@ -1,11 +1,11 @@
 <script lang="ts">
   /**
    * Machines（spec §24.2）：列 Name | OS/Arch | Profile | agentd | SSH | Drift |
-   * Reconciled | Last Seen；动作 Add Machine / Probe SSH / Bootstrap / Reconcile /
-   * Repair agentd。
+   * Reconciled | Last Seen；动作 Add Machine / Probe SSH / Inventory / Reconcile。
    *
-   * 动作可用性如实标注：本片后端只注册了 reconcile 与 rollback；probe / bootstrap /
-   * repair-agentd / inventory 属第 6 片（SSH 路径），按钮禁用并写明原因——不做假动作。
+   * 动作可用性如实标注：probe / inventory（KM-26 注册的 SSH 路径，KM-28 接通）
+   * 逐行可用——inventory 仅 SSH 通道机器；bootstrap / repair-agentd 仍未实现
+   * （docs/ssh-only-oneshot.md），按钮禁用并写明原因——不做假动作。
    */
   import type { FleetStore } from '$lib/state/store.svelte.js';
   import * as Table from '$lib/components/ui/table/index.js';
@@ -19,7 +19,7 @@
   import { machineRows } from '$lib/state/machines.js';
   import { createClock } from '$lib/state/clock.svelte.js';
   import { navigate } from '$lib/state/router.svelte.js';
-  import { describeActionFailure, UNIMPLEMENTED_SSH_ENDPOINTS } from '$lib/state/ssh.js';
+  import { describeActionFailure, UNIMPLEMENTED_ACTION_ENDPOINTS, UNIMPLEMENTED_NOTICE } from '$lib/state/ssh.js';
 
   interface Props {
     store: FleetStore;
@@ -87,6 +87,57 @@
       pendingAction[key] = false;
     }
   }
+
+  /** SSH 探测（POST /machines/:name/ssh/probe，KM-26 注册）：200 即 SSHReachable=True。 */
+  async function probeSsh(name: string) {
+    const key = `probe:${name}`;
+    pendingAction[key] = true;
+    actionMessage = null;
+    try {
+      const m = await store.client.sshProbe(name);
+      actionMessage = {
+        kind: 'ok',
+        text: `已探测 ${name}：SSH 可达（SSHReachable=True）。`,
+        detail: `平台 ${m.status?.os ?? '—'}/${m.status?.arch ?? '—'} · homeDir ${m.status?.homeDir ?? '—'}。探测采集 uname 与 printenv HOME；hostname 等完整观测由 inventory 上报。`,
+      };
+      await store.afterMutation('machines');
+    } catch (err) {
+      const failure = describeActionFailure(err);
+      actionMessage = {
+        kind: 'error',
+        text: `SSH 探测失败——${failure.title}：${failure.detail}`,
+        detail: '失败原因已写回该机的 SSHReachable 条件（§30.1 reason），Machine Detail 可查看。',
+      };
+      await store.afterMutation('machines');
+    } finally {
+      pendingAction[key] = false;
+    }
+  }
+
+  /** SSH 观测采集（POST /machines/:name/ssh/inventory）：202 + readOnly 的 Operation。 */
+  async function sshInventory(name: string) {
+    const key = `inventory:${name}`;
+    pendingAction[key] = true;
+    actionMessage = null;
+    try {
+      const op = await store.client.sshInventory(name);
+      actionMessage = {
+        kind: 'ok',
+        text: `已受理 ${name} 的 SSH 观测采集（operation ${op.metadata.name}，相位 ${op.status.phase}）。`,
+        detail: '采集经 SSH 只读执行（validate→inventory→plan），不产生任何变更；结果体现在该机 Drift 与 lastInventory。',
+      };
+      await store.afterMutation('machines', 'operations');
+    } catch (err) {
+      const failure = describeActionFailure(err);
+      actionMessage = {
+        kind: 'error',
+        text: `SSH 观测采集失败——${failure.title}：${failure.detail}`,
+      };
+      await store.afterMutation('machines', 'operations');
+    } finally {
+      pendingAction[key] = false;
+    }
+  }
 </script>
 
 <div class="grid gap-5">
@@ -99,14 +150,8 @@
     </div>
     <div class="flex items-center gap-2">
       <Button size="sm" variant="outline" onclick={() => (showAdd = !showAdd)}>Add Machine</Button>
-      <Button size="sm" variant="outline" disabled title="POST /machines/:name/ssh/probe 属第 6 片（当前未注册）">
-        Probe SSH
-      </Button>
-      <Button size="sm" variant="outline" disabled title="POST /machines/:name/bootstrap 属第 6 片（当前未注册）">
-        Bootstrap
-      </Button>
-      <Button size="sm" variant="outline" disabled title="POST /machines/:name/repair-agentd 属第 6 片（当前未注册）">
-        Repair agentd
+      <Button size="sm" variant="outline" disabled title="POST /machines/:name/bootstrap、POST /machines/:name/repair-agentd 未实现，见 docs/ssh-only-oneshot.md">
+        Bootstrap / Repair agentd
       </Button>
     </div>
   </div>
@@ -166,7 +211,7 @@
       <AsyncState
         loading={store.loading.machines}
         error={store.errors.machines}
-        empty={rows.length === 0 ? '还没有机器。用 Add Machine 创建第一台（Bootstrap 属第 6 片）。' : undefined}
+        empty={rows.length === 0 ? '还没有机器。用 Add Machine 创建第一台。' : undefined}
         rows={5}
       />
       {#if rows.length > 0}
@@ -219,6 +264,28 @@
                     >
                       Reconcile
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={pendingAction[`probe:${row.name}`]}
+                      onclick={() => probeSsh(row.name)}
+                      title="POST /machines/:name/ssh/probe（KM-26 注册）：ssh -G + 远端平台采集，200 即 SSHReachable=True；不可达以 §30.1 reason 报错"
+                    >
+                      {pendingAction[`probe:${row.name}`] ? '探测中…' : 'Probe SSH'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={row.ssh.mode !== 'ssh' || pendingAction[`inventory:${row.name}`]}
+                      onclick={() => sshInventory(row.name)}
+                      title={
+                        row.ssh.mode !== 'ssh'
+                          ? 'POST /machines/:name/ssh/inventory 仅 SSH 通道机器可用（agentd 通道的手动采集未接线，服务端返回 400 Invalid）'
+                          : 'POST /machines/:name/ssh/inventory：经 SSH 只读采集观测（validate→inventory→plan），不产生任何变更'
+                      }
+                    >
+                      {pendingAction[`inventory:${row.name}`] ? '采集中…' : 'Inventory'}
+                    </Button>
                     <Button size="sm" variant="ghost" onclick={() => navigate(`/machines/${row.name}`)}>
                       详情
                     </Button>
@@ -233,10 +300,11 @@
   </Card>
 
   <Alert.Root>
-    <Alert.Title>本片未实现的 SSH 路径动作</Alert.Title>
+    <Alert.Title>仍未实现的动作端点</Alert.Title>
     <Alert.Description>
-      {UNIMPLEMENTED_SSH_ENDPOINTS.join('、')} 属第 6 片（SSH 路径）；当前未注册，调用会得到 404
-      NotFound。按钮保持禁用并标注原因，不提供假入口。
+      {UNIMPLEMENTED_ACTION_ENDPOINTS.join('、')} {UNIMPLEMENTED_NOTICE}。按钮保持禁用并标注原因，不提供假入口。
+      SSH 路径的 probe 与 inventory 已注册并接通（KM-26/KM-28）：Probe SSH 逐行可用，Inventory 仅
+      SSH 通道机器可用。
     </Alert.Description>
   </Alert.Root>
 </div>

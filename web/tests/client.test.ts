@@ -85,4 +85,50 @@ describe('FleetClient', () => {
     expect(urls[0]).toBe('/api/v1/machines/ws%201/drift');
     expect(urls[1]).toBe('/api/v1/machines/ws%201/operations');
   });
+
+  it('SSH 路径（KM-26 注册）按真实端点拼路径：probe / ssh/inventory', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ items: [] }));
+    const client = new FleetClient({ fetch: fetchMock });
+    await client.sshProbe('ws 1');
+    await client.sshInventory('ws 1');
+    const urls = fetchMock.mock.calls.map((c) => (c as unknown as [string])[0]);
+    expect(urls[0]).toBe('/api/v1/machines/ws%201/ssh/probe');
+    expect(urls[1]).toBe('/api/v1/machines/ws%201/ssh/inventory');
+    // 动作无请求体：不得伪造 JSON body
+    for (const call of fetchMock.mock.calls) {
+      expect((call as unknown as [string, RequestInit])[1].body).toBeUndefined();
+    }
+  });
+
+  it('include preview/export 读 text/plain 与计数头；install 必须携显式确认体', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      // preview/export 是 GET（text/plain + 计数头）；install 是 POST（JSON）。
+      if (String(url).includes('/api/v1/ssh/include') && init?.method !== 'POST') {
+        return new Response('# agent-fleet include\nHost demo\n', {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'X-Agent-Fleet-Included-Hosts': '1',
+            'X-Agent-Fleet-Skipped-Hosts': '0',
+          },
+        });
+      }
+      return jsonResponse({ path: '~/.ssh/agent-fleet.conf', includeDirective: 'Include ~/.ssh/agent-fleet.conf' });
+    });
+    const client = new FleetClient({ fetch: fetchMock as unknown as typeof fetch });
+
+    const preview = await client.sshIncludePreview();
+    expect(preview).toEqual({ content: '# agent-fleet include\nHost demo\n', includedHosts: 1, skippedHosts: 0 });
+
+    const exported = await client.sshIncludeExport();
+    expect(exported.content).toContain('Host demo');
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/api/v1/ssh/include?download=1');
+
+    const install = await client.sshIncludeInstall();
+    expect((install as { path: string }).path).toBe('~/.ssh/agent-fleet.conf');
+    const [installUrl, installInit] = fetchMock.mock.calls[2] as unknown as [string, RequestInit];
+    expect(String(installUrl)).toBe('/api/v1/ssh/include');
+    expect(installInit.method).toBe('POST');
+    expect(JSON.parse(String(installInit.body))).toEqual({ action: 'install', confirm: true });
+  });
 });

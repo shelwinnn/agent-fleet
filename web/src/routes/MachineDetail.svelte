@@ -23,7 +23,8 @@
     describeActionFailure,
     hostKeyNotice,
     PLAN_TIMEOUT_NOTICE,
-    UNIMPLEMENTED_SSH_ENDPOINTS,
+    UNIMPLEMENTED_ACTION_ENDPOINTS,
+    UNIMPLEMENTED_NOTICE,
   } from '$lib/state/ssh.js';
   import { formatDuration, formatRelativeTime, formatTime, prettyJSON, shortDigest } from '$lib/state/format.js';
   import { untrack } from 'svelte';
@@ -159,6 +160,28 @@
       rollbackGeneration = '';
       return `已受理回滚：operation ${op.metadata.name}，内容目标代 gen${gen}（回滚不把机器拉回旧代，而是物化新代）。`;
     });
+
+  /** SSH 探测（POST /machines/:name/ssh/probe，KM-26 注册）：200 即 SSHReachable=True。 */
+  const probeSsh = () =>
+    act(
+      'probe',
+      async () => {
+        const m = await store.client.sshProbe(name);
+        return `已探测：SSH 可达（SSHReachable=True，平台 ${m.status?.os ?? '—'}/${m.status?.arch ?? '—'}，homeDir ${m.status?.homeDir ?? '—'}）。`;
+      },
+      'POST /machines/:name/ssh/probe：ssh -G 解析生效配置，采集 uname 与 printenv HOME，结果写回 SSHReachable 条件与 OS/homeDir（hostname 等完整观测由 inventory 上报）。不可达不是成功：错误体带 §30.1 传输分类 reason，同时 SSHReachable=False 已写回该机条件。',
+    );
+
+  /** SSH 观测采集（POST /machines/:name/ssh/inventory）：202 + readOnly 的 Operation。 */
+  const requestInventory = () =>
+    act(
+      'inventory',
+      async () => {
+        const op = await store.client.sshInventory(name);
+        return `已受理 SSH 观测采集：operation ${op.metadata.name}（${op.status.phase}，readOnly=${op.spec?.readOnly === true}）。`;
+      },
+      'POST /machines/:name/ssh/inventory：经 SSH 只读采集（validate→inventory→plan），不产生任何变更。采集在请求内同步执行，可能需要数十秒。',
+    );
 </script>
 
 <div class="grid gap-5">
@@ -177,7 +200,14 @@
       <Button size="sm" variant="outline" disabled={availability.actions[0].blocked || busy !== null} onclick={reconcile}>
         Reconcile
       </Button>
-      <Button size="sm" variant="outline" disabled title={UNIMPLEMENTED_SSH_ENDPOINTS.join('、') + ' 属第 6 片'}>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled
+        title={UNIMPLEMENTED_ACTION_ENDPOINTS.filter((e) => e.includes('/machines/')).join('、') +
+          ' ' +
+          UNIMPLEMENTED_NOTICE}
+      >
         Bootstrap / Repair agentd
       </Button>
     </div>
@@ -221,6 +251,14 @@
               title={`${cond.message ?? ''}${cond.reason ? ` (reason=${cond.reason})` : ''} 最近转变 ${formatTime(cond.lastTransitionTime)}`}
             />
           {/each}
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" disabled={busy !== null} onclick={probeSsh}>
+            {busy === 'probe' ? '探测中…' : 'Probe SSH'}
+          </Button>
+          <span class="text-xs text-muted-foreground">
+            POST /machines/:name/ssh/probe：ssh -G 解析生效配置并采集远端平台信息（uname、printenv HOME），结果写回 SSHReachable 条件与 OS/homeDir。
+          </span>
         </div>
         <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-xs md:grid-cols-4">
           <div><span class="text-muted-foreground">OS/Arch：</span>{machine.status?.os ?? '—'}/{machine.status?.arch ?? '—'}</div>
@@ -602,20 +640,31 @@
           <Button size="sm" variant="outline" disabled={busy !== null || availability.actions[1].blocked} onclick={rollback}>
             Rollback
           </Button>
-          <Button size="sm" variant="outline" disabled title="POST /machines/:name/bootstrap 属第 6 片">
+          <Button size="sm" variant="outline" disabled title="POST /machines/:name/bootstrap 未实现，见 docs/ssh-only-oneshot.md">
             Bootstrap
           </Button>
-          <Button size="sm" variant="outline" disabled title="POST /machines/:name/repair-agentd 属第 6 片">
+          <Button size="sm" variant="outline" disabled title="POST /machines/:name/repair-agentd 未实现，见 docs/ssh-only-oneshot.md">
             Repair agentd
           </Button>
-          <Button size="sm" variant="outline" disabled title="POST /machines/:name/inventory 属第 6 片">
-            Request inventory
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy !== null || machine.spec?.managementMode !== 'ssh'}
+            onclick={requestInventory}
+            title={
+              machine.spec?.managementMode === 'ssh'
+                ? 'POST /machines/:name/ssh/inventory：经 SSH 只读采集观测，不产生任何变更'
+                : 'POST /machines/:name/ssh/inventory 仅 SSH 通道机器可用（agentd 通道的手动采集未接线，服务端返回 400 Invalid）'
+            }
+          >
+            {busy === 'inventory' ? '采集中…' : 'Request inventory'}
           </Button>
         </div>
         <p class="text-xs text-muted-foreground">
           Rollback 语义：内容取自历史代，但会为该机物化**新代**（回滚不把机器拉回旧代，FR-7.5/ADR-2）。
           图中未提供"签发 enrollment token"入口：token 是凭据，前端不展示、不存储 secret（本片边界）。
-          SSH 路径动作（probe/bootstrap/repair-agentd/inventory）属第 6 片，当前未注册。
+          SSH 路径的 probe 与 inventory 已接通（probe 见区块 1，inventory 见上）；bootstrap / repair-agentd
+          未实现，见 docs/ssh-only-oneshot.md。
         </p>
       </CardContent>
     </Card>

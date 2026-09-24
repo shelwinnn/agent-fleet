@@ -118,6 +118,11 @@ export function describeActionFailure(err: unknown): ActionFailure {
         };
       case 'NotFound':
         return { title: '404 NotFound：对象不存在', detail: api.message };
+      case 'Invalid':
+        return {
+          title: '400 Invalid：请求被服务端拒绝',
+          detail: `${api.message}（§6.4 错误体原文，UI 不改写服务端拒绝理由。）`,
+        };
       default:
         return { title: `${api.reason}`, detail: api.message };
     }
@@ -125,10 +130,15 @@ export function describeActionFailure(err: unknown): ActionFailure {
   return { title: '请求失败', detail: err instanceof Error ? err.message : String(err) };
 }
 
-/** 本片尚未注册的 SSH 路径端点（§23.1；属第 6 片）——UI 如实标注，不假装可用。 */
-export const UNIMPLEMENTED_SSH_ENDPOINTS = [
-  'POST /machines/{name}/ssh/probe',
+/**
+ * 仍未实现的动作端点（KM-28 起的口径：不再按"切片"叙述，也不暗示后续会自动有），
+ * 登记见 docs/ssh-only-oneshot.md。UI 禁用入口并如实标注，不假装可用。
+ */
+export const UNIMPLEMENTED_ACTION_ENDPOINTS = [
   'POST /machines/{name}/bootstrap',
   'POST /machines/{name}/repair-agentd',
-  'POST /machines/{name}/inventory',
+  'POST /skills/{name}/resolve',
 ];
+
+/** 未实现禁用入口的统一口径。 */
+export const UNIMPLEMENTED_NOTICE = '未实现，见 docs/ssh-only-oneshot.md';
