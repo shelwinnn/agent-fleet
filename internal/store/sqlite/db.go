@@ -15,6 +15,8 @@ import (
 // DB 包装 *sql.DB，是各仓储的宿主。
 type DB struct {
 	sql *sql.DB
+	// changes 是"写入成功后发布变更"的通知槽（SSE 事件枢纽的数据源，见 change.go）。
+	changes *changeNotifier
 }
 
 // Open 打开（必要时创建目录）单文件 SQLite 库，并按 §4.9/§12.1 显式设置
@@ -39,7 +41,7 @@ func Open(path string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("sqlite: enable WAL: %w", err)
 	}
-	return &DB{sql: sqlDB}, nil
+	return &DB{sql: sqlDB, changes: &changeNotifier{}}, nil
 }
 
 // Ping 探活，供 /readyz 使用。

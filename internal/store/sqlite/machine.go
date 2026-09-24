@@ -16,6 +16,8 @@ import (
 // 查询列（架构 §10.1），取自 spec JSON。
 type machineStore struct {
 	db *sql.DB
+	// changes 写成功后发布变更（§23.6 SSE 事件源）。
+	changes *changeNotifier
 }
 
 func (s *machineStore) core(spec json.RawMessage) (domain.MachineCoreSpec, error) {
@@ -56,7 +58,11 @@ func (s *machineStore) Create(ctx context.Context, m *domain.Machine) error {
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		meta.UID, meta.Name, core.ManagementMode, core.ProfileRef,
 		string(m.Spec), string(m.Status), meta.ResourceVersion, stamp, stamp)
-	return mapConstraintErr(err, "machines")
+	if err := mapConstraintErr(err, "machines"); err != nil {
+		return err
+	}
+	s.changes.emit(resourceMachines, meta.Name, meta.ResourceVersion)
+	return nil
 }
 
 func (s *machineStore) Get(ctx context.Context, name string) (*domain.Machine, error) {
@@ -148,16 +154,32 @@ func (s *machineStore) Update(ctx context.Context, m *domain.Machine) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sqlite: commit update machine: %w", err)
 	}
+	s.changes.emit(resourceMachines, meta.Name, meta.ResourceVersion)
 	return nil
 }
 
+// Delete 删除机器并发变更事件（事件版本取删除前 rv+1，见 resourceStore.Delete 注释）。
 func (s *machineStore) Delete(ctx context.Context, name string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM machines WHERE name = ?`, name)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("sqlite: delete machine %q: %w", name, err)
+		return fmt.Errorf("sqlite: begin delete machine %q: %w", name, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	defer func() { _ = tx.Rollback() }()
+
+	var rv int64
+	err = tx.QueryRowContext(ctx, `SELECT resource_version FROM machines WHERE name = ?`, name).Scan(&rv)
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: machine %q", domain.ErrNotFound, name)
 	}
+	if err != nil {
+		return fmt.Errorf("sqlite: lock machine %q: %w", name, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM machines WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("sqlite: delete machine %q: %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite: commit delete machine %q: %w", name, err)
+	}
+	s.changes.emit(resourceMachines, name, rv+1)
 	return nil
 }
