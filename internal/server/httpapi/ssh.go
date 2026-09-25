@@ -157,8 +157,19 @@ func (s *Server) handleSSHIncludeInstall(w http.ResponseWriter, r *http.Request)
 }
 
 // writeSSHError 把 §30.1 六类 reason 映射为 HTTP 状态码（错误体仍是 §6.4 五要素）。
+//
+// 除带码错误（domain.CodedError / ReasonCoder）外还必须认哨兵 domain.ErrInvalid：
+// 渲染器（internal/sshtransport）与各控制器用 `fmt.Errorf("%w: …", domain.ErrInvalid)`
+// 表达"入参/规格非法"——它既不带 §30.1 的 reason code，也不是上游节点的故障。
+// 漏认会落进默认分支 → 502 Internal，把客户端的输入问题报成上游故障
+// （KM-29：include 渲染拒绝 {"reason":"Internal"} 与 §6.4 的 400 Invalid 相反）。
+// writeStoreError 是同一条契约的先例；显式 reason code 优先，哨兵只在回退
+// Internal 时兜底。
 func writeSSHError(w http.ResponseWriter, err error) {
 	reason := domain.ReasonOf(err)
+	if reason == domain.ReasonInternal && errors.Is(err, domain.ErrInvalid) {
+		reason = domain.ReasonInvalid
+	}
 	status := http.StatusBadGateway
 	switch reason {
 	case domain.ReasonInvalid, domain.ReasonDesiredStateInvalid, domain.ReasonSkillPathRejected,

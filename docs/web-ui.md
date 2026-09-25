@@ -68,11 +68,15 @@ hash 路由：静态产物可被任意静态服务器托管，不需要服务端
    不开放 status 写入）；`POST /api/v1/deployments` 改走**控制器创建路径**（校验 `machineNames` 与
    可解析的 `targetGeneration`、物化目标行、写初始 status），入口校验失败以 400 `Invalid` /
    409 `RollbackUnsupported` 报出而不落库。
-6. **未注册端点**（属第 6 片/后续切片，UI 一律禁用并标注原因，不给假入口）：
-   `POST /machines/{name}/ssh/probe|bootstrap|repair-agentd|inventory`、
+6. **未注册端点**（属第 6 片遗留/后续切片，UI 一律禁用并标注原因，不给假入口；
+   **KM-29 已移出 `ssh/probe|inventory` 与 `ssh/include`**，见本条末）：
+   `POST /machines/{name}/ssh/bootstrap|repair-agentd`、
    `POST /skills/{name}/resolve`、`GET /skills/{name}/revisions`、
    `POST /deployments/{name}/pause|resume`、`GET /machines/{name}/drift` 的字段级 diff，
    以及 Skill 的 spec 形态。
+   【已移出本清单（KM-29 同步）】`POST /machines/{name}/ssh/probe`、
+   `POST /machines/{name}/ssh/inventory` 已由 KM-26（PR #8）注册、KM-28（PR #10）接通 UI；
+   `GET/POST /api/v1/ssh/include` 同批注册并在 SSH Inventory 页可用。这三条路径不再禁用。
 7. **静态资源托管（已闭环）**：控制面进程以 `--spa-dir`（默认 `web/dist`）托管 Web UI
    （§3.6/§4.1）。目录不存在时不注册静态托管、只保留 API（并打日志）——刻意**不用 `go:embed`**，
    否则没有前端产物的干净树上 `go build ./...` 会直接失败。UI 用 hash 路由，深链接不需要 rewrite 回退；

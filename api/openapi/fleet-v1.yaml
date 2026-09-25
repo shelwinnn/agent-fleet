@@ -9,9 +9,15 @@
 # 与 Web UI 需要的 Operation / Deployment 目标 / MachineStatus 类型。
 # 【路径约定】§8.1 列出的全部路径都写在 "/api/v1" 前缀之下（该节的资源端点同样
 # 省略前缀），因此 §23.6 的 `GET /events` 与其余端点一致地解析为 /api/v1/events。
-# 【仍未注册的端点】§23.1 的 ssh/probe、bootstrap、repair-agentd、inventory 与
-# §23.3 的 skills/{id}/resolve、skills/{id}/revisions 属第 6 片（SSH 路径），
-# 当前未注册：命中 catch-all 返回 404 NotFound。本文件不为其编造契约。
+# 【已注册的 SSH 动作端点（KM-29 同步）】§8.1 的 `/machines/{id}/ssh/probe` 与
+# `/machines/{id}/ssh/inventory` 已由 KM-26（PR #8）注册（POST，实现见
+# internal/server/httpapi/ssh.go），FR-12.6 的 `GET/POST /api/v1/ssh/include`
+# 同批注册，KM-28（PR #10）已把 Web UI 接通；三者的请求/响应形状以
+# docs/ssh-only-oneshot.md 与实现为准（本文件未定义其 schema）。
+# 【仍未注册的端点】§23.1 的 ssh/bootstrap、ssh/repair-agentd（第 6 片/SSH 路径遗留），
+# 以及 §23.3 的 skills/{id}/resolve、skills/{id}/revisions 与 §8.1 的 deployments
+# pause/resume（后续切片），当前未注册：命中 catch-all 返回 404 NotFound。
+# 本文件不为其编造契约。
 # gRPC 契约以 api/proto/fleet/v1 为准。
 # 声明版本为 3.1.0（KM-21 核查发现 #1：本文件使用了 3.1 才有的
 # components.pathItems；3.0.3 声明与内容不符会卡严格校验器）。
@@ -766,7 +772,8 @@ components:
   # 【KM-25 修复】原先 components 下出现两个 `schemas:` 键：YAML 解析时后者覆盖前者，
   # 使 EnrollTokenRequest / EnrollToken 在解析结果中消失（严格校验器也会拒绝重复键）。
   # 现合并为单一 schemas 块；原先未被任何路径引用的 pathItems.Skeleton 已删除
-  # （骨架端点属第 6 片，未注册即无契约可写，见文件头说明）。
+  # （骨架端点指的是当时未注册的 ssh/bootstrap、ssh/repair-agentd 等，未注册即无
+  # 契约可写；其中 ssh/probe 与 ssh/inventory 已由 KM-26 注册，见文件头说明）。
   schemas:
     # KM-25 补齐：KM-23 的动作端点引用了本 schema 但从未定义（配合缺失的 components 键）。
     ReconcileRequest:

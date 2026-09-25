@@ -9,8 +9,8 @@
    *  - 服务端只写 ~/.ssh/agent-fleet.conf，绝不改写操作者主配置——主配置里的
    *    Include 行由操作者自己加（响应回显该指令）；
    *  - spec 连接值（User/HostName/ProxyJump/IdentityFile）含空白或引号会被服务端
-   *    拒绝渲染，UI 按 §6.4 错误体原样呈现该错误（状态码以后端实际返回为准，
-   *    目前落在 502 Internal；映射修复已登记 KM-29），不在前端猜测改写；
+   *    拒绝渲染，服务端以 400 Invalid 返回渲染器原文（KM-29 修正：此前误映射为
+   *    502 Internal），UI 按 §6.4 错误体原样呈现该 message，不在前端猜测改写；
    *  - host-key 校验保持标准策略（FR-12.3），不出现 StrictHostKeyChecking=no。
    */
   import type { FleetStore } from '$lib/state/store.svelte.js';
