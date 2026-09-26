@@ -10,6 +10,7 @@ import (
 
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/grok"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/opencode"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/reconciler"
@@ -126,6 +127,7 @@ func describeLock(lock *reconciler.ExecutionLock) (string, map[string]any, error
 func adapterFamilies() []string {
 	reg := adapter.NewRegistry()
 	reg.Register(codex.New())
+	reg.Register(grok.New())
 	reg.Register(omp.New())
 	reg.Register(opencode.New())
 	return reg.Families()

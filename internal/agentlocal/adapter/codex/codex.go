@@ -165,7 +165,7 @@ func (a *Adapter) Validate(_ context.Context, home string, desired adapter.Agent
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("agent %q: read config: %w", ID, err)
 	}
-	if _, err := parseTOML(string(raw)); err != nil {
+	if _, err := kit.ParseTOML(string(raw)); err != nil {
 		return fmt.Errorf("agent %q: existing config is unparseable: %w", ID, err)
 	}
 	return nil
@@ -400,7 +400,7 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, co
 		return fmt.Errorf("codex: read config: %w", err)
 	}
 	doc := string(raw)
-	if _, err := parseTOML(doc); err != nil {
+	if _, err := kit.ParseTOML(doc); err != nil {
 		return fmt.Errorf("codex: existing config is unparseable, refusing to merge: %w", err)
 	}
 	scalars := map[string]any{}
@@ -431,11 +431,11 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, co
 		}
 		tables["mcp_servers."+name] = table
 	}
-	out, err := patchTOML(doc, scalars, tables)
+	out, err := kit.PatchTOML(doc, kit.TOMLPatch{Scalars: scalars, Tables: tables})
 	if err != nil {
 		return fmt.Errorf("codex: patch config: %w", err)
 	}
-	if _, err := parseTOML(out); err != nil {
+	if _, err := kit.ParseTOML(out); err != nil {
 		return fmt.Errorf("codex: patched config does not parse, aborting write: %w", err)
 	}
 	return kit.AtomicWrite(path, []byte(out), 0o600)
@@ -449,7 +449,7 @@ func (a *Adapter) HealthCheck(ctx context.Context, home string, desired adapter.
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("codex: health: read config: %w", err)
 	}
-	cfg, err := parseTOML(string(raw))
+	cfg, err := kit.ParseTOML(string(raw))
 	if err != nil {
 		return fmt.Errorf("codex: health: config unparseable: %w", err)
 	}
@@ -520,7 +520,7 @@ func (a *Adapter) ManagedFiles(home string) ([]string, error) {
 
 // ExtractManaged 提取受管键值（TOML 键 + rules 受管块；软链由路径体现）。
 func (a *Adapter) ExtractManaged(content []byte) (map[string]any, error) {
-	cfg, err := parseTOML(string(content))
+	cfg, err := kit.ParseTOML(string(content))
 	if err != nil {
 		// 非 TOML（如 AGENTS.md）：受管对象是 rules 受管块内容。
 		if block, ok, blockErr := kit.ManagedBlockIn(string(content)); blockErr == nil && ok {
@@ -555,11 +555,11 @@ func (a *Adapter) MergeManaged(home, relPath string, managed map[string]any) err
 		if err != nil {
 			return fmt.Errorf("codex: read config for managed rollback: %w", err)
 		}
-		out, err := patchTOML(string(raw), scalars, tables)
+		out, err := kit.PatchTOML(string(raw), kit.TOMLPatch{Scalars: scalars, Tables: tables})
 		if err != nil {
 			return err
 		}
-		if _, err := parseTOML(out); err != nil {
+		if _, err := kit.ParseTOML(out); err != nil {
 			return fmt.Errorf("codex: managed rollback produced unparseable config: %w", err)
 		}
 		return kit.AtomicWrite(a.configPath(home), []byte(out), 0o600)
@@ -589,7 +589,7 @@ func (a *Adapter) readConfig(home string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("codex: read config: %w", err)
 	}
-	cfg, err := parseTOML(string(raw))
+	cfg, err := kit.ParseTOML(string(raw))
 	if err != nil {
 		return nil, fmt.Errorf("codex: config unparseable: %w", err)
 	}

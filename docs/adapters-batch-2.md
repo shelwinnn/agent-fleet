@@ -573,3 +573,126 @@ WSL 与 Windows 行为差异；`settings.yaml` 并发写协议未实测；设置
 **Hermes**：线上文档与本机 0.21.2 未逐页 diff；`hermes doctor`/`status --deep` 完整输出未采集；
 `hermes mcp list`/`test` 未执行；MCP `env` 的 `${VAR}` 语义；无机器可读 schema；
 PyPI 包的官方性；Windows/macOS/Termux；`SOUL.md` 是否受管；`.env`/`auth.json` 优先级。
+
+---
+
+## 8. 片 A：Grok 适配器逐家族验收记录（KM-33）
+
+本片交付批次二第 1 片：接入 Grok（可执行 `grok`）适配器，沿用批次一范式
+（新增 `internal/agentlocal/adapter/grok` + 注册，**控制面零改动**）。基线为 `main` = `059a955d`
+（PR #12 已合并，§3 已在 `main`），因此按 §5.1 的第二种情形把验收记录追加在本文件 §3 之后。
+
+### 8.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/grok/`：`Adapter` 8 方法（`ID`/`Capabilities`/`Validate`/`Detect`/`Inventory`/`Plan`/`Apply`/`HealthCheck`）+ `ManagedFiles`/`ExtractManaged`/`MergeManaged` |
+| 注册 | `cmd/agent-fleet-agentd/daemon.go:82`、`oneshot.go:342`、`doctor.go:130` 各一处 `reg.Register(grok.New())`。**未**收敛为单一注册函数：该重构会同时触碰三个入口，为控制回归面留给后续片（片内允许） |
+| 写 kit | TOML 行级手术按批次一先例**下沉共享**：新增 `internal/agentlocal/adapter/kit/tomlpatch.go`（`ParseTOML`/`PatchTOML`），codex 改为复用同一实现，`codex/tomlpatch.go` 已删除（不写第二份）。为 Grok 的表内所有权新增两档粒度：`Keys`（表内指定键写入，保留表内未托管键）与 `Remove`（清理不再受管的子表）。另下沉 `kit.IsNotInstalled`（多步版本探测需要区分"没装"与"这一步失败"） |
+| fixture | `internal/agentlocal/adapter/grok/testdata/config.toml`：§3.2 记录的本机真实形状（`[cli]`/`[marketplace]`/`[models]`/`[ui]` + `[[marketplace.sources]]`） |
+| 测试 | `internal/agentlocal/adapter/grok/grok_test.go`（矩阵 5 项 + 回归断言，全部临时 HOME，绝不触碰真实 `~/.grok`） |
+
+### 8.2 受管面与所有权（实现口径）
+
+- `~/.grok/config.toml`
+  - `[models] default`（**只写该键**，表内 `default_reasoning_effort` 等未托管键保留）
+  - `[model.fleet]`：`model`/`base_url`/`env_key`/`api_backend`/`name`（表内其它未托管键保留）
+  - 期望点名的 `[mcp_servers.<name>]`：`command`/`args`；其 `[mcp_servers.<name>.env]` 子表由
+    Fleet 整表所有（`envRefs` → `${VAR}`），期望不再点名 env 时清理该子表
+- `~/.grok/rules/agent-fleet.md`：rules 受管标记块（目录内其它 `*.md` 不读不写）
+- `~/.grok/skills/<name>`：Skill 软链（缓存未物化时显式失败）
+- 受管键来源按裁决口径取自 `26-config-reference.md` 中 `Managed: user` 的行；`Managed: fleet` 的行
+  （如 `features.remote_fetch`）Fleet 不写。
+
+### 8.3 本机实测补证（临时 `GROK_HOME`，未触碰真实 `~/.grok`）
+
+在临时 `GROK_HOME` 写入 `[models] default = "fleet"` + `[model.fleet]`（`model = "grok-4.6"`、
+`base_url`、`env_key`）后：
+
+```
+$ grok models
+You are not authenticated.
+
+Default model: fleet
+
+Available models:
+  - grok-4.6
+  - grok-4.5
+  * fleet (default)
+```
+
+即"默认选择器指向 Fleet 命名空间、`[model.fleet]` 作为可选中自定义模型"的写法成立（§3.2 的
+`[model.<fleet 命名空间>]` 口径）。补充证据：`grok inspect --json`（1.0.30）的顶层键为
+`grokVersion/channel/cwd/projectRoot/projectInstructions/permissions/loginPolicy/hooks/skills/agents/
+plugins/marketplaces/mcpServers/lspServers/configSources/externalCompat`，**不暴露生效模型值**；
+`configSources.layers` 按 `managed` → `user` → `requirements` 给出实际加载层（本片用它判定是否存在
+更高层，失败则回落到 home 内文件）。
+
+### 8.4 逐家族验收 5 项（矩阵口径）
+
+1. **身份与兼容性**：`TestDetectDistinguishesMissingFromUnparseable`——已装/未装/版本不可解析三态可区分
+   （程序缺失 `Installed=false` 且非错误；形态不符显式报错）。`TestVersionSourcesAreCLIOnly`——`~/.grok/version.json`
+   写入 `1.0.25` 诱饵仍报 CLI 的 `1.0.30`；`version --json` 不可用时回退 `grok --version`；回退形态不符显式报错。
+   非 linux → 阶段 1 拒绝。
+2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent`——以 §3.2 真实 `config.toml` 为输入，
+   注释/键序/未托管表（`[cli]`/`[marketplace]`/`[[marketplace.sources]]`/`[ui]`）与表内未托管键
+   （`default_reasoning_effort`）逐字节保留，受管键到位，重复 reconcile 无变更。
+   `TestUnmanagedMCPEntriesArePreserved`——未点名的 `[mcp_servers.*]` 原样保留。
+   `TestValidateRejectsUnverifiedBeforeWrite` + `TestValidateRejectsUnparseableConfig`——envRefs 变量名非法、
+   provider 缺 model、非法 MCP 名、缺 command、非 linux、既有配置不可解析，全部在**任何写入之前**拒绝且零写入产物。
+3. **生命周期**：`TestDriftOnlyFromManagedFields`——幂等、受管改动触发 drift、表外未托管改动不误报、
+   **表内未托管键改动也不误报**。安装/升级不在片内：`TestApplyVersionMismatchFailsExplicitly` 在版本不匹配时
+   显式失败，不谎报成功。
+4. **恢复与一致性**：`TestManagedFilesAndMergeManagedRollback`——`ManagedFiles` 两条（`config.toml`、
+   `rules/agent-fleet.md`）、`ExtractManaged` 只提取受管键（未托管的 `default_reasoning_effort` 不进备份）、
+   配置受管键级回退与 rules 受管块回退两条分支。`TestRulesManagedBlockPreservesUserContentAndRollback`、
+   `TestManagedBlockWritePreservesSymlink`（软链写穿，护栏 #3）、`TestSkillLinkRequiresMaterializedArtifact`。
+   另含批次一复核缺陷 1 的家族回归 `TestMCPEntryWithoutArgsConverges`。
+5. **验收记录**：本节；§3.5 未验证项逐条落点见 8.7。
+
+### 8.5 `envRefs` 降级路径验证（批次一 §6 缺口 3）
+
+Grok 是原生支持家族。`TestEnvRefsRenderNativelyAndConverge`：`envRefs` 渲染为
+`[mcp_servers.<name>.env]` 下的 `${VAR}`（只写变量名，断言不出现字面量回填），且收敛；期望去掉 envRefs 后
+陈旧的受管 `env` 子表被清理并继续收敛。能力声明 `MCP = supported`，`Evidence` 引 `07-mcp-servers.md`
+（"Grok expands string fields in `[mcp_servers.*]` … at load time"）。
+
+### 8.6 更高配置层：可区分的健康态（§3.4 / §6 缺口 3）
+
+层序（`26-config-reference.md`「How to configure」）为 2 `managed_config.toml` → 3 用户 `config.toml` →
+6 `requirements.toml`。因此 **`requirements.toml` 是唯一能压过 Fleet 用户层的文件层**；`managed_config.toml`
+在用户层之前，且其值只在 `Managed: fleet` 的键上胜出（厂商原文："Their value applies, except
+`features.remote_fetch`. Pin the key instead if it must hold."），而 Fleet 只写 `Managed: user` 的键。
+
+- `TestHigherLayerRequirementPinIsDistinguishable`：`requirements.toml` 的 `[models] default` 与期望不同时，
+  观测投影带 `overriddenBy` 标记（**不报 Reconciled**）、`Plan` 不为该键排无效的用户层写入（**不进入
+  "写成功→verify 失败→回滚"的循环**）、`HealthCheck` 返回 `*HigherLayerOverrideError`（点名键与层）。
+- `TestHigherLayerOutsideHomeIsReported`：`inspect` 报告存在 requirements 层但 `$GROK_HOME` 内没有该文件
+  （`/etc/grok/requirements.toml` 或 macOS MDM）→ 如实报"被覆盖、生效值不可读"，不编造值、不假装收敛。
+- `TestManagedConfigLayerIsNotAnOverride`：`managed_config.toml` 设同键时用户层胜出，不误报覆盖。
+
+**契约缺口（已在评论上报）**：现有投影/门禁只有"收敛 / drift"两态，没有"被更高层覆盖"。本片把它表达为
+"观测投影带标记 + `Plan`/`Apply` 不写 + `HealthCheck` 可区分失败"；只读 reconcile 仍会把它呈现为 drift
+（无法既不报 drift 又不报 Reconciled）。建议在 §6 缺口 3 / §7.1 明确该三态与归属。
+
+### 8.7 §3.5 未验证项逐条落点
+
+| # | §3.5 项 | 落点 |
+|---|---|---|
+| 1 | `cli.installer = "npm"` 与官方无 npm 包的矛盾 | `Capabilities(version).Reason`；本文件 §8.3 |
+| 2 | `x.ai` / `docs.x.ai` 本沙箱不可达 | `Capabilities(version).Evidence`（结论取自随包文档与二进制内嵌 URL） |
+| 3 | macOS / Windows / WSL 无实测 | `Capabilities(version).Reason` + `Validate` 对非 linux 明确拒绝 |
+| 4 | `grok inspect --json` 结构未锁定 | `Capabilities(modelProvider).Reason`；§8.3（1.0.30 不暴露生效模型值，本片只用其 layer 列表，失败回落 home 文件） |
+| 5 | `settings.json` 完整字段集未取全 | `Capabilities(rules).Reason`（本片不使用该文件） |
+| 6 | `managed_config.toml` / `requirements.toml` 归属未决 | §8.6 + `Capabilities(modelProvider).Reason`（Fleet 受管层定位=用户层） |
+| 7 | install / upgrade | `Capabilities(version).Reason`（探测 supported；`Apply(version)` 不匹配显式失败） |
+
+### 8.8 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**，因此 §3.2 列出的
+   `url`/`headers`/`bearer_token_env_var` 受管面在本片不可达（`Validate` 对无 `command` 的条目显式拒绝）。
+   建议扩展 `adapter.MCPEntry`，否则"Grok 的 HTTP MCP 受管"只是纸面能力。
+2. **"更高配置层"三态未定义**（见 8.6）。
+3. **§3.1/§3.2 把 `managed_config.toml` 描述为"比 Fleet 用户层更高的层"与厂商文档不符**：
+   它是层序第 2 层，位于用户 `config.toml`（第 3 层）**之前**，只对 `Managed: fleet` 的键胜出。
+   本片按厂商文档处理（只有 `requirements.toml` 构成覆盖），建议修正 §3.2 表述。

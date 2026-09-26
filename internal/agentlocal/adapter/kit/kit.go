@@ -263,6 +263,26 @@ func ExecVersionProbe(ctx context.Context, bin string, args ...string) (string, 
 // ErrNotInstalled 表示可执行程序不存在（与"版本不可解析"区分，矩阵验收 1）。
 var ErrNotInstalled = errors.New("executable not installed")
 
+// IsNotInstalled 判断探测错误是否表示"可执行程序不存在"：多步探测（如 Grok 先试
+// `version --json` 再回退 `--version`）需要在回退前区分"没装"与"这一步失败"。
+func IsNotInstalled(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotInstalled) || errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	var ee *exec.Error
+	if errors.As(err, &ee) {
+		return true
+	}
+	var le *os.PathError
+	if errors.As(err, &le) {
+		return errors.Is(le.Err, os.ErrNotExist)
+	}
+	return false
+}
+
 // ProbeVersion 执行探测并解析版本；程序缺失返回 ErrNotInstalled。
 func ProbeVersion(ctx context.Context, probe VersionProbe, bin string, args []string, parse func(string) string) (string, error) {
 	if probe == nil {
@@ -270,12 +290,7 @@ func ProbeVersion(ctx context.Context, probe VersionProbe, bin string, args []st
 	}
 	out, err := probe(ctx, bin, args...)
 	if err != nil {
-		var ee *exec.Error
-		if errors.As(err, &ee) || errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("%w: %s", ErrNotInstalled, bin)
-		}
-		var le *os.PathError
-		if errors.As(err, &le) && errors.Is(le.Err, os.ErrNotExist) {
+		if IsNotInstalled(err) {
 			return "", fmt.Errorf("%w: %s", ErrNotInstalled, bin)
 		}
 		return "", fmt.Errorf("probe %s: %w", bin, err)
