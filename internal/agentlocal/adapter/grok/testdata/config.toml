@@ -1,0 +1,19 @@
+# 本机 ~/.grok/config.toml 的真实形状（docs/adapters-batch-2.md §3.2，KM-32 实测）。
+# 四组既有键（[cli]/[marketplace]/[models]/[ui] + [[marketplace.sources]]）均不在
+# Fleet 受管范围或表内未托管键，必须逐字节保留；fixture 直接以此作为输入。
+[cli]
+installer = "npm"
+[marketplace]
+default_skills_installs_purged = true
+official_marketplace_auto_installed = true
+  [[marketplace.sources]]
+  name = "xAI Official"
+  git = "https://github.com/xai-org/plugin-marketplace.git"
+[models]
+default = "grok-4.6"
+default_reasoning_effort = "xhigh"
+[ui]
+max_thoughts_width = 120
+fork_secondary_model = "grok-4.6"
+yolo = false
+compact_mode = false

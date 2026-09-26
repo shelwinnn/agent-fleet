@@ -573,3 +573,168 @@ WSL 与 Windows 行为差异；`settings.yaml` 并发写协议未实测；设置
 **Hermes**：线上文档与本机 0.21.2 未逐页 diff；`hermes doctor`/`status --deep` 完整输出未采集；
 `hermes mcp list`/`test` 未执行；MCP `env` 的 `${VAR}` 语义；无机器可读 schema；
 PyPI 包的官方性；Windows/macOS/Termux；`SOUL.md` 是否受管；`.env`/`auth.json` 优先级。
+
+---
+
+## 8. 片 A：Grok 适配器逐家族验收记录（KM-33）
+
+本片交付批次二第 1 片：接入 Grok（可执行 `grok`）适配器，沿用批次一范式
+（新增 `internal/agentlocal/adapter/grok` + 注册，**控制面零改动**）。基线为 `main` = `059a955d`
+（PR #12 已合并，§3 已在 `main`），因此按 §5.1 的第二种情形把验收记录追加在本文件 §3 之后。
+
+### 8.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/grok/`：`Adapter` 8 方法（`ID`/`Capabilities`/`Validate`/`Detect`/`Inventory`/`Plan`/`Apply`/`HealthCheck`）+ `ManagedFiles`/`ExtractManaged`/`MergeManaged` |
+| 注册 | `cmd/agent-fleet-agentd/daemon.go:82`、`oneshot.go:342`、`doctor.go:130` 各一处 `reg.Register(grok.New())`。**未**收敛为单一注册函数：该重构会同时触碰三个入口，为控制回归面留给后续片（片内允许） |
+| 写 kit | TOML 行级手术按批次一先例**下沉共享**：新增 `internal/agentlocal/adapter/kit/tomlpatch.go`（`ParseTOML`/`PatchTOML`），codex 改为复用同一实现，`codex/tomlpatch.go` 已删除（不写第二份）。为 Grok 的表内所有权新增三档粒度：`Keys`（表内指定键写入，保留表内未托管键）、`Remove`（清理不再受管的子表表头）、`RemoveKeys`（清理表内点号键，如 `env.TOKEN = "..."`）；并保留原文尾换行。另下沉 `kit.IsNotInstalled`（多步版本探测需要区分"没装"与"这一步失败"） |
+| fixture | `internal/agentlocal/adapter/grok/testdata/config.toml`：**= §3.2 记录的代码块形状**（`[cli]`/`[marketplace]`/`[models]`/`[ui]` + `[[marketplace.sources]]`；非 live 文件的逐字节复刻）。另含黄金文件 `testdata/config.after.toml`，供逐字节比对（含尾换行） |
+| 测试 | `internal/agentlocal/adapter/grok/grok_test.go`（矩阵 5 项 + 回归断言，全部临时 HOME，绝不触碰真实 `~/.grok`） |
+
+### 8.2 受管面与所有权（实现口径）
+
+- `~/.grok/config.toml`
+  - `[models] default`（**只写该键**，表内 `default_reasoning_effort` 等未托管键保留）
+  - `[model.fleet]`：`model`/`base_url`/`env_key`/`api_backend`/`name`（表内其它未托管键保留；
+    这五个键都进观测投影与 `HealthCheck`，用户改掉任一即触发 drift —— 复核 MINOR 2 的修正）
+  - 期望点名的 `[mcp_servers.<name>]`：`command`/`args`；其 `env` 由 Fleet 整表所有
+    （`envRefs` → `${VAR}`），两种落盘形态——子表 `[mcp_servers.<name>.env]` 与表内点号键
+    `env.TOKEN = "..."`——在期望不再点名时都会被清理（复核 B2）
+- `~/.grok/rules/agent-fleet.md`：rules 受管标记块（目录内其它 `*.md` 不读不写）
+- `~/.grok/skills/<name>`：Skill 软链（缓存未物化时显式失败）
+- 受管键来源按裁决口径取自 `26-config-reference.md` 中 `Managed: user` 的行；`Managed: fleet` 的行
+  （如 `features.remote_fetch`）Fleet 不写。
+
+### 8.3 本机实测补证（临时 `GROK_HOME`，未触碰真实 `~/.grok`）
+
+在临时 `GROK_HOME` 写入 `[models] default = "fleet"` + `[model.fleet]`（`model = "grok-4.6"`、
+`base_url`、`env_key`）后：
+
+```
+$ grok models
+You are not authenticated.
+
+Default model: fleet
+
+Available models:
+  - grok-4.6
+  - grok-4.5
+  * fleet (default)
+```
+
+即"默认选择器指向 Fleet 命名空间、`[model.fleet]` 作为可选中自定义模型"的写法成立（§3.2 的
+`[model.<fleet 命名空间>]` 口径）。补充证据：`grok inspect --json`（1.0.30）的顶层键为
+`grokVersion/channel/cwd/projectRoot/projectInstructions/permissions/loginPolicy/hooks/skills/agents/
+plugins/marketplaces/mcpServers/lspServers/configSources/externalCompat`，**不暴露生效模型值**；
+`configSources.layers` 按 `managed` → `user` → `requirements` 给出实际加载层（本片用它判定是否存在
+更高层，失败则回落到 home 内文件）。
+
+### 8.4 逐家族验收 5 项（矩阵口径）
+
+1. **身份与兼容性**：`TestDetectDistinguishesMissingFromUnparseable`——已装/未装/版本不可解析三态可区分
+   （程序缺失 `Installed=false` 且非错误；形态不符显式报错）。`TestVersionSourcesAreCLIOnly`——`~/.grok/version.json`
+   写入 `1.0.25` 诱饵仍报 CLI 的 `1.0.30`；`version --json` 不可用时回退 `grok --version`；回退形态不符显式报错。
+   非 linux → 阶段 1 拒绝。
+2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent`——以 §3.2 真实 `config.toml` 为输入，
+   注释/键序/未托管表（`[cli]`/`[marketplace]`/`[[marketplace.sources]]`/`[ui]`）与表内未托管键
+   （`default_reasoning_effort`）逐字节保留，受管键到位，重复 reconcile 无变更。
+   `TestUnmanagedMCPEntriesArePreserved`——未点名的 `[mcp_servers.*]` 原样保留。
+   `TestMergeWriteMatchesGoldenBytes`——整份 `config.toml` 与 `testdata/config.after.toml` **逐字节**比对
+   （覆盖注释/键序/空行/尾换行）。`TestDottedKeyEnvIsRemovedAndConverges`——env 写成表内点号键
+   （`env.TOKEN = "..."`）时也能清理并收敛（复核 B2）。
+   `TestValidateRejectsUnverifiedBeforeWrite` + `TestValidateRejectsUnparseableConfig`——envRefs 变量名非法、
+   provider 缺 model、非法 MCP 名、缺 command、非 linux、既有配置不可解析，全部在**任何写入之前**拒绝且零写入产物。
+3. **生命周期**：`TestDriftOnlyFromManagedFields`——幂等、受管改动触发 drift、表外未托管改动不误报、
+   **表内未托管键改动也不误报**。安装/升级不在片内：`TestApplyVersionMismatchFailsExplicitly` 在版本不匹配时
+   显式失败，不谎报成功。
+4. **恢复与一致性**：`TestManagedFilesAndMergeManagedRollback`——`ManagedFiles` 两条（`config.toml`、
+   `rules/agent-fleet.md`）、`ExtractManaged` 只提取受管键（未托管的 `default_reasoning_effort` 不进备份）、
+   配置受管键级回退与 rules 受管块回退两条分支。`TestRulesManagedBlockPreservesUserContentAndRollback`、
+   `TestManagedBlockWritePreservesSymlink`（软链写穿，护栏 #3）、`TestSkillLinkRequiresMaterializedArtifact`。
+   另含批次一复核缺陷 1 的家族回归 `TestMCPEntryWithoutArgsConverges` 与逐字节黄金文件比对
+   `TestMergeWriteMatchesGoldenBytes`。
+5. **验收记录**：本节；§3.5 未验证项逐条落点见 8.7。
+
+### 8.5 `envRefs` 降级路径验证（批次一 §6 缺口 3）
+
+Grok 是原生支持家族。`TestEnvRefsRenderNativelyAndConverge`：`envRefs` 渲染为
+`[mcp_servers.<name>.env]` 下的 `${VAR}`（只写变量名，断言不出现字面量回填），且收敛；期望去掉 envRefs 后
+陈旧的受管 `env` 子表被清理并继续收敛。能力声明 `MCP = supported`，`Evidence` 引 `07-mcp-servers.md`
+（"Grok expands string fields in `[mcp_servers.*]` … at load time"）。
+
+### 8.6 更高配置层：可区分的健康态（§3.4 / §6 缺口 3）
+
+层序（`26-config-reference.md`「How to configure」）为 2 `managed_config.toml` → 3 用户 `config.toml` →
+6 `requirements.toml`。因此 **`requirements.toml` 是唯一能压过 Fleet 用户层的文件层**；`managed_config.toml`
+在用户层之前，且其值只在 `Managed: fleet` 的键上胜出（厂商原文："Their value applies, except
+`features.remote_fetch`. Pin the key instead if it must hold."），而 Fleet 只写 `Managed: user` 的键。
+
+**判据（复核 B1 修正）**：只有"更高层**确实设了该键**、且生效值 ≠ 期望"才算覆盖。
+"文件存在但为空/仅注释"（真实 `grok inspect --json` 会报 `role=requirements`、`path` 在 `$GROK_HOME` 内、
+`note=empty` 的层）**一律不算覆盖**；`$GROK_HOME` 内文件存在时也绝不报"outside-home 覆盖"——
+旧实现按 `len(req)==0` 落判定，会让部署工具留下的一个空占位文件永久冻结本家族的 model/provider/MCP。
+
+**行为（复核 B3 裁决）**：只要**任一**受管键被更高层覆盖，`Plan` 一律返回**空计划**（整片零写入），
+`HealthCheck` 返回 `*HigherLayerOverrideError`（点名键、层、生效值与期望值）。这样流水线是"一次干净、
+零写入、可区分的失败"，不产生备份/回滚，也不会每轮写+回滚。**代价（明示）**：被 pin 期间，同机本家族的
+rules/skills 也一并停写——宁可可见地停下，也不要每轮写入后回滚。
+
+- `TestHigherLayerRequirementPinIsDistinguishable`：真实 pin 时观测投影带 `overriddenBy` 标记（**不报
+  Reconciled**）、`Plan` **整片空**、`HealthCheck` 返回 `*HigherLayerOverrideError`。
+- `TestPinnedFamilyStopsAllWrites`：pin + 同机 rules drift → `Plan` 仍为空，`Apply` 零写入（rules 文件
+  未被触碰），`HealthCheck` 可区分失败（覆盖 B3 的循环场景）。
+- `TestEmptyRequirementsLayerIsNotAnOverride`（两个子用例 `empty-file` / `comment-only`）：空文件与仅注释
+  文件都不算覆盖、不冻结写入；反向对照证明真正的用户层 drift 仍排变更。
+- `TestHigherLayerOutsideHomeIsReported`：`inspect` 报出的 requirements 层路径**不等于** `$GROK_HOME`
+  内的 `requirements.toml`（`/etc/grok/requirements.toml` 或 macOS MDM）→ 如实报"被覆盖、生效值不可读"。
+- `TestManagedConfigLayerIsNotAnOverride`：`managed_config.toml` 设同键时用户层胜出，不误报覆盖。
+- 本机真实二进制复跑（临时 `HOME`/`GROK_HOME`，`Inspect` 不注入）：空 `requirements.toml` → 无覆盖标记、
+  正常排 config drift；写入 `[models] default = "pinned-model"` → `overriddenBy = config.model: requirements.toml`
+  且 `Plan` 为空。
+
+**契约缺口（已在评论上报）**：现有投影/门禁只有"收敛 / drift"两态，没有"被更高层覆盖"。本片把它表达为
+"观测投影带标记 + `Plan` 整片空 + `HealthCheck` 可区分失败"；只读 reconcile 仍会把它呈现为 drift
+（无法既不报 drift 又不报 Reconciled）。建议在 §6 缺口 3 / §7.1 明确该三态与归属。
+
+### 8.7 §3.5 未验证项逐条落点
+
+| # | §3.5 项 | 落点 |
+|---|---|---|
+| 1 | `cli.installer = "npm"` 与官方无 npm 包的矛盾 | `Capabilities(version).Reason`；本文件 §8.3 |
+| 2 | `x.ai` / `docs.x.ai` 本沙箱不可达 | `Capabilities(version).Evidence`（结论取自随包文档与二进制内嵌 URL） |
+| 3 | macOS / Windows / WSL 无实测 | `Capabilities(version).Reason` + `Validate` 对非 linux 明确拒绝 |
+| 4 | `grok inspect --json` 结构未锁定 | `Capabilities(modelProvider).Reason`；§8.3（1.0.30 不暴露生效模型值，本片只用其 layer 列表，失败回落 home 文件） |
+| 5 | `settings.json` 完整字段集未取全 | `Capabilities(rules).Reason`（本片不使用该文件） |
+| 6 | `managed_config.toml` / `requirements.toml` 归属未决 | §8.6 + `Capabilities(modelProvider).Reason`（Fleet 受管层定位=用户层；`managed_config` 只在 `Managed: fleet` 键上胜出，Fleet 不写该类键） |
+| 7 | install / upgrade | `Capabilities(version).Reason`（探测 supported；`Apply(version)` 不匹配显式失败） |
+| 8 | **环境变量层**（复核 MINOR 5，超出 §3.5） | `Capabilities(modelProvider).Reason` 的未验证清单：本机实测 `GROK_DEFAULT_MODEL=grok-4.5` 会压过用户层（`grok models` → `Default model: grok-4.5`），本片不判定该层 → 记入未验证，留后续片 |
+
+### 8.8 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**，因此 §3.2 列出的
+   `url`/`headers`/`bearer_token_env_var` 受管面在本片不可达（`Validate` 对无 `command` 的条目显式拒绝）。
+   建议扩展 `adapter.MCPEntry`，否则"Grok 的 HTTP MCP 受管"只是纸面能力。
+2. **"更高配置层"三态未定义**（见 8.6）。
+3. **§3.1/§3.2 把 `managed_config.toml` 描述为"比 Fleet 用户层更高的层"与厂商文档不符**：
+   它是层序第 2 层，位于用户 `config.toml`（第 3 层）**之前**，只对 `Managed: fleet` 的键胜出。
+   本片按厂商文档处理（只有 `requirements.toml` 构成覆盖），建议修正 §3.2 表述。
+4. **环境变量层（`GROK_*`）未在契约中表达**：`GROK_DEFAULT_MODEL` 等会压过用户层（本机实测），
+   属"更高层覆盖"的同一族；本片只处理了两个文件层，环境变量层记为未验证（§8.7 第 8 项）。
+
+### 8.9 核查退回（B1/B2/B3 + MINOR）的修复记录（2026-09-26，复核轮）
+
+核查在 `fb7acc7` 上给了 3 项阻断与 7 项 MINOR。逐条修复与新增回归如下（每条都用"去掉修复即失败"验证过）：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| B1 | 空的 `$GROK_HOME/requirements.toml` 触发**假**全量覆盖（真实二进制可复现） | `readRequirements` 返回"文件是否存在"；文件在 home 内时只按它实际设置的键判定；`outsideRequirementsLayer` 用 inspect 的 `path` 判定"home 外"，路径等于 home 时不报 | `TestEmptyRequirementsLayerIsNotAnOverride`（空/仅注释两子用例）+ 真实二进制复跑 |
+| B2 | 点号键写法的 `env.TOKEN = "..."` 永不被 `Remove` 清掉 → 每轮重排变更 | `kit.TOMLPatch` 新增 `RemoveKeys`（表内键前缀删除）；`applyConfig` 对点名 MCP 条目清 `env` 两类形态，并**写后断言**受管 env 已收敛，否则显式失败 | `TestDottedKeyEnvIsRemovedAndConverges`（无 envRefs 清理 / envRefs 覆盖点号键两场景） |
+| B3 | "被覆盖 + 其它受管项 drift" 进入写→失败→回滚循环 | 只要任一受管键被覆盖，`Plan` 返回**空计划**（整片停写）；`HealthCheck` 照旧给可区分失败；代价写进 §8.6 与 `Capabilities(modelProvider).Reason` | `TestPinnedFamilyStopsAllWrites`；`TestHigherLayerRequirementPinIsDistinguishable` 改为断言空计划 |
+| 1 | `PatchTOML` 丢尾换行 | `PatchTOML` 记录原文是否以 `\n` 结尾并在返回前恢复 | `TestMergeWriteMatchesGoldenBytes`（逐字节 + 尾换行断言） |
+| 2 | `api_backend`/`name` 写而不可观测 | 期望/观测投影与 `HealthCheck` 纳入这两个键；requirements 覆盖判定同步 | 既有收敛测试即可暴露（缺省即 drift） |
+| 3 | §8.7 第 6 项落点缺 `managed_config` 归属 | `Capabilities(modelProvider).Reason` 补"归属未决"与 `Managed: fleet` 说明 | 本表与 §8.7 |
+| 4 | `MergeManaged` 对非 map 受管值静默跳过 | 改为显式报错（与 default 分支口径一致） | 代码路径 + 既有 `TestManagedFilesAndMergeManagedRollback` |
+| 5 | `GROK_*` 环境变量层会压过用户层 | 记入 `Capabilities(modelProvider).Reason` 未验证清单与 §8.7 第 8 项 | 文档 |
+| 6 | 表内新键插在尾部空行之后；fixture 措辞 | 新键插入让过尾部空行；§8.1 措辞改为"= §3.2 记录的代码块形状" | 黄金文件（含空行形态） |
+| 7 | 重复小工具已是第 4 份 | 按批次一 §7 已登记的"下沉未做"留给后续片，本片不夹带 | — |

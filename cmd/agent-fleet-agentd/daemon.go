@@ -10,6 +10,7 @@ import (
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/grok"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/opencode"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
@@ -78,6 +79,7 @@ func runDaemon(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	// 流水线阶段 1 显式失败，不会被静默跳过。
 	reg := adapter.NewRegistry()
 	reg.Register(codex.New())
+	reg.Register(grok.New())
 	reg.Register(omp.New())
 	reg.Register(opencode.New())
 

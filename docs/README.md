@@ -12,7 +12,7 @@
 6. [v1.1.2 复核闭合处置表](architecture-revision-resolution-v1.1.2-supplement.md)：KM-17 发现 P-1～P-15 的逐项处置、用户决策清单、前端栈变更与 FR 例外登记、文档检查记录、待确认与未验证清单。
 7. [Agent 支持矩阵与验收要求](agent-support-matrix.md)：八个支持目标的身份与能力边界；本版补充**批次一 / 批次二**的接入顺序。
 8. [批次一适配器：接入前确认、逐家族验收与范围决策](adapters-batch-1.md)：KM-24 交付记录——Codex / OMP / OpenCode 的接入前确认与验收 5 项、ZCode 范围决策、未验证清单、契约缺口。
-9. [批次二适配器：四家族接入前确认与切片规划](adapters-batch-2.md)：KM-32 交付记录（本片不改产品代码）——Claude / DeepSeek Harness / Grok / Hermes 的接入前确认 7 项与逐家族证据、受管字段与所有权边界、接入可行性结论（可接入 / 需用户裁决）、切片结构与建议顺序、未验证清单、契约缺口。
+9. [批次二适配器：四家族接入前确认与切片规划](adapters-batch-2.md)：KM-32 交付记录（本片不改产品代码）——Claude / DeepSeek Harness / Grok / Hermes 的接入前确认 7 项与逐家族证据、受管字段与所有权边界、接入可行性结论（可接入 / 需用户裁决）、切片结构与建议顺序、未验证清单、契约缺口；**§8 为片 A（Grok 适配器，KM-33）的逐家族验收记录**。
 10. [Web UI：路由、状态呈现与契约缺口](web-ui.md)：KM-25 交付记录——`web/` 工程（Svelte + TypeScript + Vite + shadcn-svelte，FR-14.4）、SSE 事件枢纽（`GET /api/v1/events`，FR-14.1/14.2）、FR-14.5 四组状态呈现的落点、本片发现的后端契约缺口与未验证清单。
 
 统计断言脚本：[`tools/verify-architecture-stats.py`](tools/verify-architecture-stats.py)（文档级，无外部依赖）：校验 FR 计数（95 条 / P0 94 / P1 1）、§2.8 每行 15 列合计与逐列相加、§18 与附录声明一致、以及"96/70/+26"无现行残留。运行方式：`python3 docs/tools/verify-architecture-stats.py docs/agent-fleet-architecture-v1.1.2.md`。
