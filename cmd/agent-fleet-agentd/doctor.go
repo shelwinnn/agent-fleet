@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/claude"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/grok"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
@@ -126,6 +127,7 @@ func describeLock(lock *reconciler.ExecutionLock) (string, map[string]any, error
 // adapterFamilies 列出本地已注册家族（诊断用；控制面零改动的注册表）。
 func adapterFamilies() []string {
 	reg := adapter.NewRegistry()
+	reg.Register(claude.New())
 	reg.Register(codex.New())
 	reg.Register(grok.New())
 	reg.Register(omp.New())

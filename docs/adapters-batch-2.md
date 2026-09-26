@@ -738,3 +738,202 @@ rules/skills 也一并停写——宁可可见地停下，也不要每轮写入�
 | 5 | `GROK_*` 环境变量层会压过用户层 | 记入 `Capabilities(modelProvider).Reason` 未验证清单与 §8.7 第 8 项 | 文档 |
 | 6 | 表内新键插在尾部空行之后；fixture 措辞 | 新键插入让过尾部空行；§8.1 措辞改为"= §3.2 记录的代码块形状" | 黄金文件（含空行形态） |
 | 7 | 重复小工具已是第 4 份 | 按批次一 §7 已登记的"下沉未做"留给后续片，本片不夹带 | — |
+
+---
+
+## 9. 片 B：Claude 适配器逐家族验收记录（KM-34）
+
+本片交付批次二第 2 片：接入 Claude（可执行 `claude`，Anthropic Claude Code）适配器。
+沿用批次一范式（新增 `internal/agentlocal/adapter/claude` + 注册，**控制面零改动**）。
+基线为 `main` = `e76a1d1`（PR #13 已合并，§8 已在 `main`），因此按 KM-34 的开工须知把
+验收记录追加为 §9 及之后（不另建片级文档）。**本片全程不触碰真实 `~/.claude` 与
+`~/.claude.json`**：所有测试用 `t.TempDir()` 作为 HOME 根，Probe/Doctor/ManagedSettingsDir
+一律注入桩，绝不执行真实二进制、绝不读真实 `/etc/claude-code`（护栏 #12）。
+
+### 9.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/claude/`：`Adapter` 8 方法（`ID`/`Capabilities`/`Validate`/`Detect`/`Inventory`/`Plan`/`Apply`/`HealthCheck`）+ `ManagedFiles`/`ExtractManaged`/`MergeManaged` |
+| 注册（3 处，跟随现状） | `cmd/agent-fleet-agentd/daemon.go:82`、`oneshot.go:342`、`doctor.go:130` 各一处 `reg.Register(claude.New())`。片 A 未收敛，本片不夹带该重构 |
+| 写 kit | JSON 整树重序列化（读→只改受管键→`MarshalIndent`→写后重解析→`kit.AtomicWrite`）落在 claude 包内；软链写穿直接复用批次一 `kit.AtomicWrite` 的 `resolveWritePath`（批次一复核轮修复 #3），rules/skills 复用 `kit.WriteManagedBlock`/`kit.EnsureSkillLink`。**未新增共享 kit**（重复项已在评论上报，见 §9.8） |
+| fixture | `internal/agentlocal/adapter/claude/testdata/settings.json`：**= §1.2 记录的本机真实形状**（顶层 `env`/`model`/`statusLine`/`enabledPlugins` 四键；`env` 内含必须未托管的凭据键位，值全部为占位符）。黄金文件 `testdata/settings.after.json` 供逐字节比对（含尾换行）。`CLAUDE.md` 软链与 `skills/` 软链集合由 fixture 测试构造并断言（软链不宜提交为仓库对象） |
+| 测试 | `internal/agentlocal/adapter/claude/claude_test.go`（矩阵 5 项 + 更高层覆盖 + 回归，全部临时 HOME） |
+| 注册实测 | `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → `"adapters": ["claude","codex","grok","omp","opencode"]` |
+
+### 9.2 受管面与所有权（实现口径）
+
+- `~/.claude/settings.json`（JSON 整树重序列化）
+  - `model`（string；官方 `### model`，优先级 `--model` > `ANTHROPIC_MODEL` > settings）
+  - `env.ANTHROPIC_BASE_URL`（**嵌套键级所有权**：`env` 下其余键逐键保留）
+  - **绝不读、绝不写、绝不入期望状态/投影/fixture 的键**：`env.ANTHROPIC_AUTH_TOKEN`
+    及其他 `env` 键、`statusLine`、`enabledPlugins`、`permissions`、`hooks`、`apiKeyHelper`、
+    `availableModels` 等。本机 `env` 实测有 4 键（`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
+    `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `API_TIMEOUT_MS`）——**只记录键名，凭据值全程未读取**。
+- `~/.claude/CLAUDE.md`：rules 受管标记块（FR-5.1）；**本机该路径是软链**
+  （`-> ~/.config/plexus/personal/rules/global.md`），原子写必须写穿，块外逐字节保留。
+- `~/.claude/skills/<name>`：Skill 软链（FR-6.3）；**本机该目录 40+ 条目全部是软链**
+  （`-> ../../.agents/skills/<name>`），Fleet 只管理自己点名的条目，缓存未物化时显式失败。
+- **完全不写**：`~/.claude.json`（应用自持活状态文件）；`managed-settings.json` 只读（见 §9.6）。
+- 凭据边界：归一化 `provider.apiKeyEnv` 非空时 `Validate` 显式拒绝（见 §9.4 第 2 项）。
+
+### 9.3 本机实测补证（未读凭据值）
+
+```
+$ claude --version
+2.1.270 (Claude Code)
+
+$ claude doctor            # 只读
+Claude Code doctor
+
+Running: npm-global (2.1.270)
+Commit: 97ecbf7abeb4
+Platform: linux-x64
+Managed settings (remote): not fetched — not available with a custom ANTHROPIC_BASE_URL
+Organization policy: not fetched with a custom ANTHROPIC_BASE_URL
+...
+
+$ ls -la ~/.claude/CLAUDE.md
+lrwxrwxrwx ... /home/shelwin/.claude/CLAUDE.md -> /home/shelwin/.config/plexus/personal/rules/global.md
+
+$ ls -la ~/.claude/skills/          # 全部为软链
+ask-matt -> ../../.agents/skills/ask-matt
+codebase-design -> ../../.agents/skills/codebase-design
+...
+
+$ python3 -c '<只打印键与类型>'      # ~/.claude/settings.json
+top keys: ['env', 'model', 'statusLine', 'enabledPlugins']
+env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'API_TIMEOUT_MS']
+```
+
+- **`claude doctor` 的 `Running:` 行不是第 1 行**（实测第 1 行是 `Claude Code doctor`，空行后才是
+  `Running: ...`）：解析器逐行扫描该形态，而非取首行；这一点写入 §9.7 第 1 项。
+- 两行托管设置/组织策略均为 `not fetched ...` → 本机**无**远程层（远程信号的反向对照 fixture 即此形态）。
+- 本机 `/etc/claude-code/` **不存在**（文件层更高配置未部署），故文件层覆盖由 fixture 构造验证。
+
+### 9.4 逐家族验收 5 项（矩阵口径）
+
+1. **身份与兼容性**：`TestDetectDistinguishesMissingFromUnparseable`——已装/未装/版本不可解析
+   三态可区分（程序缺失 `Installed=false` 且非错误；形态不符显式报错）。
+   `TestVersionProbeFallsBackToDoctor`——`--version` 形态不符时回退 `claude doctor` 的
+   `Running: ...` 行；两条路径都不符时显式报错。非 linux → 阶段 1 拒绝。
+2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent`——以本机真实
+   `settings.json` 形状为输入，未托管顶层键（`statusLine`/`enabledPlugins`）与 **`env` 内未托管键**
+   逐键保留，受管键到位，重复 reconcile 无变更。`TestMergeWriteMatchesGoldenBytes`——整份
+   `settings.json` 与 `testdata/settings.after.json` **逐字节**比对（含尾换行）。
+   `TestDriftOnlyFromManagedFields`——受管 `model`/受管端点各自触发 drift；未托管顶层改动与
+   **同一 `env` 对象内的未托管键改动**都不误报。`TestValidateRejectsUnverifiedBeforeWrite` +
+   `TestValidateRejectsUnparseableSettings`——MCP 请求、非空 `apiKeyEnv`、缺 endpoint、非法
+   skill 名、非 linux、既有配置不可解析、`env` 非对象、更高层文件不可解析，全部在**任何写入之前**
+   拒绝且零写入产物。复核 B1 追加 `TestTraversalSkillNamesAreRejectedBeforeWrite`——skill 名
+   `"."`/`".."`（恰好匹配 `safeName`）在 `Validate` 被拒且 `~/.claude` 未被创建，`Apply`
+   纵深防御同样拒绝（见 §9.10）。
+3. **生命周期**：`TestDesiredScopedProjection`（未点名即不管理、绝不 drift；点名即 drift）、
+   `TestSkillLinksAreSymlinkSetAndIdempotent`。安装/升级不在片内：
+   `TestApplyVersionMismatchFailsExplicitly` 版本不匹配显式失败，不谎报成功。
+4. **恢复与一致性**：`TestManagedFilesAndMergeManagedRollback`——`ManagedFiles` 两条
+   （`settings.json`、`CLAUDE.md`）；`ExtractManaged` 只提取 `model` 与 `env.ANTHROPIC_BASE_URL`
+   （**`ANTHROPIC_AUTH_TOKEN` 绝不进备份**），未知受管键让 `MergeManaged` 显式失败；
+   受管键级回退保留未托管的 `env` 凭据键与其余顶层键。`TestRulesManagedBlockPreservesUserContentAndRollback`、
+   `TestManagedBlockWritePreservesSymlink`（**软链写穿**，护栏 #3）、`TestSkillLinkRequiresMaterializedArtifact`。
+5. **验收记录**：本节；§1.5 未验证项逐条落点见 §9.7。
+
+### 9.5 MCP 裁决 (d) 的落地
+
+- `Capabilities(mcp) = unsupported`，`Reason` 记录 KM-32 §1.4 的四选项结论与依据
+  （`~/.claude.json` 为应用自持活状态文件、无外部写入协议；`.mcp.json` 需要契约里不存在的
+  project root 入参且未信任目录停在 `Pending approval`；`claude mcp add -s user` 属新形态）。
+- `Validate` 经 `adapter.CheckCapabilities` 在**任何写入之前**拒绝 MCP 请求；
+  `TestValidateRejectsUnverifiedBeforeWrite` 断言消息为 `capability "mcp" is unsupported`
+  且 settings/skills 零写入产物。`TestMCPDeclarationIsUnsupported` 锁定声明。
+- `claude mcp list` 会连接 MCP server，本片不把它用作离线健康检查；健康检查只用
+  `claude --version` + `claude doctor`（均只读）。
+
+### 9.6 更高配置层：可区分的健康态（§1.4 / §6 缺口 3）
+
+**文件层**：`managed-settings.json`（Linux 为 `/etc/claude-code/`，macOS
+`/Library/Application Support/ClaudeCode/`，Windows `C:\Program Files\ClaudeCode\`）在层序上
+压过用户 `settings.json` 且不可覆盖；官方另支持 `managed-settings.d/*.json` drop-in 片段，
+按字母序合并（后者覆盖前者）。适配器只读该层，**不纳入受管写入范围**。
+
+**判据**：只有"该层确实设了 `model` 或 `env.ANTHROPIC_BASE_URL`、且值不同于期望"才算覆盖；
+同值不算；空文件/占位文件不算（`TestEmptyManagedSettingsIsNotAnOverride`、
+`TestManagedSettingsSameValueIsNotAnOverride`）。片段合并由
+`TestManagedSettingsFragmentsMergeAlphabetically` 锁定。
+
+**行为（沿用 §8.6 跨片口径）**：只要**任一**受管键被覆盖，`Plan` 一律返回**空计划**（整片零写入）、
+`HealthCheck` 返回 `*HigherLayerOverrideError`（点名键、层、生效值与期望值）。流水线因此是
+"一次干净、零写入、可区分的失败"，不产生备份/回滚，也不会每轮写+回滚。
+
+**远程/服务端层**：admin console / MDM plist / Windows registry 的生效值适配器读不到。
+本片用 `claude doctor` 的 `Managed settings (remote):` / `Organization policy:` 两个固定前缀行做
+**保守信号**：只要该行的措辞不是"未获取/不可用"之类否定形态，就报"被覆盖、值不可读"
+（`TestRemoteManagedSettingsAreReported`）；本机实测的 `not fetched ...` 形态不误判
+（`TestRemoteNotFetchedIsNotAnOverride`）。误判方向是**停写**而非假装收敛（未验证项见 §9.7 第 6 项）。
+
+**doctor 不可用**（复核 MINOR 2 修正）：`claude doctor` 探测失败时，远程/服务端层
+**不可判定**；原实现吞掉该错误会让信号静默消失、把被远程层 pin 的键报成收敛，方向与本节的
+"误判即停写"相反。现按"不可判定"显式上报：期望点名的 `model`/provider 键进观测投影并带
+`overriddenBy`、`Plan` 整片空（`undeterminableRemoteOverrides`）；`HealthCheck` 本身对 doctor
+失败显式失败。未点名受管 config 时不冻结（无可覆盖对象）
+（`TestUnavailableDoctorReportsUndeterminableRemoteLayer`）。
+
+- `TestHigherLayerManagedSettingsOverrideIsDistinguishable`：真实 pin 时观测投影带 `overriddenBy`、
+  生效值替换为 pin 值（**不报 Reconciled**）、`Plan` 整片空、`HealthCheck` 可区分失败。
+- `TestManagedSettingsBaseURLOverrideIsReported`：`env.ANTHROPIC_BASE_URL` 被覆盖同样可区分。
+- `TestHigherLayerManagedSettingsOverrideIsDistinguishable` 同时断言 **pin 期间 rules 停写**
+  （空计划 Apply 零写入），覆盖 §8.6 的循环场景。
+
+### 9.7 §1.5 未验证项逐条落点
+
+| # | §1.5 项 | 落点 |
+|---|---|---|
+| 1 | macOS / Windows / WSL 无实测 | `Capabilities(version).Reason` + 各能力 `Reason` 的未验证清单；`Validate` 对非 linux 明确拒绝 |
+| 2 | 安装/升级未纳入 | `Capabilities(version).Reason`（探测 supported；`Apply(version)` 不匹配显式失败） |
+| 3 | `~/.claude.json` 并发写行为/锁未验证 | `Capabilities(mcp).Reason`（不作为写入面的理由 + 未验证声明）；`~/.claude.json` 全程不读不写 |
+| 4 | `env.ANTHROPIC_BASE_URL` 与 shell 导出优先级无本机交互验证 | `Capabilities(modelProvider).Reason` 未验证清单 |
+| 5 | `apiKeyHelper` ↔ `apiKeyEnv` 映射未设计 | `Capabilities(modelProvider).Reason` + `Validate` 对非空 `apiKeyEnv` 显式拒绝（unverified）；§9.8 第 1 项作为契约缺口上报 |
+| 6 | Skills 软链幂等性 | `Capabilities(skills).Reason` + `TestSkillLinksAreSymlinkSetAndIdempotent`（重复 reconcile 零变更）后声明 supported |
+| 7 | `availableModels` / `enforceAvailableModels` 族键范围、`managed-settings.json` 归属 | `Capabilities(modelProvider).Reason`（存在但不纳入受管范围；归属留待范围决策）+ §9.6 |
+| 8 | **超出 §1.5**：`ANTHROPIC_MODEL` 环境变量层 | 官方 precedence 明确 `--model` > `ANTHROPIC_MODEL` > settings.model；本片不判定该层 → 记入 `Capabilities(modelProvider).Reason` 未验证清单 |
+| 9 | **超出 §1.5**：`claude doctor` 文案解析 | §9.3（`Running:` 非首行 → 逐行扫描；`Capabilities(version).Reason` 同步为"输出中的 `Running:` 行"，复核 MINOR 1）+ §9.6（远程行按固定前缀与否定词解析，未验证，误判方向为停写） |
+| 10 | **超出 §1.5**：`claude doctor` 不可用时的远程层判定 | §9.6 的 doctor 不可用分支：按"不可判定"显式上报（复核 MINOR 2）+ `TestUnavailableDoctorReportsUndeterminableRemoteLayer` |
+
+### 9.8 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**，与 §8.8 第 1 项同源；本片因裁决 (d)
+   不实现 MCP，故不受影响，但缺口仍在。
+2. **归一化 provider 契约携带 `apiKeyEnv`，而 Claude 没有承载"环境变量名"的设置键**：
+   凭据由用户登录态或 `apiKeyHelper` 解决，`apiKeyEnv` → `apiKeyHelper` 的映射未设计。
+   本片按矩阵"未验证即拒绝"显式失败；需要后续设计片给出映射，或扩展 provider 契约表达
+   "凭据由用户自理"。
+3. **"更高配置层"三态未定义**（同 §8.8 第 2 项）：本片把 Claude 表达为
+   "观测投影带 `overriddenBy` + `Plan` 整片空 + `HealthCheck` 可区分失败"；只读 reconcile 仍会把它
+   呈现为 drift（无法既不报 drift 又不报 Reconciled）。
+4. **`HigherLayerOverrideError` / `overriddenBy` 标记与片 A（grok）是第二份实现**：
+   建议按批次一复核轮先例下沉 `kit`；本片按批次一 §7"下沉未做"登记，不夹带跨片重构。
+5. **JSON 读/写工具是第二份**（opencode 私有 JSONC 实现 vs claude 纯 JSON 实现）：
+   同样登记为"下沉未做"；opencode 支持 JSONC 注释、Claude 官方为无注释 JSON，语义并不完全重合。
+6. **远程/服务端托管设置行的文案解析未验证**：只按两个固定前缀行与几个否定词判定，
+   多版本文案变化可能误判（误判方向为保守停写）。
+7. **`managed-settings.d/*.json` 的合并顺序**按官方文档实现为"字母序后者覆盖"，
+   但未在本机实测（本机 `/etc/claude-code/` 不存在）。
+
+### 9.9 本片自身验证
+
+- `go build ./...`、`go vet ./internal/agentlocal/... ./cmd/...` 通过。
+- `go test ./...` 全绿（含 claude 包 24 个测试函数与既有五家族回归）。
+- `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → 注册表含 `claude`。
+
+### 9.10 核查退回（B1 + MINOR 1/2）的修复记录（2026-09-26，复核轮）
+
+核查在 `36a3ee7` 上给了 1 项阻断与 2 项 MINOR（其余独立复核项全部通过）。逐条修复：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| B1 | skill 名 `"."`/`".."` 未被拦住：`safeName` 恰好放过这两个字面量，`filepath.Join` 会把它 Clean 成 `~/.claude`（`".."`）或 `~/.claude/skills`（`"."`），`Apply` 经 `kit.EnsureSkillLink` 把配置根换成指向技能缓存的软链，后续写入再经 `resolveWritePath` **写穿**软链落进共享缓存（护栏 #3） | 新增 `validSkillName`（`safeName` **且** 不是 `"."`/`".."`，对齐 §4.7 第 1 条 `bundle.ValidateName`）：`Validate` 对技能名显式拒绝；`Apply` 在调用 `EnsureSkillLink` 前再挡一次（纵深防御，覆盖绕过 Validate 的陈旧/外部计划） | `TestTraversalSkillNamesAreRejectedBeforeWrite`（`.` 与 `..` 两个子用例）：`Validate` 返回错误、`Apply` 返回错误，且两次都断言 `~/.claude` **未被创建** |
+| 1 | `Capabilities(version).Reason` 写"回退 doctor **首行**"，与实现（逐行扫描）及 §9.3/§9.7 自相矛盾，且该字符串随能力协商上报控制面 | 改为"回退 `claude doctor` **输出中的** `Running: …` 行"；`Evidence` 同步为"输出中的 `Running: …` 行"；未验证文案"解析只按首行"改为"只按 `Running:` 行" | 文档/声明一致性（`go vet` + 人工对照 §9.3） |
+| 2 | `higherLayerOverrides` 吞掉 doctor 探测错误：doctor 不可用时远程层信号静默消失，`Inventory` 可能把被远程 pin 的键报成收敛，方向与 §9.6"误判即保守停写"相反 | 改为**显式上报"远程层不可判定"**：`claude doctor` 失败时 `undeterminableRemoteOverrides` 把期望点名的 `model`/provider 键标为覆盖（层名注明 doctor 不可用），`Plan` 整片空；无受管 config 键时不冻结。`HealthCheck` 仍对 doctor 失败显式失败。分支写入 §9.6 与 §9.7 第 10 项 | `TestUnavailableDoctorReportsUndeterminableRemoteLayer`：marker 存在、`Plan` 空、`HealthCheck` 显式失败（消息含 `claude doctor`）；反向对照：无受管 config 时无 marker |
+
+**修复后自查**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿（claude 包 24 个测试函数）。
+B1 的复现脚本已按核查给定的形状（`Validate(skill="..")` → `Apply` → `Lstat(~/.claude)`）转为永久回归。
