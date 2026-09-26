@@ -41,9 +41,9 @@ func ParseTOML(doc string) (map[string]any, error) {
 	return out, nil
 }
 
-// TOMLPatch 描述一次行级手术。四类操作按 Remove → Scalars → Keys → Tables 的
-// 顺序应用（先删除过期表，再写根区标量、既有表内的受管键，最后整表写入/新建；
-// Keys 先于 Tables 保证父表先于其子表出现，避免写出"父表在子表之后"的非法序）。
+// TOMLPatch 描述一次行级手术。操作按 Remove → RemoveKeys → Scalars → Keys → Tables
+// 的顺序应用（先删除过期表与表内点号键，再写根区标量、既有表内的受管键，最后整表
+// 写入/新建；Keys 先于 Tables 保证父表先于其子表出现，避免写出"父表在子表之后"的非法序）。
 type TOMLPatch struct {
 	// Scalars 只改根区（第一个表头之前）的同名键。
 	Scalars map[string]any
@@ -54,19 +54,25 @@ type TOMLPatch struct {
 	// Remove 删除这些表的表头与其表体（直到下一个表头）。用于清理不再受管的
 	// 子表（如 Grok 去掉 envRefs 后的 [mcp_servers.<name>.env]）。按表名精确匹配。
 	Remove []string
+	// RemoveKeys 删除指定表**表体内**匹配前缀的键行。TOML 允许把子表写成点号键
+	// （`env.TOKEN = "..."` 属于 `[mcp_servers.x]` 表体，没有自己的表头），只按表头
+	// Remove 删不掉，故需要这一档（批次二片 A 复核 B2）。
+	RemoveKeys map[string][]string
 }
 
-// PatchTOML 应用行级手术，返回新文档；未受管内容逐字节保留。
+// PatchTOML 应用行级手术，返回新文档；未受管内容逐字节保留（含原文尾换行）。
 func PatchTOML(doc string, patch TOMLPatch) (string, error) {
-	if len(patch.Scalars) == 0 && len(patch.Tables) == 0 && len(patch.Keys) == 0 && len(patch.Remove) == 0 {
+	if len(patch.Scalars) == 0 && len(patch.Tables) == 0 && len(patch.Keys) == 0 &&
+		len(patch.Remove) == 0 && len(patch.RemoveKeys) == 0 {
 		return doc, nil
 	}
 	if _, err := ParseTOML(doc); err != nil {
 		return "", fmt.Errorf("existing document does not parse: %w", err)
 	}
+	trailingNewline := strings.HasSuffix(doc, "\n")
 	lines := scanLines(doc)
 
-	// 0) 删除过期表（表头 + 表体，直到下一个表头）。
+	// 0a) 删除过期表（表头 + 表体，直到下一个表头）。
 	if len(patch.Remove) != 0 {
 		remove := map[string]bool{}
 		for _, name := range patch.Remove {
@@ -84,6 +90,11 @@ func PatchTOML(doc string, patch TOMLPatch) (string, error) {
 			kept = append(kept, l)
 		}
 		lines = kept
+	}
+
+	// 0b) 删除表体内的点号键（如 [mcp_servers.x] 内的 `env.TOKEN = "..."`）。
+	for _, name := range sortedKeys(patch.RemoveKeys) {
+		lines = removeTableKeys(lines, name, patch.RemoveKeys[name])
 	}
 
 	// 1) 根区标量。
@@ -107,7 +118,64 @@ func PatchTOML(doc string, patch TOMLPatch) (string, error) {
 			return "", err
 		}
 	}
-	return strings.Join(lineTexts(lines), "\n"), nil
+	out := strings.Join(lineTexts(lines), "\n")
+	// 追加/删除表会经 TrimSuffix 再重扫，可能丢掉原文尾换行；此处按原文恢复，
+	// 使"未托管内容逐字节保留"在最后一个字节也成立（复核 MINOR 1）。
+	if trailingNewline && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out, nil
+}
+
+// removeTableKeys 删除表 name 表体内匹配 keyPrefixes 的键行（前缀按点号分段匹配：
+// 前缀 `env` 命中 `env = …`、`env.TOKEN = …`、`"env".TOKEN = …`，不命中 `environment`）。
+func removeTableKeys(lines []tomlLine, name string, keyPrefixes []string) []tomlLine {
+	if len(keyPrefixes) == 0 {
+		return lines
+	}
+	start := -1
+	for i, l := range lines {
+		if l.header == name && !l.arrayHeader {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return lines
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if lines[i].header != "" {
+			end = i
+			break
+		}
+	}
+	kept := append([]tomlLine{}, lines[:start+1]...)
+	for _, l := range lines[start+1 : end] {
+		if lineHasKeyPrefix(l.text, keyPrefixes) {
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return append(kept, lines[end:]...)
+}
+
+func lineHasKeyPrefix(text string, prefixes []string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return false
+	}
+	eq := strings.Index(trimmed, "=")
+	if eq < 0 {
+		return false
+	}
+	key := strings.Trim(strings.TrimSpace(trimmed[:eq]), `"'`)
+	for _, prefix := range prefixes {
+		if key == prefix || strings.HasPrefix(key, prefix+".") {
+			return true
+		}
+	}
+	return false
 }
 
 // patchRootScalars 只改根区（第一个表头之前）的同名标量行；不存在则在根区末尾插入。
@@ -192,8 +260,14 @@ func patchTableKeys(lines []tomlLine, name string, keys map[string]any) ([]tomlL
 			}
 		}
 		if !replaced {
-			insert := append([]tomlLine{{text: text}}, lines[end:]...)
-			lines = append(lines[:end], insert...)
+			// 插到表体末尾，但让过尾部空行（区段之间通常留一个空行，新键应落在
+			// 已有键之后、空白分隔之前，排版不被打乱）。
+			at := end
+			for at > start+1 && strings.TrimSpace(lines[at-1].text) == "" {
+				at--
+			}
+			insert := append([]tomlLine{{text: text}}, lines[at:]...)
+			lines = append(lines[:at], insert...)
 		}
 	}
 	return lines, nil

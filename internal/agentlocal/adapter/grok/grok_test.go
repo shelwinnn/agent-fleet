@@ -67,6 +67,25 @@ func inspectWithLayers(roles ...string) InspectProbe {
 	}
 }
 
+// inspectInHomeRequirements 模拟真实 `grok inspect --json` 对 home 内 requirements.toml
+// （含空文件/仅注释）的报法：role=requirements、path 就在 $GROK_HOME 内、note=empty。
+// 真实二进制实测（1.0.30）即此形态；旧桩永远喂不出它（复核 B1）。
+func inspectInHomeRequirements() InspectProbe {
+	return func(_ context.Context, home string) (string, error) {
+		return `{"grokVersion":"1.0.30","configSources":{"layers":[` +
+			`{"role":"user","path":"` + filepath.Join(home, ".grok", "config.toml") + `"},` +
+			`{"role":"requirements","path":"` + requirementsPath(home) + `","note":"empty"}]}}`, nil
+	}
+}
+
+// inspectLayerPath 模拟只报一个指定路径的 requirements 层。
+func inspectLayerPath(path string) InspectProbe {
+	return func(_ context.Context, _ string) (string, error) {
+		return `{"grokVersion":"1.0.30","configSources":{"layers":[` +
+			`{"role":"requirements","path":"` + path + `"}]}}`, nil
+	}
+}
+
 func newTestAdapter(version string) *Adapter {
 	return &Adapter{Probe: probeVersion(version), Inspect: inspectUnavailable}
 }
@@ -780,10 +799,8 @@ func TestHigherLayerRequirementPinIsDistinguishable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range changes {
-		if c.Key == keyModel {
-			t.Fatalf("pinned key must not be planned for a futile user-layer write: %+v", changes)
-		}
+	if len(changes) != 0 {
+		t.Fatalf("any override must yield an empty family plan (复核 B3): %+v", changes)
 	}
 	err = a.HealthCheck(ctx, home, desired)
 	var over *HigherLayerOverrideError
@@ -890,5 +907,208 @@ func TestApplyVersionMismatchFailsExplicitly(t *testing.T) {
 		From: "1.0.30", To: "1.0.31"}})
 	if err == nil || !strings.Contains(err.Error(), "command installer") {
 		t.Fatalf("version mismatch must fail explicitly, got %v", err)
+	}
+}
+
+// TestEmptyRequirementsLayerIsNotAnOverride（复核 B1）：真实 `grok inspect --json`
+// 对**空文件**会报一个 role=requirements、path 就在 $GROK_HOME 内的层（note=empty）。
+// 空层必须判为"没有覆盖"：不产生假 drift、不整片停写、健康检查通过；而真正的用户层
+// drift 仍照常排变更（证明不是"因为不再判定覆盖而全都放行"）。
+func TestEmptyRequirementsLayerIsNotAnOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{"empty-file", ""},
+		{"comment-only", "# placeholder written by the deployment tool\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			ctx := context.Background()
+			writeFile(t, filepath.Join(home, ".grok", "config.toml"),
+				"[models]\ndefault = \"fleet\"\n[model.fleet]\nmodel = \"grok-4.6\"\n")
+			writeFile(t, filepath.Join(home, ".grok", "requirements.toml"), tc.content)
+			a := &Adapter{Probe: probeVersion("1.0.30"), Inspect: inspectInHomeRequirements()}
+			desired := adapter.AgentDesiredState{Family: ID, Version: "1.0.30",
+				Config: json.RawMessage(`{"model":"grok-4.6"}`)}
+
+			inv, err := a.Inventory(ctx, home, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := inv.ManagedProjection[overrideMarkerKey]; ok {
+				t.Fatalf("an empty requirements layer must not be reported as an override: %+v", inv.ManagedProjection)
+			}
+			if inv.DesiredProjectionDigest != inv.ObservedProjectionDigest {
+				t.Fatalf("empty requirements layer must converge: %+v", inv.ManagedProjection)
+			}
+			if cs, err := a.Plan(ctx, home, desired, inv); err != nil || len(cs) != 0 {
+				t.Fatalf("empty requirements layer must not pause writes: %+v err=%v", cs, err)
+			}
+			if err := a.HealthCheck(ctx, home, desired); err != nil {
+				t.Fatalf("health must pass with an empty requirements layer: %v", err)
+			}
+
+			// 反向对照：真正的用户层 drift 仍必须排变更（不是"不再判定覆盖"的放行）。
+			writeFile(t, filepath.Join(home, ".grok", "config.toml"), "[models]\ndefault = \"fleet\"\n")
+			drifted, err := a.Inventory(ctx, home, desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cs, err := a.Plan(ctx, home, desired, drifted)
+			if err != nil || len(cs) == 0 {
+				t.Fatalf("real user-layer drift must still be planned: %+v err=%v", cs, err)
+			}
+		})
+	}
+}
+
+// TestDottedKeyEnvIsRemovedAndConverges（复核 B2）：TOML 允许把 env 写成表内点号键
+// （`env.TOKEN = "..."`），只按表头 Remove 删不掉。期望不再点名 env 时必须清掉它并
+// 收敛；期望点名 envRefs 时也必须先清点号键再写子表，不能留下永不收敛的残留。
+func TestDottedKeyEnvIsRemovedAndConverges(t *testing.T) {
+	ctx := context.Background()
+	dotted := `[mcp_servers.tools]
+command = "mcp-server"
+env.TOKEN = "${SERVICE_TOKEN}"
+tool_timeout_sec = 12
+`
+	a := newTestAdapter("1.0.30")
+
+	// 场景 1：期望不点名 env → 点号键必须被清掉。
+	home := t.TempDir()
+	path := filepath.Join(home, ".grok", "config.toml")
+	writeFile(t, path, dotted)
+	desired := adapter.AgentDesiredState{Family: ID, Version: "1.0.30",
+		MCP: map[string]adapter.MCPEntry{"tools": {Command: "mcp-server"}}}
+	inv, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv.DesiredProjectionDigest == inv.ObservedProjectionDigest {
+		t.Fatal("a no-longer-desired dotted env key must be drift")
+	}
+	if err := a.Apply(ctx, home, desired, mustPlan(t, a, ctx, home, desired, inv)); err != nil {
+		t.Fatal(err)
+	}
+	text := readFile(t, path)
+	if strings.Contains(text, "env.TOKEN") {
+		t.Fatalf("dotted env key was not removed:\n%s", text)
+	}
+	if !strings.Contains(text, "tool_timeout_sec = 12") {
+		t.Fatalf("unmanaged key lost:\n%s", text)
+	}
+	inv2, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv2.DesiredProjectionDigest != inv2.ObservedProjectionDigest {
+		t.Fatalf("dotted env removal did not converge: %+v", inv2.ManagedProjection)
+	}
+	if cs, err := a.Plan(ctx, home, desired, inv2); err != nil || len(cs) != 0 {
+		t.Fatalf("second reconcile must be a no-op: %+v err=%v", cs, err)
+	}
+
+	// 场景 2：期望点名 envRefs → 点号键必须先清掉，再写成子表并收敛。
+	home2 := t.TempDir()
+	path2 := filepath.Join(home2, ".grok", "config.toml")
+	writeFile(t, path2, dotted)
+	withEnv := adapter.AgentDesiredState{Family: ID, Version: "1.0.30",
+		MCP: map[string]adapter.MCPEntry{"tools": {Command: "mcp-server",
+			EnvRefs: map[string]string{"TOKEN": "SERVICE_TOKEN"}}}}
+	inv3, err := a.Inventory(ctx, home2, withEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home2, withEnv, mustPlan(t, a, ctx, home2, withEnv, inv3)); err != nil {
+		t.Fatalf("apply over a dotted env key: %v", err)
+	}
+	inv4, err := a.Inventory(ctx, home2, withEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv4.DesiredProjectionDigest != inv4.ObservedProjectionDigest {
+		t.Fatalf("envRefs over a dotted env key did not converge: %+v", inv4.ManagedProjection)
+	}
+	if cs, err := a.Plan(ctx, home2, withEnv, inv4); err != nil || len(cs) != 0 {
+		t.Fatalf("second reconcile must be a no-op: %+v err=%v", cs, err)
+	}
+}
+
+// TestPinnedFamilyStopsAllWrites（复核 B3）：被更高层覆盖时，即使同机还有 rules drift，
+// Plan 也必须返回空计划——否则流水线会写 rules → 阶段 10 健康失败 → 回滚 → 下轮重现。
+func TestPinnedFamilyStopsAllWrites(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	writeFile(t, filepath.Join(home, ".grok", "requirements.toml"), "[models]\ndefault = \"pinned-model\"\n")
+	rulesPath := filepath.Join(home, ".grok", "rules", rulesFileName)
+	writeFile(t, rulesPath, "# user rules\n")
+	a := newTestAdapter("1.0.30")
+	desired := adapter.AgentDesiredState{Family: ID, Version: "1.0.30",
+		Config: json.RawMessage(`{"model":"grok-4.6"}`),
+		Rules:  map[string]adapter.RulesEntry{"global": {Content: "fleet rules"}}}
+
+	inv, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, err := a.Plan(ctx, home, desired, inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("a pinned family must stop ALL writes, including rules/skills (复核 B3): %+v", changes)
+	}
+	// 空计划零写入：rules 文件不得被动过。
+	if err := a.Apply(ctx, home, desired, changes); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, rulesPath); strings.Contains(got, kit.BlockBegin) || strings.Contains(got, "fleet rules") {
+		t.Fatalf("empty plan must not write rules:\n%s", got)
+	}
+	err = a.HealthCheck(ctx, home, desired)
+	var over *HigherLayerOverrideError
+	if !errors.As(err, &over) {
+		t.Fatalf("expected distinguishable HigherLayerOverrideError, got %v", err)
+	}
+}
+
+// TestMergeWriteMatchesGoldenBytes（复核 MINOR 1/6）：整份 config.toml 与黄金文件
+// 逐字节比对，锁定注释、键序、空行与**尾换行**都逐字节保留。UPDATE_GOLDEN=1 时
+// 重新生成黄金文件。
+func TestMergeWriteMatchesGoldenBytes(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+	writeFile(t, filepath.Join(home, ".grok", "config.toml"), baselineConfig(t))
+	a := newTestAdapter("1.0.30")
+	desired := adapter.AgentDesiredState{
+		Family:  ID,
+		Version: "1.0.30",
+		Config:  json.RawMessage(`{"model":"grok-4.6","provider":{"endpoint":"https://api.example.com/v1","apiKeyEnv":"FLEET_GROK_KEY"}}`),
+		MCP: map[string]adapter.MCPEntry{
+			"local-tools": {Command: "/usr/local/bin/my-mcp", Args: []string{"--stdio"},
+				EnvRefs: map[string]string{"SERVICE_TOKEN": "SERVICE_TOKEN"}},
+		},
+	}
+	inv, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(ctx, home, desired, mustPlan(t, a, ctx, home, desired, inv)); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, filepath.Join(home, ".grok", "config.toml"))
+	if !strings.HasSuffix(got, "\n") {
+		t.Fatalf("trailing newline was dropped by the patch (复核 MINOR 1):\n%q", got)
+	}
+	goldenPath := filepath.Join("testdata", "config.after.toml")
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := readFile(t, goldenPath)
+	if got != want {
+		t.Fatalf("config.toml differs from golden bytes (未托管内容必须逐字节保留)\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }

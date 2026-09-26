@@ -23,9 +23,11 @@
 //
 // 更高配置层（§3.4/§6 缺口 3）：`requirements.toml` 在层序上位于用户 config.toml
 // 之后（26-config-reference.md「How to configure」第 3/6 层），其键会压过用户层。
-// Inventory 读**实际生效值**并给被覆盖的受管键打 overriddenBy 标记；Plan 不对被
-// 覆盖的键排变更；HealthCheck 返回 *HigherLayerOverrideError —— 既不报 Reconciled，
-// 也不进入"写成功→verify 失败→回滚"的反复循环。`managed_config.toml` 位于用户层
+// Inventory 读**实际生效值**并给被覆盖的受管键打 overriddenBy 标记；只要任一受管键
+// 被覆盖，Plan 返回**空计划**（整片零写入）、HealthCheck 返回
+// *HigherLayerOverrideError —— 既不报 Reconciled，也不进入"写成功→verify 失败→
+// 回滚"的反复循环；代价是被 pin 期间同机 rules/skills 也一并停写（§8.6）。
+// `managed_config.toml` 位于用户层
 // **之前**（第 2 层），且其值只在 `Managed: fleet` 的键上胜出（厂商原文："Their value
 // applies, except features.remote_fetch"），而 Fleet 只写 `Managed: user` 的键，
 // 因此它不会覆盖 Fleet 的受管键（见 fixture TestManagedConfigLayerIsNotAnOverride）。
@@ -156,8 +158,12 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			Capability: adapter.CapabilityModelProvider, State: adapter.SupportSupported,
 			VerifiedVersions: "grok 1.0.30",
 			Reason: "`[models] default` + `[model.fleet]`（model/base_url/env_key/api_backend/name），env_key 直配归一化 apiKeyEnv（只写变量名）。" +
-				"`models.default` 在厂商表中 Requirements=pin，可被 requirements.toml 压过 → 观测侧读实际生效值并给可区分健康态。" +
-				"未验证：grok inspect --json（1.0.30）不暴露生效模型值，故本片用层序文件读生效值；macOS/Windows/WSL 未实测",
+				"`models.default` 在厂商表中 Requirements=pin，可被 requirements.toml 压过 → 观测侧读实际生效值并给可区分健康态；" +
+				"被任一更高层覆盖期间本家族**整片停写**（含 rules/skills），见 docs/adapters-batch-2.md §8.6。" +
+				"未验证：grok inspect --json（1.0.30）不暴露生效模型值，故本片用层序文件读生效值；" +
+				"`GROK_*` 环境变量层（实测 GROK_DEFAULT_MODEL 会压过用户层）不在本片判定范围；" +
+				"`managed_config.toml` / `requirements.toml` 是否纳入 Fleet 受管范围未决（本片把 Fleet 受管层定位为用户层；managed_config 只在 Managed: fleet 键上胜出，Fleet 不写该类键）；" +
+				"macOS/Windows/WSL 未实测",
 			Evidence: "~/.grok/docs/user-guide/11-custom-models.md（自定义端点在 [model.<name>]，env_key 优先于内联 api_key）；" +
 				"26-config-reference.md `models.default`(pin/user)、`model.<id>.*`(yes/user)；" +
 				"本机实测（临时 GROK_HOME，未触真实 ~/.grok）`grok models` → `Default model: fleet` / `* fleet (default)`",
@@ -253,7 +259,7 @@ func (a *Adapter) Validate(ctx context.Context, home string, desired adapter.Age
 		return fmt.Errorf("agent %q: existing config is unparseable: %w", ID, err)
 	}
 	// 更高层文件必须可解析：否则无法判定生效值，宁停在阶段 1。
-	if _, err := a.readRequirements(home); err != nil {
+	if _, _, err := a.readRequirements(home); err != nil {
 		return fmt.Errorf("agent %q: %w", ID, err)
 	}
 	return nil
@@ -364,7 +370,9 @@ func (a *Adapter) desiredProjection(desired adapter.AgentDesiredState) (map[stri
 		proj["model"] = map[string]any{"default": providerID, "model": model}
 	}
 	if endpoint, keyEnv, ok := adapter.ProviderConfig(cfg); ok {
-		proj["provider"] = map[string]any{"endpoint": endpoint, "apiKeyEnv": keyEnv}
+		// api_backend/name 也是受管键：必须进投影，否则写而不可观测（用户改掉不触发 drift）。
+		proj["provider"] = map[string]any{"endpoint": endpoint, "apiKeyEnv": keyEnv,
+			"apiBackend": apiBackend, "name": providerName}
 	}
 	if len(desired.MCP) != 0 {
 		mcp := map[string]any{}
@@ -400,8 +408,10 @@ func (a *Adapter) observedProjection(home string, cfg map[string]any, desired ad
 	if _, _, ok := adapter.ProviderConfig(dcfg); ok {
 		table := tableAt(cfg, "model", providerID)
 		proj["provider"] = map[string]any{
-			"endpoint":  stringOf(table["base_url"]),
-			"apiKeyEnv": envKeyOf(table["env_key"]),
+			"endpoint":   stringOf(table["base_url"]),
+			"apiKeyEnv":  envKeyOf(table["env_key"]),
+			"apiBackend": stringOf(table["api_backend"]),
+			"name":       stringOf(table["name"]),
 		}
 	}
 	if len(desired.MCP) != 0 {
@@ -437,7 +447,8 @@ func (a *Adapter) observedProjection(home string, cfg map[string]any, desired ad
 }
 
 // Plan 比较两侧投影，逐受管键产出变更（阶段 3；空计划即幂等，FR-9.3）。
-// 被更高配置层覆盖的键不排变更：写用户层是徒劳的，排变更只会造成反复写后回滚。
+// 只要任一受管键被更高配置层覆盖，整片返回空计划（复核 B3）：写用户层是徒劳的，
+// 且同机其它受管项的写入会被阶段 10 的健康失败整轮回滚，形成每轮写+回滚的循环。
 func (a *Adapter) Plan(ctx context.Context, home string, desired adapter.AgentDesiredState, observed adapter.AgentObservedState) ([]adapter.Change, error) {
 	desiredProj, err := a.desiredProjection(desired)
 	if err != nil {
@@ -447,28 +458,29 @@ func (a *Adapter) Plan(ctx context.Context, home string, desired adapter.AgentDe
 	if observedProj == nil {
 		observedProj = map[string]any{}
 	}
-	overridden := overrideSet(observedProj)
+	if len(overrideSet(observedProj)) != 0 {
+		// 复核 B3：任一受管键被更高层覆盖即整片停写。只跳过被覆盖的键是不够的——
+		// 同机 rules/skills 的 drift 仍会触发写入，而阶段 10 的 HealthCheck 必然返回
+		// 覆盖错误 → reconciler 回滚本轮全部写入 → 下一轮重现（写→失败→回滚循环）。
+		// 空计划 + 可区分健康失败 = 一次干净、零写入、不产生备份/回滚的停机。
+		return nil, nil
+	}
 	var changes []adapter.Change
 	if desired.Version != "" && observed.Version != desired.Version {
 		changes = append(changes, adapter.Change{Family: ID, Step: "version", Key: "version",
 			From: observed.Version, To: desired.Version})
 	}
-	if !overridden[keyModel] && !projectionEqual(desiredProj["model"], observedProj["model"]) {
+	if !projectionEqual(desiredProj["model"], observedProj["model"]) {
 		changes = append(changes, adapter.Change{Family: ID, Step: "config", Key: keyModel,
 			From: observedProj["model"], To: desiredProj["model"]})
 	}
-	if !overridden[keyProvider] && !projectionEqual(desiredProj["provider"], observedProj["provider"]) {
+	if !projectionEqual(desiredProj["provider"], observedProj["provider"]) {
 		changes = append(changes, adapter.Change{Family: ID, Step: "config", Key: keyProvider,
 			From: observedProj["provider"], To: desiredProj["provider"]})
 	}
-	for _, c := range kit.DiffMapStep(ID, "mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"]) {
-		if overridden[c.Key] {
-			continue
-		}
-		changes = append(changes, c)
-	}
+	changes = append(changes, kit.DiffMapStep(ID, "mcp", "mcp.", desiredProj["mcp"], observedProj["mcp"])...)
 	changes = append(changes, kit.DiffMapStep(ID, "skills", "skill:", desiredProj["skills"], observedProj["skills"])...)
-	if !overridden[keyRules] && !projectionEqual(desiredProj["rules"], observedProj["rules"]) {
+	if !projectionEqual(desiredProj["rules"], observedProj["rules"]) {
 		changes = append(changes, adapter.Change{Family: ID, Step: "rules", Key: keyRules,
 			From: observedProj["rules"], To: desiredProj["rules"]})
 	}
@@ -546,6 +558,7 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, co
 	}
 	cfg := adapter.ConfigMap(desired)
 	keys := map[string]map[string]any{}
+	removeKeys := map[string][]string{}
 	var remove []string
 	if model, ok := cfg["model"]; ok {
 		// 默认选择器指向 Fleet 命名空间（本机实测 `grok models` 的
@@ -580,6 +593,10 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, co
 			continue
 		}
 		keys["mcp_servers."+name] = map[string]any{"command": entry.Command, "args": normalizeArgs(entry.Args)}
+		// env 可能写成子表头 [mcp_servers.x.env]，也可能写成表内点号键
+		// `env.TOKEN = "..."`（grok mcp add 一类工具如此落盘）。两种形态都要清掉，
+		// 否则期望不再点名 env 时观测侧永远非空、每轮重排同一条变更（复核 B2）。
+		removeKeys["mcp_servers."+name] = []string{"env"}
 		if len(entry.EnvRefs) != 0 {
 			keys["mcp_servers."+name+".env"] = renderEnvRefs(entry.EnvRefs)
 		} else {
@@ -587,12 +604,28 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, co
 			remove = append(remove, "mcp_servers."+name+".env")
 		}
 	}
-	out, err := kit.PatchTOML(doc, kit.TOMLPatch{Keys: keys, Remove: remove})
+	out, err := kit.PatchTOML(doc, kit.TOMLPatch{Keys: keys, Remove: remove, RemoveKeys: removeKeys})
 	if err != nil {
 		return fmt.Errorf("grok: patch config: %w", err)
 	}
-	if _, err := kit.ParseTOML(out); err != nil {
+	patched, err := kit.ParseTOML(out)
+	if err != nil {
 		return fmt.Errorf("grok: patched config does not parse, aborting write: %w", err)
+	}
+	// 写后断言受管 mcp env 已收敛（复核 B2 的显式失败安全网）：点号键/子表两种形态
+	// 任一残留都会让随后每轮 reconcile 重排同一条变更，故宁可在此显式失败。
+	for _, c := range mcpChanges {
+		name := strings.TrimPrefix(c.Key, "mcp.")
+		entry, ok := desired.MCP[name]
+		if !ok {
+			continue
+		}
+		got := envMapOf(tableAt(patched, "mcp_servers", name)["env"])
+		want := renderEnvRefs(entry.EnvRefs)
+		if !kit.ValuesEqual(got, want) {
+			return fmt.Errorf("grok: patched mcp server %q env is %v, want %v; refusing a write that will not converge",
+				name, got, want)
+		}
 	}
 	return kit.AtomicWrite(path, []byte(out), 0o600)
 }
@@ -636,6 +669,12 @@ func (a *Adapter) HealthCheck(ctx context.Context, home string, desired adapter.
 		}
 		if keyEnv != "" && envKeyOf(table["env_key"]) != keyEnv {
 			return fmt.Errorf("grok: health: [model.%s] env_key is not in place", providerID)
+		}
+		if got := stringOf(table["api_backend"]); got != apiBackend {
+			return fmt.Errorf("grok: health: [model.%s] api_backend is %q, want %q", providerID, got, apiBackend)
+		}
+		if got := stringOf(table["name"]); got != providerName {
+			return fmt.Errorf("grok: health: [model.%s] name is %q, want %q", providerID, got, providerName)
 		}
 	}
 	for name, entry := range desired.MCP {
@@ -752,8 +791,17 @@ func defaultInspect(ctx context.Context, home string) (string, error) {
 // 值不一致属普通 drift，由 Plan/Apply 正常收敛。
 //
 // 生效值从 home 内的 requirements.toml 读取；若 inspect 报告存在 requirements 层
-// 但 home 内没有该文件（即 /etc/grok 或 MDM 下发），值不可读——仍如实报"被覆盖"，
-// 不编造生效值、也不假装收敛。
+// 但该层路径不在 $GROK_HOME 内（/etc/grok/requirements.toml 或 MDM 下发），值不可读
+// ——仍如实报"被覆盖"。
+//
+// 【复核 B1 修正】"文件存在"与"文件里有键"必须分开判定：
+//   - 空文件/仅注释：真实 `grok inspect --json` 会报一个 role=requirements、
+//     path 就在 $GROK_HOME **内**、note=empty 的层。旧判定 `len(req)==0` 会落到
+//     outsideHomeOverrides，把一个空占位文件报成"$GROK_HOME 外的高层覆盖"，
+//     从此整片永不写、错误文案还把层指错。
+//   - 因此：home 内文件存在 → 只用它实际设置的键判定（空层 = 无覆盖）；
+//     home 内文件不存在、且 inspect 报出的 requirements 层路径**不等于** home 路径
+//     时，才按"home 外高层的值不可读"处理。
 func (a *Adapter) higherLayerOverrides(ctx context.Context, home string, desired adapter.AgentDesiredState) (map[string]layerOverride, error) {
 	dcfg := adapter.ConfigMap(desired)
 	if len(dcfg) == 0 && len(desired.MCP) == 0 {
@@ -764,14 +812,15 @@ func (a *Adapter) higherLayerOverrides(ctx context.Context, home string, desired
 		// 可解析性由调用方另报；此处只做生效值判定。
 		cfg = map[string]any{}
 	}
-	req, err := a.readRequirements(home)
+	req, reqExists, err := a.readRequirements(home)
 	if err != nil {
 		return nil, err
 	}
-	if len(req) != 0 {
+	if reqExists {
+		// 文件在 $GROK_HOME 内：即使只有注释/为空，也只看它设了哪些键。
 		return requirementOverrides(cfg, req, desired), nil
 	}
-	if hasLayer(a.inspectLayers(ctx, home), "requirements") {
+	if outside := outsideRequirementsLayer(a.inspectLayers(ctx, home), requirementsPath(home)); outside != "" {
 		return outsideHomeOverrides(dcfg, desired), nil
 	}
 	return nil, nil
@@ -813,8 +862,10 @@ func requirementOverrides(cfg, req map[string]any, desired adapter.AgentDesiredS
 		}
 	}
 	if endpoint, keyEnv, ok := adapter.ProviderConfig(dcfg); ok {
-		eff := map[string]any{"endpoint": stringOf(cfgFleet["base_url"]), "apiKeyEnv": envKeyOf(cfgFleet["env_key"])}
-		want := map[string]any{"endpoint": endpoint, "apiKeyEnv": keyEnv}
+		eff := map[string]any{"endpoint": stringOf(cfgFleet["base_url"]), "apiKeyEnv": envKeyOf(cfgFleet["env_key"]),
+			"apiBackend": stringOf(cfgFleet["api_backend"]), "name": stringOf(cfgFleet["name"])}
+		want := map[string]any{"endpoint": endpoint, "apiKeyEnv": keyEnv,
+			"apiBackend": apiBackend, "name": providerName}
 		changed := false
 		if reqFleet != nil {
 			if v, present := reqFleet["base_url"]; present {
@@ -826,6 +877,18 @@ func requirementOverrides(cfg, req map[string]any, desired adapter.AgentDesiredS
 			if v, present := reqFleet["env_key"]; present {
 				eff["apiKeyEnv"] = envKeyOf(v)
 				if !kit.ValuesEqual(envKeyOf(v), keyEnv) {
+					changed = true
+				}
+			}
+			if v, present := reqFleet["api_backend"]; present {
+				eff["apiBackend"] = stringOf(v)
+				if !kit.ValuesEqual(stringOf(v), apiBackend) {
+					changed = true
+				}
+			}
+			if v, present := reqFleet["name"]; present {
+				eff["name"] = stringOf(v)
+				if !kit.ValuesEqual(stringOf(v), providerName) {
 					changed = true
 				}
 			}
@@ -882,7 +945,8 @@ func outsideHomeOverrides(dcfg map[string]any, desired adapter.AgentDesiredState
 	}
 	if endpoint, keyEnv, ok := adapter.ProviderConfig(dcfg); ok {
 		out[keyProvider] = layerOverride{Effective: unknown,
-			Wanted: map[string]any{"endpoint": endpoint, "apiKeyEnv": keyEnv}, Layer: layer}
+			Wanted: map[string]any{"endpoint": endpoint, "apiKeyEnv": keyEnv,
+				"apiBackend": apiBackend, "name": providerName}, Layer: layer}
 	}
 	for name, e := range desired.MCP {
 		out["mcp."+name] = layerOverride{Effective: unknown,
@@ -940,13 +1004,20 @@ func sortedOverrideKeys(over map[string]layerOverride) []string {
 	return out
 }
 
-func hasLayer(layers []inspectLayer, role string) bool {
+// outsideRequirementsLayer 返回 inspect 报告里 role=requirements 且路径**不等于**
+// home 内 requirements.toml 的那一层的路径；没有则返回 ""（含 inspect 不可用）。
+// 用于区分"$GROK_HOME 内的高层文件"与"$GROK_HOME 外（/etc/grok、MDM）的层"（复核 B1）。
+func outsideRequirementsLayer(layers []inspectLayer, homePath string) string {
 	for _, l := range layers {
-		if l.Role == role {
-			return true
+		if l.Role != "requirements" {
+			continue
 		}
+		if l.Path == "" || filepath.Clean(l.Path) == filepath.Clean(homePath) {
+			continue
+		}
+		return l.Path
 	}
-	return false
+	return ""
 }
 
 // ---- 路径（相对注入的 home 根，护栏 #12）----
@@ -965,19 +1036,21 @@ func requirementsPath(home string) string {
 	return filepath.Join(configRoot(home), "requirements.toml")
 }
 
-func (a *Adapter) readRequirements(home string) (map[string]any, error) {
+// readRequirements 读 home 内的 requirements.toml；第二个返回值表示**文件是否存在**
+// （与"文件存在但无键/仅注释"必须区分，复核 B1）。
+func (a *Adapter) readRequirements(home string) (map[string]any, bool, error) {
 	raw, err := os.ReadFile(requirementsPath(home))
 	if os.IsNotExist(err) {
-		return map[string]any{}, nil
+		return map[string]any{}, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read requirements.toml: %w", err)
+		return nil, false, fmt.Errorf("read requirements.toml: %w", err)
 	}
 	cfg, err := kit.ParseTOML(string(raw))
 	if err != nil {
-		return nil, fmt.Errorf("requirements.toml is unparseable: %w", err)
+		return nil, true, fmt.Errorf("requirements.toml is unparseable: %w", err)
 	}
-	return cfg, nil
+	return cfg, true, nil
 }
 
 // ---- 受管文件声明（reconciler 的备份/恢复契约，§5.3）----
@@ -1023,7 +1096,9 @@ func (a *Adapter) MergeManaged(home, relPath string, managed map[string]any) err
 		for k, v := range managed {
 			table, ok := v.(map[string]any)
 			if !ok {
-				continue
+				// 受管值一律是表（[models]/[model.fleet]）；形态不符宁可显式失败，
+				// 不静默跳过（与 default 分支、矩阵"未验证即拒绝"的口径一致）。
+				return fmt.Errorf("grok: managed config value for %q is %T, want a table", k, v)
 			}
 			keys[k] = table
 		}
