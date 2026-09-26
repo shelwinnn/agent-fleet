@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/claude"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/grok"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
@@ -338,6 +339,7 @@ func validOnehotOpID(id string) bool {
 
 func newOneshotCollector(home, dataDir string) *inventory.Collector {
 	reg := adapter.NewRegistry()
+	reg.Register(claude.New())
 	reg.Register(codex.New())
 	reg.Register(grok.New())
 	reg.Register(omp.New())
