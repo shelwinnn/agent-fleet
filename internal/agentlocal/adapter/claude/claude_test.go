@@ -932,3 +932,69 @@ func TestRemoteNotFetchedIsNotAnOverride(t *testing.T) {
 		t.Fatalf("user-layer drift must still be planned: %+v err=%v", cs, err)
 	}
 }
+
+// TestTraversalSkillNamesAreRejectedBeforeWrite（复核 B1）："."/".." 恰好匹配
+// safeName，但 filepath.Join 会把落点 Clean 成 skills 根 / 配置根本身——放行则 Apply
+// 会把 ~/.claude 换成指向技能缓存的软链，后续写入再经 resolveWritePath 写穿进共享缓存
+// （护栏 #3）。Validate 必须在写入前拒绝；Apply 纵深防御也不得落盘。
+func TestTraversalSkillNamesAreRejectedBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	const digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	for _, name := range []string{".", ".."} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			a := newTestAdapter(home, "2.1.270")
+			desired := adapter.AgentDesiredState{Family: ID, Version: "2.1.270",
+				Skills: map[string]domain.SkillDesired{name: {ContentDigest: digest}}}
+			if err := a.Validate(ctx, home, desired); err == nil {
+				t.Fatalf("skill name %q must be rejected before any write", name)
+			}
+			if _, err := os.Lstat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+				t.Fatalf("Validate for skill %q must not create ~/.claude: %v", name, err)
+			}
+			// 纵深防御：即使有人绕过 Validate 直接 Apply 计划，也不得落盘。
+			changes := []adapter.Change{{Family: ID, Step: "skills", Key: "skill:" + name, To: digest}}
+			if err := a.Apply(ctx, home, desired, changes); err == nil {
+				t.Fatalf("Apply must refuse traversal skill %q", name)
+			}
+			if _, err := os.Lstat(filepath.Join(home, ".claude")); !os.IsNotExist(err) {
+				t.Fatalf("Apply for skill %q must not create ~/.claude: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestUnavailableDoctorReportsUndeterminableRemoteLayer（复核 MINOR 2）：`claude doctor`
+// 不可用时远程/服务端层不可判定，不得让信号静默消失（那会把被远程 pin 的键报成收敛，
+// 方向与"误判即保守停写"相反）。非空受管 config → 可区分上报 + 空计划；无受管 config
+// → 不因 doctor 不可用而冻结。
+func TestUnavailableDoctorReportsUndeterminableRemoteLayer(t *testing.T) {
+	home := baselineHome(t)
+	ctx := context.Background()
+	doctorBroken := func(_ context.Context, _ string, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "doctor" {
+			return "", errors.New("claude doctor exploded")
+		}
+		return "2.1.270 (Claude Code)\n", nil
+	}
+	a := &Adapter{Probe: doctorBroken, Doctor: doctorBroken, ManagedSettingsDir: filepath.Join(home, ".claude-managed")}
+	desired := adapter.AgentDesiredState{Family: ID, Version: "2.1.270",
+		Config: json.RawMessage(`{"model":"claude-sonnet-4-6","provider":{"endpoint":"https://api.example.com/v1"}}`)}
+	inv := mustInventory(t, a, ctx, home, desired)
+	markers, _ := inv.ManagedProjection[overrideMarkerKey].(map[string]any)
+	if markers[keyModel] == nil || markers[keyProvider] == nil {
+		t.Fatalf("unavailable doctor must report the remote layer as undeterminable: %+v", inv.ManagedProjection)
+	}
+	if cs, err := a.Plan(ctx, home, desired, inv); err != nil || len(cs) != 0 {
+		t.Fatalf("undeterminable remote layer must yield an empty plan: %+v err=%v", cs, err)
+	}
+	if err := a.HealthCheck(ctx, home, desired); err == nil || !strings.Contains(err.Error(), "claude doctor") {
+		t.Fatalf("HealthCheck must fail explicitly when `claude doctor` is unavailable, got %v", err)
+	}
+	// 反向对照：没有受管 config 键时不存在可被覆盖的对象，不得冻结。
+	none := adapter.AgentDesiredState{Family: ID, Version: "2.1.270"}
+	emptyInv := mustInventory(t, a, ctx, home, none)
+	if _, ok := emptyInv.ManagedProjection[overrideMarkerKey]; ok {
+		t.Fatalf("no managed config keys must not report a remote-layer override: %+v", emptyInv.ManagedProjection)
+	}
+}

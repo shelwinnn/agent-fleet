@@ -77,7 +77,8 @@ const (
 )
 
 var (
-	// safeName 约束 MCP/技能条目名（文件名安全，禁止路径穿越）。
+	// safeName 约束技能条目名的字符集（文件名安全）；**它单独不足以禁止路径穿越**——
+	// "." / ".." 也匹配本正则，故目录落点必须再走 validSkillName（§4.7 第 1 条）。
 	safeName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	// versionLineRe 精确匹配 `claude --version` 的 `<semver> (Claude Code)`；
 	// 形态不符即显式报错（矩阵验收 1）。
@@ -165,9 +166,9 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			Capability: adapter.CapabilityVersion, State: adapter.SupportSupported,
 			VerifiedVersions: "claude 2.1.270 (linux/amd64)",
 			Reason: "版本**探测**已验证；安装/升级（claude install/update 已文档化）不在本片，Apply(version) 版本不匹配时显式失败。" +
-				"探测只用 CLI：`claude --version` 的 `<semver> (Claude Code)`，回退 `claude doctor` 首行的 `Running: <install-method> (<semver>)`，形态不符即显式报错。" +
-				"未验证：macOS / Windows / WSL 无本机实测（Validate 对非 linux 明确拒绝）；`claude doctor` 的完整输出结构官方未给字段表，解析只按首行与两个固定前缀行",
-			Evidence: "本机实测 `claude --version` → `2.1.270 (Claude Code)`；`claude doctor` 首行 → `Running: npm-global (2.1.270)`；" +
+				"探测只用 CLI：`claude --version` 的 `<semver> (Claude Code)`，回退 `claude doctor` **输出中的** `Running: <install-method> (<semver>)` 行，形态不符即显式报错。" +
+				"未验证：macOS / Windows / WSL 无本机实测（Validate 对非 linux 明确拒绝）；`claude doctor` 的完整输出结构官方未给字段表，解析只按 `Running:` 行与两个固定前缀行",
+			Evidence: "本机实测 `claude --version` → `2.1.270 (Claude Code)`；`claude doctor` 输出中的 `Running: npm-global (2.1.270)` 行；" +
 				"https://code.claude.com/docs/en/setup（系统需求）",
 			Paths: []string{".claude/settings.json"},
 		},
@@ -251,10 +252,12 @@ func (a *Adapter) Validate(_ context.Context, home string, desired adapter.Agent
 		}
 	}
 	for name := range desired.Skills {
-		if !safeName.MatchString(name) {
+		if !validSkillName(name) {
 			return &adapter.ValidateError{
 				Family: ID, Capability: adapter.CapabilitySkills, State: adapter.SupportUnsupported,
-				Reason: fmt.Sprintf("skill name %q must match %s so it is a safe single-segment directory name", name, safeName),
+				Reason: fmt.Sprintf("skill name %q must match %s and must not be \".\"/\"..\" "+
+					"(§4.7 第 1 条) so it is a safe single-segment directory name; %q would turn the config root "+
+					"or skills dir into a symlink", name, safeName, name),
 			}
 		}
 	}
@@ -495,6 +498,12 @@ func (a *Adapter) Apply(ctx context.Context, home string, desired adapter.AgentD
 	}
 	for _, c := range byStep["skills"] {
 		name := strings.TrimPrefix(c.Key, "skill:")
+		// 纵深防御（B1）：Validate 已拒绝 "."/".."，但 Apply 也可能被陈旧/外部计划直接
+		// 调用；名字一旦落到 filepath.Join 会被 Clean 成配置根本身，把 ~/.claude 换成
+		// 软链（护栏 #3）。这里再挡一次，绝不交给 EnsureSkillLink。
+		if !validSkillName(name) {
+			return fmt.Errorf("claude: refusing skill %q: invalid single-segment name (must not be \".\"/\"..\")", name)
+		}
 		digest := fmt.Sprintf("%v", c.To)
 		if err := kit.EnsureSkillLink(a.skillPath(home, name), name, digest, kit.SkillCacheDir(home, name, digest)); err != nil {
 			return fmt.Errorf("claude: %w", err)
@@ -715,10 +724,37 @@ func (a *Adapter) readManagedSettings() (managedSettings, error) {
 }
 
 // higherLayerOverrides 计算"哪些受管键的实际生效值来自更高层"。`claude doctor`
-// 不可用只意味着无法给出远程层信号，不影响文件层判定（观测不因健康命令失败而整体失败）。
+// 不可用时**远程/服务端层不可判定**：按"不可判定"显式上报（保守停写），而不是让
+// 信号静默消失——否则 Inventory 可能把被远程层 pin 的键报成收敛（MINOR 2）。
+// 文件层不受影响：doctor 不可用仍按 home 内/外的文件层判定。HealthCheck 另行对
+// doctor 失败显式失败。
 func (a *Adapter) higherLayerOverrides(ctx context.Context, home string, desired adapter.AgentDesiredState) (map[string]layerOverride, error) {
-	doctorOut, _ := a.doctorOutput(ctx, home)
+	doctorOut, err := a.doctorOutput(ctx, home)
+	if err != nil {
+		return undeterminableRemoteOverrides(desired), nil
+	}
 	return a.overridesFrom(home, desired, doctorOut)
+}
+
+// undeterminableRemoteOverrides 在 `claude doctor` 不可用时，把本次请求的受管
+// model/provider 键标为"远程层不可判定"。只覆盖期望点名的键；无受管 config 时为空。
+func undeterminableRemoteOverrides(desired adapter.AgentDesiredState) map[string]layerOverride {
+	dcfg := adapter.ConfigMap(desired)
+	out := map[string]layerOverride{}
+	const unknown = "unknown (`claude doctor` unavailable)"
+	if wantModel, ok := dcfg["model"]; ok {
+		out[keyModel] = layerOverride{Effective: unknown, Wanted: fmt.Sprintf("%v", wantModel),
+			Layer: remoteLayer + " — `claude doctor` unavailable, remote layer not determinable"}
+	}
+	if endpoint, _, ok := adapter.ProviderConfig(dcfg); ok {
+		out[keyProvider] = layerOverride{Effective: unknown,
+			Wanted: map[string]any{"endpoint": endpoint},
+			Layer:  remoteLayer + " — `claude doctor` unavailable, remote layer not determinable"}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // overridesFrom：文件层给出精确生效值；doctor 报告的远程/服务端层只能报"被覆盖、
@@ -961,6 +997,13 @@ func decodeSettings(raw []byte) (map[string]any, error) {
 }
 
 // ---- 小工具 ----
+
+// validSkillName 是 Skill 目录名约束（§4.7 第 1 条）：`^[A-Za-z0-9._-]+$` **且不是
+// "." / ".."**。后者虽有穿越语义却恰好匹配 safeName，filepath.Join 会把落点 Clean 成
+// 配置根或 skills 根（B1：曾可把 ~/.claude 换成指向技能缓存的软链）。
+func validSkillName(name string) bool {
+	return safeName.MatchString(name) && name != "." && name != ".."
+}
 
 func stringOf(v any) string {
 	s, _ := v.(string)

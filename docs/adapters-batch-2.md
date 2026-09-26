@@ -825,7 +825,9 @@ env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NO
    **同一 `env` 对象内的未托管键改动**都不误报。`TestValidateRejectsUnverifiedBeforeWrite` +
    `TestValidateRejectsUnparseableSettings`——MCP 请求、非空 `apiKeyEnv`、缺 endpoint、非法
    skill 名、非 linux、既有配置不可解析、`env` 非对象、更高层文件不可解析，全部在**任何写入之前**
-   拒绝且零写入产物。
+   拒绝且零写入产物。复核 B1 追加 `TestTraversalSkillNamesAreRejectedBeforeWrite`——skill 名
+   `"."`/`".."`（恰好匹配 `safeName`）在 `Validate` 被拒且 `~/.claude` 未被创建，`Apply`
+   纵深防御同样拒绝（见 §9.10）。
 3. **生命周期**：`TestDesiredScopedProjection`（未点名即不管理、绝不 drift；点名即 drift）、
    `TestSkillLinksAreSymlinkSetAndIdempotent`。安装/升级不在片内：
    `TestApplyVersionMismatchFailsExplicitly` 版本不匹配显式失败，不谎报成功。
@@ -869,6 +871,13 @@ env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NO
 （`TestRemoteManagedSettingsAreReported`）；本机实测的 `not fetched ...` 形态不误判
 （`TestRemoteNotFetchedIsNotAnOverride`）。误判方向是**停写**而非假装收敛（未验证项见 §9.7 第 6 项）。
 
+**doctor 不可用**（复核 MINOR 2 修正）：`claude doctor` 探测失败时，远程/服务端层
+**不可判定**；原实现吞掉该错误会让信号静默消失、把被远程层 pin 的键报成收敛，方向与本节的
+"误判即停写"相反。现按"不可判定"显式上报：期望点名的 `model`/provider 键进观测投影并带
+`overriddenBy`、`Plan` 整片空（`undeterminableRemoteOverrides`）；`HealthCheck` 本身对 doctor
+失败显式失败。未点名受管 config 时不冻结（无可覆盖对象）
+（`TestUnavailableDoctorReportsUndeterminableRemoteLayer`）。
+
 - `TestHigherLayerManagedSettingsOverrideIsDistinguishable`：真实 pin 时观测投影带 `overriddenBy`、
   生效值替换为 pin 值（**不报 Reconciled**）、`Plan` 整片空、`HealthCheck` 可区分失败。
 - `TestManagedSettingsBaseURLOverrideIsReported`：`env.ANTHROPIC_BASE_URL` 被覆盖同样可区分。
@@ -887,7 +896,8 @@ env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NO
 | 6 | Skills 软链幂等性 | `Capabilities(skills).Reason` + `TestSkillLinksAreSymlinkSetAndIdempotent`（重复 reconcile 零变更）后声明 supported |
 | 7 | `availableModels` / `enforceAvailableModels` 族键范围、`managed-settings.json` 归属 | `Capabilities(modelProvider).Reason`（存在但不纳入受管范围；归属留待范围决策）+ §9.6 |
 | 8 | **超出 §1.5**：`ANTHROPIC_MODEL` 环境变量层 | 官方 precedence 明确 `--model` > `ANTHROPIC_MODEL` > settings.model；本片不判定该层 → 记入 `Capabilities(modelProvider).Reason` 未验证清单 |
-| 9 | **超出 §1.5**：`claude doctor` 文案解析 | §9.3（`Running:` 非首行 → 逐行扫描）+ §9.6（远程行按固定前缀与否定词解析，未验证，误判方向为停写） |
+| 9 | **超出 §1.5**：`claude doctor` 文案解析 | §9.3（`Running:` 非首行 → 逐行扫描；`Capabilities(version).Reason` 同步为"输出中的 `Running:` 行"，复核 MINOR 1）+ §9.6（远程行按固定前缀与否定词解析，未验证，误判方向为停写） |
+| 10 | **超出 §1.5**：`claude doctor` 不可用时的远程层判定 | §9.6 的 doctor 不可用分支：按"不可判定"显式上报（复核 MINOR 2）+ `TestUnavailableDoctorReportsUndeterminableRemoteLayer` |
 
 ### 9.8 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
 
@@ -912,5 +922,18 @@ env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NO
 ### 9.9 本片自身验证
 
 - `go build ./...`、`go vet ./internal/agentlocal/... ./cmd/...` 通过。
-- `go test ./...` 全绿（含 claude 包 22 个测试函数与既有五家族回归）。
+- `go test ./...` 全绿（含 claude 包 24 个测试函数与既有五家族回归）。
 - `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → 注册表含 `claude`。
+
+### 9.10 核查退回（B1 + MINOR 1/2）的修复记录（2026-09-26，复核轮）
+
+核查在 `36a3ee7` 上给了 1 项阻断与 2 项 MINOR（其余独立复核项全部通过）。逐条修复：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| B1 | skill 名 `"."`/`".."` 未被拦住：`safeName` 恰好放过这两个字面量，`filepath.Join` 会把它 Clean 成 `~/.claude`（`".."`）或 `~/.claude/skills`（`"."`），`Apply` 经 `kit.EnsureSkillLink` 把配置根换成指向技能缓存的软链，后续写入再经 `resolveWritePath` **写穿**软链落进共享缓存（护栏 #3） | 新增 `validSkillName`（`safeName` **且** 不是 `"."`/`".."`，对齐 §4.7 第 1 条 `bundle.ValidateName`）：`Validate` 对技能名显式拒绝；`Apply` 在调用 `EnsureSkillLink` 前再挡一次（纵深防御，覆盖绕过 Validate 的陈旧/外部计划） | `TestTraversalSkillNamesAreRejectedBeforeWrite`（`.` 与 `..` 两个子用例）：`Validate` 返回错误、`Apply` 返回错误，且两次都断言 `~/.claude` **未被创建** |
+| 1 | `Capabilities(version).Reason` 写"回退 doctor **首行**"，与实现（逐行扫描）及 §9.3/§9.7 自相矛盾，且该字符串随能力协商上报控制面 | 改为"回退 `claude doctor` **输出中的** `Running: …` 行"；`Evidence` 同步为"输出中的 `Running: …` 行"；未验证文案"解析只按首行"改为"只按 `Running:` 行" | 文档/声明一致性（`go vet` + 人工对照 §9.3） |
+| 2 | `higherLayerOverrides` 吞掉 doctor 探测错误：doctor 不可用时远程层信号静默消失，`Inventory` 可能把被远程 pin 的键报成收敛，方向与 §9.6"误判即保守停写"相反 | 改为**显式上报"远程层不可判定"**：`claude doctor` 失败时 `undeterminableRemoteOverrides` 把期望点名的 `model`/provider 键标为覆盖（层名注明 doctor 不可用），`Plan` 整片空；无受管 config 键时不冻结。`HealthCheck` 仍对 doctor 失败显式失败。分支写入 §9.6 与 §9.7 第 10 项 | `TestUnavailableDoctorReportsUndeterminableRemoteLayer`：marker 存在、`Plan` 空、`HealthCheck` 显式失败（消息含 `claude doctor`）；反向对照：无受管 config 时无 marker |
+
+**修复后自查**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿（claude 包 24 个测试函数）。
+B1 的复现脚本已按核查给定的形状（`Validate(skill="..")` → `Apply` → `Lstat(~/.claude)`）转为永久回归。
