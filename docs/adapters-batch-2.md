@@ -937,3 +937,193 @@ env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NO
 
 **修复后自查**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿（claude 包 24 个测试函数）。
 B1 的复现脚本已按核查给定的形状（`Validate(skill="..")` → `Apply` → `Lstat(~/.claude)`）转为永久回归。
+
+---
+
+## 10. 片 C：Hermes 适配器逐家族验收记录（KM-35）
+
+本片交付批次二第 3 片：接入 Hermes（可执行 `hermes`，Nous Research `hermes-agent`）适配器。
+沿用批次一范式（新增 `internal/agentlocal/adapter/hermes` + 注册，**控制面零改动**）。
+
+**编号依据**：开工时 KM-34（片 B / PR #14）仍是 `OPEN`（`headRefOid=984fbca3`），故按
+KM-35「开工须知」第 1 条把本片分支**叠在片 B 分支** `agent/agent/80b253847eb5` 上，
+PR 的 base 选该分支；#14 合入后 GitHub 会把它重定向到 `main`，diff 收敛为纯本片改动。
+因此验收记录为 §9 之后的 **§10**（为片 B 的 §9 留位），不另建片级文档。
+
+### 10.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/hermes/`：`Adapter` 8 方法（`ID`/`Capabilities`/`Validate`/`Detect`/`Inventory`/`Plan`/`Apply`/`HealthCheck`）+ `ManagedFiles`/`ExtractManaged`/`MergeManaged` |
+| 注册（3 处，跟随现状） | `cmd/agent-fleet-agentd/daemon.go:86`、`oneshot.go:346`、`doctor.go:134` 各一处 `reg.Register(hermes.New())`。片 A/片 B 未收敛，本片**不夹带**该重构 |
+| 写 kit | 按 KM-35 开工须知第 3 条，把 OMP 私有的 `omp/yamlpatch.go` **下沉共享**为 `kit/yamlpatch.go`（导出 `ParseYAML`/`LookupYAML`/`SetYAML`/`PatchYAML`/`EncodeYAML`），`omp/omp.go` 的 19 处引用改指 kit，删除 `omp/yamlpatch.go` 与 OMP 里随之失效的 `sortedKeys`/`sort` import（**未复制第二份实现**）。下沉在同一提交内完成、在 PR 描述里单列声明、不夹带 |
+| fixture | `internal/agentlocal/adapter/hermes/testdata/config.yaml`：**本机真实形状的截断样本**——65 个顶层键（`_config_version: 44`，含 `model`/`mcp_servers`/`skills` 全形状与 60 余个未托管键）、`mcp_servers` 的 5 种条目形状（1 个仅 command+args；4 个带 `enabled`/`env`，其中 1 个另带 `timeout`）、注释、密钥占位符（值为 `${...}` 引用或假值，绝无真实凭据） |
+| 测试 | `internal/agentlocal/adapter/hermes/hermes_test.go`（22 个测试函数；矩阵 5 项 + 密钥边界 + 软链写穿 + 真实二进制补证，全部临时 HOME） |
+| 注册实测 | `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → `"adapters": ["claude","codex","grok","hermes","omp","opencode"]` |
+
+### 10.2 受管面与所有权（实现口径）
+
+**单一 YAML 真源**：只写 `$HERMES_HOME/config.yaml`（默认 `~/.hermes/config.yaml`），
+用 **YAML Node 树合并**（`kit.PatchYAML`，注释保留）。只按**叶子键路径**读写，绝不整树
+`Decode`——同文档内的密钥面因此既不进期望状态也不进观测投影：
+
+- `model.default` ← 归一化 `config.model`
+- `model.provider` ← `custom`（官方：任意 OpenAI 兼容端点用 `provider: custom` + `base_url`）
+- `model.base_url` ← 归一化 `provider.endpoint`
+- `model.api_key` ← `${<归一化 provider.apiKeyEnv>}`（见 10.3 的建模裁决；只写变量名）
+- `mcp_servers.<name>.command` / `.args`（仅**期望点名**的条目；条目内其它键逐字节保留）
+- `~/.hermes/skills/<name>`：Skill 软链（复用 `kit.EnsureSkillLink`/`ReadSkillDigest`）
+
+**必须逐字节保留（未点名）**：其余 60 余个顶层键（`agent`/`terminal`/`display`/`auxiliary`/
+`delegation`/`dashboard`/`secrets`/`gateway`/…）、`model` 段内未托管兄弟键（如 `context_length`/
+`default_headers`/`streaming`）、受管 MCP 条目内的 `env`/`enabled`/`timeout`/`tools.*`，以及
+**密钥面** `delegation.api_key`、`auxiliary.*.api_key`、`secrets.bitwarden.*`、
+`dashboard.basic_auth.*`、顶层 `HTTP_PROXY`/`HTTPS_PROXY`。`~/.hermes/.env` 与
+`~/.hermes/auth.json` **完全不读**。`SOUL.md` 不纳入受管。
+
+MCP 条目名限定 `[A-Za-z0-9_-]{1,100}`（点号会与 YAML 点分路径冲突）；Skill 名限定
+`safeName` 且非 `"."`/`".."`（防穿越，追加片 B 的 B1 回归口径）。
+
+### 10.3 建模裁决（需核查确认的三处）
+
+1. **`model.api_key` 写为 `${apiKeyEnv}` 间接引用**：§4.2 的字面受管清单只列了
+   `model.default`/`model.provider`/`model.base_url`，但 FR-3.1 规定归一化 provider
+   **必带** `apiKeyEnv`，且 Hermes 的 `custom` provider 只从 `OPENAI_API_KEY` 或
+   `model.api_key` 取键（`agent/auxiliary_client.py` `_resolve_custom_branch`）。源码
+   `hermes_cli/config.py` 的 `_expand_env_vars` 对配置字符串递归展开 `${VAR}`/`${env:VAR}`，
+   因此 `${<VAR>}` 是**原生间接引用**、值永不落盘——这与片 A Grok 的 `env_key`、opencode 的
+   `{env:VAR}` 同构。若不写它，则每个真实 provider（`apiKeyEnv` 非空）都只能被拒，家族不可用。
+   **本片据此把 `model.api_key` 纳入受管单元（只写引用）**；如核查认为必须严格按字面清单、
+   以「拒绝非空 `apiKeyEnv`」替代，请指出，改动很小（`Validate` + 投影 + `applyConfig` 各一处）。
+   密钥边界：`ExtractManaged` 仅当该值是 `${VAR}` 引用时才提取进备份，**字面量密钥绝不进
+   manifest**（`TestExtractManagedNeverPersistsLiteralSecret`）。
+2. **`skills.external_dirs` 在声明范围内但本片无可写来源**：§4.2 把它列为可管键，且
+   Hermes 的 external dirs 是**只读**技能根（`cli-config.yaml.example`：
+   "External dirs are read-only: skill creation always writes to ~/.hermes/skills/"），
+   但归一化 skills 契约（`domain.SkillDesired`）不携带外部技能根 → 本片**不写该键**、
+   列表内容逐字节保留，作为契约缺口上报（10.9 第 2 项）。技能落地走
+   `~/.hermes/skills/<name>` 软链（与全家族同范式，本机该目录既有条目正是
+   `-> ../../.agents/skills/<name>` 的软链，不点名即不触碰）。
+3. **Rules = `unsupported`**：用户级指令是 `SOUL.md`（用户身份/人格），§4.2 建议不纳入、
+   §4.4 第 8 项仍属未决；项目级 `AGENTS.md`/`.hermes.md` 是仓库相对路径，不在 home 受管面。
+   本片不做受管块，`Validate` 对 rules 请求显式拒绝。
+
+### 10.4 本机实测补证（临时 `HERMES_HOME`，未触碰真实 `~/.hermes`）
+
+```
+$ hermes --version
+Hermes Agent v0.21.2 (2026.9.11) · upstream be2f7e9c
+Install directory: /home/shelwin/.hermes/hermes-agent
+Install method: git
+Python: 3.11.15
+OpenAI SDK: 2.24.0
+Update available: 10455 commits behind — run 'hermes update'
+
+$ hermes config path
+/home/shelwin/.hermes/config.yaml
+
+$ hermes config check        # 只读，退出 0
+  Config version: 44 ✓
+
+# 受管合并写落到临时 HERMES_HOME 后，真实二进制复验（TestRealHermesBinaryConfigCheck，HERMES_REAL=1）：
+$ HERMES_REAL=1 go test ./internal/agentlocal/adapter/hermes/ -run TestRealHermesBinaryConfigCheck
+--- PASS: TestRealHermesBinaryConfigCheck (0.40s)
+```
+
+- `hermes version` **不是子命令**（choices 无 `version`，退出码 2）→ 探测只用 `--version`，
+  且只取首行严格匹配（`TestVersionParserRejectsAnomalies`）。
+- `upstream be2f7e9c` 是 checkout 提交号（`origin/main`），**不是产品版本**；`0.21.2` 才是包版本。
+- 本机 `~/.hermes/config.yaml` 实测 65 个顶层键、`_config_version: 44`；`model` 只有
+  `default`/`provider`（无 `base_url`），`mcp_servers` 5 项多形状，`skills.external_dirs: []`。
+- `hermes config check` 对 `_config_version: 43` 仍**退出 0** 并打印 `43 → 44 (update available)`
+  → 版本判定不能只看退出码：适配器**另按文件里的 `_config_version` 判定**（见 10.5）。
+
+### 10.5 无机器可读 schema：`_config_version` 的行为（显式，不静默降级）
+
+`config.yaml` 的规范是 2138 行注释样例 + 文档，**无 JSON Schema**。适配器对配置版本的处置：
+
+- `supportedConfigVersion = 44`；`Validate`/`Inventory`/`HealthCheck` 三处都先经
+  `requireSupportedConfig`：
+  - 文件缺失/为空 → 显式失败（"Hermes home is not initialized"，拒绝创建无版本号的配置）；
+  - 无整数 `_config_version` → 显式失败；
+  - `_config_version != 44` → 显式失败（点名观测值与对位值，写明 "rather than silently degrade"）。
+- 因此上游迁移（44 → 45）时流水线是**一次干净、零写入的可区分失败**，不会把未知语义的键
+  写进一个已迁移的配置。`HealthCheck` 再加一层：解析 `hermes config check` 输出里的
+  `Config version: <n>`，与 44 不符即失败（`TestHealthCheck/config-check-version-mismatch`）。
+
+**更高配置层（跨片 §8.6 口径）**：§4 未给 Hermes 识别出压过用户 `config.yaml` 的**文件层**
+（`.env` 与 `config.yaml` 冲突时后者胜；profiles 走 `hermes profile install/update` 合并进同一
+文件）。环境变量层（`HERMES_*`）与 `.env`/`auth.json` 的运行时优先级**未验证**，已记入
+`Capabilities(modelProvider).Reason` 与 10.8 第 9 项——本片不对该层声称收敛。KM-35 开工须知
+第 4 条要求的"写入前拒绝"落点是 `envRefs`（见 §10.6 第 2 项）。
+
+### 10.6 逐家族验收 5 项（矩阵口径）
+
+1. **身份与兼容性**：`TestDetectDistinguishesMissingFromUnparseable`——已装/未装/版本不可解析
+   三态可区分（程序缺失 `Installed=false` 且非错误；首行形态不符显式报错），并断言探测只用
+   `--version`。`TestVersionParserRejectsAnomalies`——缺 upstream/缺日期/错前缀/非三段版本/
+   `hermes version` 的 invalid-choice 输出/空输出全部解析失败。非 linux → 阶段 1 拒绝。
+2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent`——以 65 顶层键 fixture
+   为输入，未托管顶层键与 `model` 段内未托管兄弟键、受管 MCP 条目内的 `env`/`enabled`/`timeout`
+   逐键保留，密钥面 `${DELEGATION_KEY}`/`${AUX_*}`/`${DASHBOARD_*}`/`BW_ACCESS_TOKEN`/代理串
+   逐字节保留，注释保留；受管键到位；重复 reconcile 无变更且字节不变。
+   `TestInvalidMCPEntryIsNotTouched`——未点名的 `mcp_servers.*` 原样保留。
+   `TestValidateRejectsUnverifiedBeforeWrite` + `TestValidateRejectsMalformedRequests` +
+   `TestValidateRejectsRulesRequest` + `TestValidateRejectsUnparseableAndVersionDrift`——
+   `envRefs`（`*ValidateError`/unverified）、rules、非法 MCP 名、缺 command、model/provider 不成对、
+   空 endpoint、空/非法 `apiKeyEnv`、非对象 config、穿越 Skill 名、配置不可解析、缺配置、
+   `_config_version` 漂移：全部在**任何写入之前**拒绝且零写入产物。
+   `TestTraversalSkillNamesAreRejectedBeforeWrite`（`.`/`..`：Validate 与 Apply 双挡，路径未创建）。
+   `TestPatchGoldenPreservesCommentsAndOrder`——YAML 合并的小黄金文件（注释/键序/缩进/空行规整）。
+3. **生命周期**：`TestDriftOnlyFromManagedFields`——幂等；未托管改动（`display.theme`、
+   `model.context_length`、受管 MCP 条目内的 `env`、`hooks_auto_accept`）不误报；
+   受管改动（`model.default`/`base_url`/`api_key`、MCP `command`/`args`）各自触发 drift 并在
+   `Apply` 后收敛。`TestMCPEntryWithoutArgsConverges`（批次一复核缺陷 1 回归）、
+   `TestProviderChangeConvergesOnSecondApply`（整节点替换回归）。安装/升级不在片内：
+   `TestApplyVersionMismatchFailsExplicitly` 在版本不匹配时显式失败，不谎报成功。
+4. **恢复与一致性**：`TestManagedFilesExtractAndMergeRollback`——`ManagedFiles` 一条
+   （`.hermes/config.yaml`）；`ExtractManaged` 只提取受管 model 叶子键（未托管键与密钥面不进备份），
+   受管键级回退保留未托管内容与注释，未知受管键/非受管文件显式失败；
+   `TestExtractManagedNeverPersistsLiteralSecret`（字面量 `api_key` 绝不进 manifest）。
+   `TestSkillLinksAreSymlinkSetAndIdempotent`、`TestSkillLinkRequiresMaterializedArtifact`
+   （缓存未物化显式失败、不写坏链）、`TestConfigWritePreservesSymlink`（config.yaml 软链写穿，护栏 #3）。
+5. **验收记录**：本节；§4.4 未验证项逐条落点见 10.8。
+
+### 10.7 本片自身验证
+
+- `go build ./...`、`go vet ./...` 通过；`gofmt -l` 干净。
+- `go test ./...` 全绿（含 hermes 包 22 个测试函数与既有六家族回归；OMP 在 kit 下沉后回归全绿）。
+- `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → 注册表含 `hermes`（10.1）。
+- `HERMES_REAL=1` 下真实 `hermes --version` + `hermes config check` 接受适配器合并写产物（10.4）。
+
+### 10.8 §4.4 未验证项逐条落点
+
+| # | §4.4 项 | 落点 |
+|---|---|---|
+| 1 | 线上文档与本机 0.21.2 未逐页 diff | `Capabilities(version).Reason` 未验证清单；本文件 §4 与本节的来源分别标注 |
+| 2 | `hermes doctor` / `status --deep` 完整输出未采集 | `Capabilities(version).Reason`；健康检查只用只读 `config check`（绝不用 `--live`/`--deep`），见 §10.4/10.6 |
+| 3 | `mcp list` / `mcp test` 未执行、MCP 无连通性验证 | `Capabilities(mcp).Reason`；适配器不作 MCP 连通性健康检查 |
+| 4 | `envRefs` 的 `${VAR}` 语义未验证 | `Capabilities(mcp).Reason` + `Validate` 在任何写入前拒绝（`TestValidateRejectsUnverifiedBeforeWrite`） |
+| 5 | 无机器可读 schema、`_config_version` 迁移清单未展开 | `Capabilities(modelProvider).Reason` + §10.5（版本漂移显式失败）；迁移清单本身仍未展开 |
+| 6 | PyPI `hermes-agent` 官方性未定论 | `Capabilities(version).Reason` 未验证清单（不改本机 git-checkout 结论） |
+| 7 | Windows/macOS/Termux 未实测 | 各能力 `Reason`；`Validate` 对非 linux 明确拒绝 |
+| 8 | `SOUL.md` 是否纳入受管未决 | `Capabilities(rules).Reason`（本片明确不纳入）+ §10.3 第 3 项 |
+| 9 | `.env` / `auth.json` 运行时优先级未验证 | `Capabilities(modelProvider).Reason` 未验证清单 + §10.5 更高层段；两文件全程不读 |
+| 10 | **超出 §4.4**：`model.base_url` 与 shell 导出优先级 | `Capabilities(modelProvider).Reason` 未验证清单 |
+| 11 | **超出 §4.4**：环境变量层（`HERMES_*`） | `Capabilities(modelProvider).Reason` 未验证清单 + §10.5（本片不判定该层） |
+
+### 10.9 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **归一化 provider 契约只给 `endpoint`+`apiKeyEnv`，未表达"凭据引用如何落地"**：本片按
+   Hermes 原生 `${VAR}` 落到 `model.api_key`（片 A 用 `env_key`、opencode 用 `{env:VAR}`、
+   片 B 无承载故拒绝）。建议契约层明确"凭据引用"是 family-agnostic 的 env 名，还是允许家族各自映射。
+2. **归一化 skills 契约不携带外部技能根**：`skills.external_dirs` 在 §4.2 受管范围内但本片
+   不可写（只读技能根本身也不是写面），登记为缺口。
+3. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**（同 §8.8 第 1 项）：§4.2 列出的
+   `url`/`headers`/`transport`/`timeout`/`enabled`/`tools.*` 在本片不可达。
+4. **"更高配置层"三态未定义**（同 §8.8 第 2 项 / §9.8 第 3 项）：Hermes 本片未识别文件层，
+   但 `.env`/环境变量层未验证；若判定存在，建议沿用"观测投影带 `overriddenBy` + `Plan` 整片空 +
+   `HealthCheck` 可区分失败"的三态。
+5. **`kit/yamlpatch.go` 下沉是 YAML 写工具的第一份共享实现**：片 A/片 B 的
+   `HigherLayerOverrideError`/`overriddenBy` 仍是第二份实现（§9.8 第 4 项已登记），本片不夹带。
+

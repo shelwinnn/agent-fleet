@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
@@ -167,7 +166,7 @@ func (a *Adapter) Validate(_ context.Context, home string, desired adapter.Agent
 	if _, _, err := kit.ReadManagedBlock(a.rulesPath(home)); err != nil {
 		return fmt.Errorf("agent %q: %w", ID, err)
 	}
-	if _, err := parseYAML(readFileOrEmpty(a.configPath(home))); err != nil {
+	if _, err := kit.ParseYAML(readFileOrEmpty(a.configPath(home))); err != nil {
 		return fmt.Errorf("agent %q: config.yml unparseable: %w", ID, err)
 	}
 	if _, err := a.readMCPFile(home); err != nil {
@@ -261,18 +260,18 @@ func (a *Adapter) observedProjection(home string, desired adapter.AgentDesiredSt
 	_, hasModel := dcfg["model"]
 	_, _, hasProvider := adapter.ProviderConfig(dcfg)
 	if hasModel || hasProvider {
-		root, err := parseYAML(readFileOrEmpty(a.configPath(home)))
+		root, err := kit.ParseYAML(readFileOrEmpty(a.configPath(home)))
 		if err != nil {
 			return nil, fmt.Errorf("omp: config.yml unparseable: %w", err)
 		}
-		selector, _ := lookupPath(root, "modelRoles.default").(string)
+		selector, _ := kit.LookupYAML(root, "modelRoles.default").(string)
 		proj["selector"] = selector
 		prov := map[string]any{"endpoint": "", "apiKeyEnv": "", "model": ""}
-		modelsRoot, err := parseYAML(readFileOrEmpty(a.modelsPath(home)))
+		modelsRoot, err := kit.ParseYAML(readFileOrEmpty(a.modelsPath(home)))
 		if err != nil {
 			return nil, fmt.Errorf("omp: models.yml unparseable: %w", err)
 		}
-		if block, ok := lookupPath(modelsRoot, "providers."+providerID).(map[string]any); ok {
+		if block, ok := kit.LookupYAML(modelsRoot, "providers."+providerID).(map[string]any); ok {
 			endpoint, _ := block["baseUrl"].(string)
 			keyEnv, _ := block["apiKey"].(string)
 			prov["endpoint"], prov["apiKeyEnv"] = endpoint, keyEnv
@@ -412,13 +411,13 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState) er
 	}
 	// config.yml：模型角色选择器（注释与未托管键经 Node 保留）。
 	configPath := a.configPath(home)
-	out, err := patchYAML(readFileOrEmpty(configPath), map[string]any{
+	out, err := kit.PatchYAML(readFileOrEmpty(configPath), map[string]any{
 		"modelRoles.default": fmt.Sprintf("%s/%v", providerID, model),
 	})
 	if err != nil {
 		return fmt.Errorf("omp: patch config.yml: %w", err)
 	}
-	if _, err := parseYAML(out); err != nil {
+	if _, err := kit.ParseYAML(out); err != nil {
 		return fmt.Errorf("omp: patched config.yml does not parse, aborting: %w", err)
 	}
 	if err := kit.AtomicWrite(configPath, []byte(out), 0o600); err != nil {
@@ -435,13 +434,13 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState) er
 	if keyEnv != "" {
 		prov["apiKey"] = keyEnv
 	}
-	out, err = patchYAML(readFileOrEmpty(modelsPath), map[string]any{
+	out, err = kit.PatchYAML(readFileOrEmpty(modelsPath), map[string]any{
 		"providers." + providerID: prov,
 	})
 	if err != nil {
 		return fmt.Errorf("omp: patch models.yml: %w", err)
 	}
-	if _, err := parseYAML(out); err != nil {
+	if _, err := kit.ParseYAML(out); err != nil {
 		return fmt.Errorf("omp: patched models.yml does not parse, aborting: %w", err)
 	}
 	return kit.AtomicWrite(modelsPath, []byte(out), 0o600)
@@ -488,19 +487,19 @@ func (a *Adapter) HealthCheck(ctx context.Context, home string, desired adapter.
 	_, hasModel := dcfg["model"]
 	_, _, hasProvider := adapter.ProviderConfig(dcfg)
 	if hasModel || hasProvider {
-		root, err := parseYAML(readFileOrEmpty(a.configPath(home)))
+		root, err := kit.ParseYAML(readFileOrEmpty(a.configPath(home)))
 		if err != nil {
 			return fmt.Errorf("omp: health: config.yml unparseable: %w", err)
 		}
 		want := fmt.Sprintf("%s/%v", providerID, dcfg["model"])
-		if got, _ := lookupPath(root, "modelRoles.default").(string); got != want {
+		if got, _ := kit.LookupYAML(root, "modelRoles.default").(string); got != want {
 			return fmt.Errorf("omp: health: modelRoles.default is %q, want %q", got, want)
 		}
-		modelsRoot, err := parseYAML(readFileOrEmpty(a.modelsPath(home)))
+		modelsRoot, err := kit.ParseYAML(readFileOrEmpty(a.modelsPath(home)))
 		if err != nil {
 			return fmt.Errorf("omp: health: models.yml unparseable: %w", err)
 		}
-		block, ok := lookupPath(modelsRoot, "providers."+providerID).(map[string]any)
+		block, ok := kit.LookupYAML(modelsRoot, "providers."+providerID).(map[string]any)
 		if !ok {
 			return fmt.Errorf("omp: health: providers.%s is missing", providerID)
 		}
@@ -576,12 +575,12 @@ func (a *Adapter) ManagedFiles(home string) ([]string, error) {
 // ExtractManaged 提取受管键值。
 func (a *Adapter) ExtractManaged(content []byte) (map[string]any, error) {
 	out := map[string]any{}
-	root, err := parseYAML(string(content))
+	root, err := kit.ParseYAML(string(content))
 	if err == nil {
-		if v := lookupPath(root, "modelRoles.default"); v != nil {
+		if v := kit.LookupYAML(root, "modelRoles.default"); v != nil {
 			out["modelRoles.default"] = v
 		}
-		if v := lookupPath(root, "providers."+providerID); v != nil {
+		if v := kit.LookupYAML(root, "providers."+providerID); v != nil {
 			out["providers."+providerID] = v
 		}
 		var doc map[string]any
@@ -614,11 +613,11 @@ func (a *Adapter) MergeManaged(home, relPath string, managed map[string]any) err
 			}
 			sets[k] = v
 		}
-		out, err := patchYAML(readFileOrEmpty(path), sets)
+		out, err := kit.PatchYAML(readFileOrEmpty(path), sets)
 		if err != nil {
 			return err
 		}
-		if _, err := parseYAML(out); err != nil {
+		if _, err := kit.ParseYAML(out); err != nil {
 			return fmt.Errorf("omp: managed rollback produced unparseable yaml: %w", err)
 		}
 		return kit.AtomicWrite(path, []byte(out), 0o600)
@@ -688,12 +687,3 @@ func normalizeArgs(args []string) []string {
 }
 
 func equal(a, b any) bool { return kit.ValuesEqual(a, b) }
-
-func sortedKeys[T any](m map[string]T) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
