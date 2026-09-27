@@ -4,7 +4,8 @@
 //
 // 单一真源：`$HERMES_HOME/config.yaml`（默认 `~/.hermes/config.yaml`），YAML 带
 // `_config_version`。受管范围只按叶子键路径声明，其余键（`agent`/`terminal`/`display`
-// 等 60 余个顶层键）逐字节保留：
+// 等 60 余个顶层键）的**键值/键序/注释保留**（YAML Node 树合并；整树重编码会合并空行
+// 并规整缩进与引号，故**字节级**不保证，语义所有权成立）：
 //
 //	model.default、model.provider（custom）、model.base_url（= 归一化 provider.endpoint）
 //	model.api_key（= `${<归一化 provider.apiKeyEnv>}` 环境变量间接引用；值永不落盘）
@@ -35,6 +36,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -85,14 +87,21 @@ func parseVersion(out string) string {
 	return m[1]
 }
 
-// ConfigCheckProbe 执行 `hermes config check`（只读；注入以便 fixture 测试不依赖真实二进制）。
+// VersionProbe 执行 `hermes --version`（home 为注入的 HOME 根；实现负责把
+// HOME 与 HERMES_HOME 都指到该根，绝不落到进程默认的 ~/.hermes，护栏 #12）。
+type VersionProbe func(ctx context.Context, home string) (string, error)
+
+// ConfigCheckProbe 执行 `hermes config check`（只读受管文件；注入以便 fixture 测试不依赖真实二进制）。
 type ConfigCheckProbe func(ctx context.Context, home string) (string, error)
 
-// Adapter 是 Hermes 适配器。Probe/ConfigCheck/GOOS 可注入以便测试。
+// Adapter 是 Hermes 适配器。Probe/ConfigCheck/GOOS/ManagedDir 可注入以便测试。
 type Adapter struct {
-	Probe       kit.VersionProbe
+	Probe       VersionProbe
 	ConfigCheck ConfigCheckProbe
 	GOOS        string
+	// ManagedDir 覆盖更高层 managed-scope 目录（默认 $HERMES_MANAGED_DIR，其次 /etc/hermes；
+	// 测试注入临时目录，绝不读真实 /etc/hermes）。
+	ManagedDir string
 }
 
 func New() *Adapter { return &Adapter{} }
@@ -104,6 +113,51 @@ func (a *Adapter) goos() string {
 		return a.GOOS
 	}
 	return runtime.GOOS
+}
+
+// probeVersion 探测已装版本：注入桩优先，默认实现把 HOME/HERMES_HOME 钉到注入根。
+func (a *Adapter) probeVersion(ctx context.Context, home string) (string, error) {
+	probe := a.Probe
+	if probe == nil {
+		probe = defaultVersionProbe
+	}
+	out, err := probe(ctx, home)
+	if err != nil {
+		if kit.IsNotInstalled(err) {
+			return "", fmt.Errorf("%w: %s", kit.ErrNotInstalled, binaryName)
+		}
+		return "", fmt.Errorf("probe %s: %w", binaryName, err)
+	}
+	v := parseVersion(out)
+	if v == "" {
+		return "", fmt.Errorf("probe %s: cannot parse version from output %q", binaryName, strings.TrimSpace(out))
+	}
+	return v, nil
+}
+
+// defaultVersionProbe 直执行 `hermes --version`（argv，不经过 sh -c，护栏 #1），
+// 并把 HOME/HERMES_HOME 钉到注入根：`hermes --version` 会初始化 profile 骨架，
+// 不钉就会在读另一个 ~/.hermes 的同时污染真实 home（复核 B2）。
+func defaultVersionProbe(ctx context.Context, home string) (string, error) {
+	cmd := exec.CommandContext(ctx, binaryName, versionArgs...)
+	cmd.Env = hermesEnv(home)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// hermesEnv 返回 os.Environ() 但把 HOME/HERMES_HOME 钉到注入根。
+func hermesEnv(home string) []string {
+	out := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "HERMES_HOME=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "HOME="+home, "HERMES_HOME="+configRoot(home))
 }
 
 // Capabilities 声明逐能力支持状态与证据。§4.4 的未验证项逐条落进对应 Reason/Evidence。
@@ -128,13 +182,15 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			Reason: "`model.default` + `model.provider: custom` + `model.base_url`（任意 OpenAI 兼容端点），" +
 				"`model.api_key` 写为 `${<归一化 apiKeyEnv>}` 环境变量间接引用（只写变量名，凭据值永不落盘）。" +
 				"嵌套键级所有权：`model` 段内未点名键（如 `context_length`/`default_headers`）与同文档密钥面" +
-				"（delegation/auxiliary/secrets/dashboard.basic_auth/HTTP(S)_PROXY）逐字节保留；绝不整树 Decode。" +
+				"（delegation/auxiliary/secrets/dashboard.basic_auth/HTTP(S)_PROXY）的键值/键序/注释保留；绝不整树 Decode。" +
+				"更高层：managed scope（`$HERMES_MANAGED_DIR` 或 `/etc/hermes` 的 `config.yaml`）按叶子压过用户层，" +
+				"被覆盖期间整片停写并给可区分健康态（见 §10.5）。" +
 				"无机器可读 schema（规范 = cli-config.yaml.example 注释 + 文档）→ `_config_version` 变化时显式失败，不静默降级。" +
 				"未验证：`.env` / `auth.json` 运行时优先级（按边界完全不读）未做运行验证；`_config_version` 逐版本迁移清单未展开；" +
-				"`model.base_url` 与 shell 导出优先级无本机交互验证；环境变量层（HERMES_*）未判定",
+				"`model.base_url` 与 shell 导出优先级无本机交互验证；环境变量层（HERMES_*）与 managed `.env` 未判定；macOS/Windows/Termux 未实测",
 			Evidence: "本机实测 `~/.hermes/config.yaml` 顶层 `model` 段（default/provider；base_url 缺省回落 OPENAI_API_KEY）；" +
 				"官方 https://hermes-agent.nousresearch.com/docs/integrations/providers §Custom endpoints；" +
-				"cli-config.yaml.example §Model Configuration（provider: custom + base_url）；源码 hermes_cli/config.py `_expand_env_vars`（`${VAR}`/`${env:VAR}` 递归展开）",
+				"cli-config.yaml.example §Model Configuration（provider: custom + base_url）；源码 hermes_cli/config.py `_expand_env_vars`（`${VAR}`/`${env:VAR}` 递归展开）与 `_merge_managed_overlay`（managed wins at the leaf）",
 			Paths: []string{".hermes/config.yaml"},
 		},
 		{
@@ -142,10 +198,10 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			VerifiedVersions: "Hermes Agent 0.21.2",
 			Reason: "command+args 支持（config.yaml 顶层 `mcp_servers.<name>`，单 YAML 真源，无独立 mcp.json）。" +
 				"**envRefs 未验证**（本机 5 个条目的 `env` 均为字面值；`${VAR}` 在 MCP `env` 的语义未逐页确认）" +
-				"→ Validate 在任何写入之前拒绝含 envRefs 的条目。" +
+				"→ Validate 与 Apply 收口都在任何写入之前拒绝含 envRefs 的条目。" +
 				"未验证：`hermes mcp list` / `hermes mcp test` 会连接 MCP server，本片不作离线健康检查，未做连通性验证；" +
 				"归一化 MCP 契约只携带 command/args/envRefs，§4.2 列出的 url/headers/transport/timeout/enabled/tools.* 不可达（契约缺口）；" +
-				"MCP 条目名限定 `[A-Za-z0-9_-]+`（点号与 YAML 点分路径冲突）",
+				"MCP 条目名限定 `[A-Za-z0-9_-]+`（点号与 YAML 点分路径冲突）；macOS/Windows/Termux 未实测",
 			Evidence: "本机实测 `~/.hermes/config.yaml` 顶层 `mcp_servers` 5 项多形状（code-review-graph 仅 command+args；" +
 				"hermes-studio-* 另有 enabled/env/timeout）；官方 https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference",
 			Paths: []string{".hermes/config.yaml"},
@@ -155,10 +211,10 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			VerifiedVersions: "Hermes Agent 0.21.2",
 			Reason: "Fleet 自有条目写为 `~/.hermes/skills/<name>` 软链（指向节点规范技能缓存），" +
 				"与批次一/片 A/片 B 同范式；目录内既有条目（本机为指向 `~/.agents/skills/*` 的软链）不点名即不触碰。" +
-				"缓存未物化时显式失败（不写坏链、不静默跳过）。" +
+				"缓存未物化或 digest 形状不符（非 `sha256:<64 hex>`）时在写入前显式失败（不写坏链、不静默跳过）。" +
 				"未验证：`skills.external_dirs` 在本片受管范围声明内，但归一化 skills 契约不携带外部技能根 → 本片无可写来源，" +
-				"该列表（含既有 `~/.agents/skills`）逐字节保留（契约缺口）；Windows/macOS/Termux 未实测",
-			Evidence: "本机实测 `ls ~/.hermes/skills/`（38 项，含 `-> ../../.agents/skills/<name>` 软链）；" +
+				"该列表（本机真实值为 `[]`）的键值/键序/注释保留（契约缺口）；macOS/Windows/Termux 未实测",
+			Evidence: "本机实测 `ls ~/.hermes/skills/`（95 个非隐藏条目，含大量 `-> ../../.agents/skills/<name>` 软链）；" +
 				"官方 https://hermes-agent.nousresearch.com/docs/user-guide/features/skills；agentskills.io 开放标准",
 			Paths: []string{".hermes/skills"},
 		},
@@ -223,9 +279,13 @@ func (a *Adapter) Validate(_ context.Context, home string, desired adapter.Agent
 			}
 		}
 	}
-	for name := range desired.Skills {
+	for name, s := range desired.Skills {
 		if !validSkillName(name) {
 			return fmt.Errorf("agent %q: skill name %q must match %s and not be %q/%q", ID, name, skillNameRe, ".", "..")
+		}
+		// digest 是缓存目录分量：形状不符会在写入时把软链种到任意已存在目录（复核 B1）。
+		if !kit.ValidDigest(s.ContentDigest) {
+			return fmt.Errorf("agent %q: skill %q contentDigest %q must match %s", ID, name, s.ContentDigest, kit.DigestRe)
 		}
 	}
 	// 既有配置必须存在且版本对位（无 schema → 版本变化显式失败，不静默降级）。
@@ -267,7 +327,7 @@ func (a *Adapter) requireSupportedConfig(home string) (*yaml.Node, error) {
 // Detect 探测已装/未装与版本（矩阵验收 1：程序缺失与版本不可解析必须可区分）。
 func (a *Adapter) Detect(ctx context.Context, home string) (adapter.DetectedAgent, error) {
 	d := adapter.DetectedAgent{Family: ID, ConfigPath: a.configPath(home), SchemaVer: SchemaVersion}
-	v, err := kit.ProbeVersion(ctx, a.Probe, binaryName, versionArgs, parseVersion)
+	v, err := a.probeVersion(ctx, home)
 	switch {
 	case errors.Is(err, kit.ErrNotInstalled):
 		return d, nil // 未安装：Installed=false，不是错误
@@ -292,9 +352,15 @@ func (a *Adapter) Inventory(ctx context.Context, home string, desired adapter.Ag
 	if err != nil {
 		return adapter.AgentObservedState{}, err
 	}
+	// 更高层（managed scope）压过用户 config.yaml：被覆盖的受管键用生效值并打标记。
+	over, err := a.higherLayerOverrides(home, desired)
+	if err != nil {
+		return adapter.AgentObservedState{}, err
+	}
+	markHigherLayerOverrides(observedProj, over)
 	return adapter.AgentObservedState{
 		Family:                   ID,
-		Version:                  a.probeVersionQuiet(ctx),
+		Version:                  a.probeVersionQuiet(ctx, home),
 		ManagedProjection:        observedProj,
 		DesiredProjectionDigest:  kit.ProjectionDigest(desiredProj),
 		ObservedProjectionDigest: kit.ProjectionDigest(observedProj),
@@ -303,8 +369,8 @@ func (a *Adapter) Inventory(ctx context.Context, home string, desired adapter.Ag
 	}, nil
 }
 
-func (a *Adapter) probeVersionQuiet(ctx context.Context) string {
-	v, err := kit.ProbeVersion(ctx, a.Probe, binaryName, versionArgs, parseVersion)
+func (a *Adapter) probeVersionQuiet(ctx context.Context, home string) string {
+	v, err := a.probeVersion(ctx, home)
 	if err != nil {
 		return ""
 	}
@@ -399,6 +465,12 @@ func (a *Adapter) Plan(_ context.Context, _ string, desired adapter.AgentDesired
 	if observedProj == nil {
 		observedProj = map[string]any{}
 	}
+	if len(overrideSet(observedProj)) != 0 {
+		// 跨片口径（§8.6）：任一受管键被更高层（managed scope）覆盖即整片停写。
+		// 只跳过被覆盖的键不够——同机 skills 的 drift 仍会写，随后 HealthCheck 必然
+		// 返回覆盖错误 → 回滚 → 续写循环。空计划 + 可区分健康失败 = 一次干净停机。
+		return nil, nil
+	}
 	var changes []adapter.Change
 	if desired.Version != "" && observed.Version != desired.Version {
 		changes = append(changes, adapter.Change{Family: ID, Step: "version", Key: "version",
@@ -416,15 +488,39 @@ func (a *Adapter) Plan(_ context.Context, _ string, desired adapter.AgentDesired
 // keyModel 是受管 model 单元的 plan 键（default/provider/base_url/apiKeyEnv 一起收敛）。
 const keyModel = "config.model"
 
+// overrideMarkerKey 是观测投影里记录"被更高配置层覆盖"的保留键（与片 A/片 B 同形）。
+const overrideMarkerKey = "overriddenBy"
+
 // Apply 执行变更（阶段 5–9）：YAML Node 树合并写（只写受管叶子键，注释与未托管键保留）、
 // 原子写、Skill 软链。空变更零写入（幂等）。
 func (a *Adapter) Apply(ctx context.Context, home string, desired adapter.AgentDesiredState, changes []adapter.Change) error {
+	if len(changes) == 0 {
+		return nil // 空计划零写入（幂等）
+	}
 	byStep := map[string][]adapter.Change{}
 	for _, c := range changes {
 		byStep[c.Step] = append(byStep[c.Step], c)
 	}
+	// ---- 写前 pre-flight：任何一步失败都零写入 ----
+	// 更高层覆盖期间整片停写（陈旧计划防御；正常路径 Plan 已返回空计划）。
+	over, err := a.higherLayerOverrides(home, desired)
+	if err != nil {
+		return fmt.Errorf("hermes: %w", err)
+	}
+	if len(over) != 0 {
+		key := sortedOverrideKeys(over)[0]
+		o := over[key]
+		return &HigherLayerOverrideError{Family: ID, Key: key, Layer: o.Layer, Effective: o.Effective, Wanted: o.Wanted}
+	}
+	// 既有配置必须存在且版本对位（绕过 Validate 的陈旧计划也不能把未知语义写进去）。
+	if _, err := a.requireSupportedConfig(home); err != nil {
+		return err
+	}
+	if err := a.preflightChanges(desired, byStep); err != nil {
+		return err
+	}
 	if len(byStep["version"]) != 0 {
-		v := a.probeVersionQuiet(ctx)
+		v := a.probeVersionQuiet(ctx, home)
 		if v != desired.Version {
 			return fmt.Errorf("hermes: version %s is required but %q is installed and the command installer "+
 				"(§20.2) is not wired in this slice", desired.Version, v)
@@ -437,9 +533,6 @@ func (a *Adapter) Apply(ctx context.Context, home string, desired adapter.AgentD
 	}
 	for _, c := range byStep["skills"] {
 		name := strings.TrimPrefix(c.Key, "skill:")
-		if !validSkillName(name) {
-			return fmt.Errorf("hermes: refusing skill name %q (traversal guard)", name)
-		}
 		digest := fmt.Sprintf("%v", c.To)
 		if err := kit.EnsureSkillLink(a.skillPath(home, name), name, digest, kit.SkillCacheDir(home, name, digest)); err != nil {
 			return fmt.Errorf("hermes: %w", err)
@@ -448,8 +541,44 @@ func (a *Adapter) Apply(ctx context.Context, home string, desired adapter.AgentD
 	return nil
 }
 
+// preflightChanges 校验本次计划里每个待写对象（MCP 名/command/envRefs、skill 名/digest），
+// 让"config 先落盘、随后 skill 报穿越错"这类部分写入不可能发生。
+func (a *Adapter) preflightChanges(desired adapter.AgentDesiredState, byStep map[string][]adapter.Change) error {
+	for _, c := range byStep["mcp"] {
+		name := strings.TrimPrefix(c.Key, "mcp.")
+		if !mcpNameRe.MatchString(name) {
+			return fmt.Errorf("hermes: refusing mcp entry name %q (must match %s)", name, mcpNameRe)
+		}
+		entry, ok := desired.MCP[name]
+		if !ok {
+			continue
+		}
+		if entry.Command == "" {
+			return fmt.Errorf("hermes: mcp entry %q requires command", name)
+		}
+		if len(entry.EnvRefs) != 0 {
+			return &adapter.ValidateError{
+				Family: ID, Capability: adapter.CapabilityMCP, State: adapter.SupportUnverified,
+				Reason: fmt.Sprintf("mcp entry %q requests envRefs; ${VAR} expansion inside Hermes mcp_servers env "+
+					"is unverified on 0.21.2, so the adapter refuses the write instead of persisting a wrong shape", name),
+			}
+		}
+	}
+	for _, c := range byStep["skills"] {
+		name := strings.TrimPrefix(c.Key, "skill:")
+		if !validSkillName(name) {
+			return fmt.Errorf("hermes: refusing skill name %q (traversal guard)", name)
+		}
+		digest := fmt.Sprintf("%v", c.To)
+		if !kit.ValidDigest(digest) {
+			return fmt.Errorf("hermes: refusing skill %q digest %q (want %s)", name, digest, kit.DigestRe)
+		}
+	}
+	return nil
+}
+
 // applyConfig 用 YAML Node 合并写受管叶子键：只改受管键，注释、键序与未托管键（含同文档
-// 密钥面）逐字节保留。写后重新解析验证（§5.5）。
+// 密钥面）的键值/键序/注释保留（整树重编码会合并空行、规整缩进与引号，非字节级）。写后重新解析验证（§5.5）。
 func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, mcpChanges []adapter.Change) error {
 	raw, err := a.readConfigRaw(home)
 	if err != nil {
@@ -489,9 +618,19 @@ func (a *Adapter) applyConfig(home string, desired adapter.AgentDesiredState, mc
 	return kit.AtomicWrite(a.configPath(home), []byte(out), 0o600)
 }
 
-// HealthCheck（阶段 10）：配置可解析且 `_config_version` 对位、`hermes config check` 通过、
-// 受管键到位、版本一致、Skill 软链 digest 一致。只读用法，不使用 --live/--deep。
+// HealthCheck（阶段 10）：先给"被更高配置层（managed scope）覆盖"这一可区分健康态，
+// 再验证配置可解析且 `_config_version` 对位、`hermes config check` 通过、受管键到位、
+// 版本一致、Skill 软链 digest 一致。只读受管用法，不使用 --live/--deep。
 func (a *Adapter) HealthCheck(ctx context.Context, home string, desired adapter.AgentDesiredState) error {
+	over, err := a.higherLayerOverrides(home, desired)
+	if err != nil {
+		return fmt.Errorf("hermes: health: %w", err)
+	}
+	if len(over) != 0 {
+		key := sortedOverrideKeys(over)[0]
+		o := over[key]
+		return &HigherLayerOverrideError{Family: ID, Key: key, Layer: o.Layer, Effective: o.Effective, Wanted: o.Wanted}
+	}
 	root, err := a.requireSupportedConfig(home)
 	if err != nil {
 		return fmt.Errorf("hermes: health: %w", err)
@@ -500,7 +639,12 @@ func (a *Adapter) HealthCheck(ctx context.Context, home string, desired adapter.
 	if err != nil {
 		return fmt.Errorf("hermes: health: `hermes config check` failed: %w: %s", err, strings.TrimSpace(out))
 	}
-	if m := configVersionRe.FindStringSubmatch(out); m != nil && m[1] != fmt.Sprintf("%d", supportedConfigVersion) {
+	m := configVersionRe.FindStringSubmatch(out)
+	if m == nil {
+		return fmt.Errorf("hermes: health: `hermes config check` output did not report a `Config version:` line; " +
+			"refusing to treat an unrecognized output as healthy")
+	}
+	if m[1] != fmt.Sprintf("%d", supportedConfigVersion) {
 		return fmt.Errorf("hermes: health: `hermes config check` reports config version %s, want %d", m[1], supportedConfigVersion)
 	}
 	dcfg := adapter.ConfigMap(desired)
@@ -522,12 +666,17 @@ func (a *Adapter) HealthCheck(ctx context.Context, home string, desired adapter.
 		}
 	}
 	for name, entry := range desired.MCP {
-		if stringOf(kit.LookupYAML(root, "mcp_servers."+name+".command")) != entry.Command {
-			return fmt.Errorf("hermes: health: mcp server %q command is not in place", name)
+		got := map[string]any{
+			"command": stringOf(kit.LookupYAML(root, "mcp_servers."+name+".command")),
+			"args":    stringSlice(kit.LookupYAML(root, "mcp_servers."+name+".args")),
+		}
+		want := map[string]any{"command": entry.Command, "args": normalizeArgs(entry.Args)}
+		if !equal(got, want) {
+			return fmt.Errorf("hermes: health: mcp server %q is %v, want %v", name, got, want)
 		}
 	}
 	if desired.Version != "" {
-		v, err := kit.ProbeVersion(ctx, a.Probe, binaryName, versionArgs, parseVersion)
+		v, err := a.probeVersion(ctx, home)
 		if err != nil {
 			return fmt.Errorf("hermes: health: version probe failed: %w", err)
 		}
@@ -551,26 +700,239 @@ func (a *Adapter) runConfigCheck(ctx context.Context, home string) (string, erro
 	return run(ctx, home)
 }
 
-// defaultConfigCheck 执行只读的 `hermes config check`，把 HERMES_HOME 指到 <home>/.hermes
-// （护栏 #12：绝不落到真实 ~/.hermes）。绝不使用 --live/--deep。
+// defaultConfigCheck 执行只读受管文件的 `hermes config check`，把 HOME/HERMES_HOME 都钉到
+// 注入根（护栏 #12：绝不落到真实 ~/.hermes）。绝不使用 --live/--deep。
+// 注意：该命令**不改受管文件**，但会在 HERMES_HOME 下补齐缺失的 profile 产物
+// （SOUL.md、logs/、audio_cache/ 等），这些产物不在 ManagedFiles 内、回退不清理（§10.9）。
 func defaultConfigCheck(ctx context.Context, home string) (string, error) {
 	cmd := exec.CommandContext(ctx, binaryName, "config", "check")
-	cmd.Env = envWith("HERMES_HOME", configRoot(home))
+	cmd.Env = hermesEnv(home)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
-// envWith 返回 os.Environ() 但把 key 替换为 value（避免继承真实 HERMES_HOME）。
-func envWith(key, value string) []string {
-	prefix := key + "="
-	out := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, prefix) {
-			continue
-		}
-		out = append(out, kv)
+// ---- 更高配置层：managed scope（§8.6 跨片口径；复核 B3）----
+
+// HigherLayerOverrideError 表示受管键被更高的 managed-scope 配置层覆盖：managed 层在用户
+// `config.yaml` **之后**按叶子深合并（`hermes_cli/config.py:_merge_managed_overlay`，
+// "Managed wins at the leaf"），Fleet 的用户层写入无法生效。这是**可区分的健康态**——
+// 既不是 Reconciled，也不是"写成功→verify 失败→回滚"的循环。
+type HigherLayerOverrideError struct {
+	Family    string
+	Key       string
+	Layer     string
+	Effective any
+	Wanted    any
+}
+
+func (e *HigherLayerOverrideError) Error() string {
+	return fmt.Sprintf("agent %q managed key %s is overridden by higher config layer %s "+
+		"(effective=%v, wanted=%v); Fleet's managed layer is the user layer and cannot override an "+
+		"administrator-pinned managed scope — resolve on the managed layer or stop managing this key",
+		e.Family, e.Key, e.Layer, e.Effective, e.Wanted)
+}
+
+// layerOverride 是单个受管键的覆盖记录。
+type layerOverride struct {
+	Effective any
+	Wanted    any
+	Layer     string
+}
+
+// managedDir 解析 managed-scope 目录：注入值优先，其次 `$HERMES_MANAGED_DIR`（非空且目录
+// 存在），其次 `/etc/hermes`（存在）。与 `hermes_cli/managed_scope.py:get_managed_dir`
+// 同优先级；`/etc/hermes` 是 POSIX 默认位置。目录不存在返回 ""（零副作用）。
+func (a *Adapter) managedDir() string {
+	if a.ManagedDir != "" {
+		return a.ManagedDir
 	}
-	return append(out, prefix+value)
+	if env := strings.TrimSpace(os.Getenv("HERMES_MANAGED_DIR")); env != "" {
+		if info, err := os.Stat(env); err == nil && info.IsDir() {
+			return env
+		}
+		return ""
+	}
+	if info, err := os.Stat(defaultManagedDir); err == nil && info.IsDir() {
+		return defaultManagedDir
+	}
+	return ""
+}
+
+// defaultManagedDir 是 POSIX 默认 managed-scope 目录（其他平台位置只在 Hermes 侧补）。
+const defaultManagedDir = "/etc/hermes"
+
+// readManagedConfig 读 managed-scope 的 `config.yaml`（只按叶子路径读，绝不整树 Decode）。
+// 第二个返回值表示"目录存在且配置文件存在"。
+func (a *Adapter) readManagedConfig() (string, *yaml.Node, bool, error) {
+	dir := a.managedDir()
+	if dir == "" {
+		return "", nil, false, nil
+	}
+	path := filepath.Join(dir, "config.yaml")
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return dir, nil, false, nil
+	}
+	if err != nil {
+		return dir, nil, false, fmt.Errorf("read managed scope %s: %w", path, err)
+	}
+	root, err := kit.ParseYAML(string(raw))
+	if err != nil {
+		return dir, nil, false, fmt.Errorf("managed scope %s is unparseable: %w", path, err)
+	}
+	return dir, root, true, nil
+}
+
+// managedModelDefault 取 managed 层的默认模型：`model.default`，或 Hermes 允许的裸
+// 根 `model: <string>`（`_normalize_root_model_keys` 等价形态）。
+func managedModelDefault(root *yaml.Node) (string, bool) {
+	if v, ok := kit.LookupYAML(root, "model.default").(string); ok {
+		return v, true
+	}
+	if v, ok := kit.LookupYAML(root, "model").(string); ok {
+		return v, true
+	}
+	return "", false
+}
+
+// higherLayerOverrides 计算"哪些受管键的实际生效值来自 managed scope"。
+// 只有"该层确实设了该键、且值不同于期望"才算覆盖（同 §8.6/片 A/片 B 判据）；
+// managed 值按读取值比较（不展开 `${VAR}`）——方向是保守的"报覆盖、停写"。
+func (a *Adapter) higherLayerOverrides(home string, desired adapter.AgentDesiredState) (map[string]layerOverride, error) {
+	_ = home // managed scope 与 home 无关；保留签名以便与片 A/片 B 同形。
+	dir, root, present, err := a.readManagedConfig()
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return nil, nil
+	}
+	layer := fmt.Sprintf("managed scope (%s)", filepath.Join(dir, "config.yaml"))
+	out := map[string]layerOverride{}
+	dcfg := adapter.ConfigMap(desired)
+	wantModel, hasModel := dcfg["model"]
+	endpoint, keyEnv, hasProvider := adapter.ProviderConfig(dcfg)
+	if hasModel || hasProvider {
+		eff := map[string]any{}
+		changed := false
+		if v, ok := managedModelDefault(root); ok {
+			eff["default"] = v
+			if !kit.ValuesEqual(v, fmt.Sprintf("%v", wantModel)) {
+				changed = true
+			}
+		}
+		if v, ok := kit.LookupYAML(root, "model.provider").(string); ok {
+			eff["provider"] = v
+			if !kit.ValuesEqual(v, customProvider) {
+				changed = true
+			}
+		}
+		if v, ok := kit.LookupYAML(root, "model.base_url").(string); ok {
+			eff["base_url"] = v
+			if !kit.ValuesEqual(v, endpoint) {
+				changed = true
+			}
+		}
+		if v, ok := kit.LookupYAML(root, "model.api_key").(string); ok {
+			name := envRefName(v)
+			eff["apiKeyEnv"] = name
+			if !kit.ValuesEqual(name, keyEnv) {
+				changed = true
+			}
+		}
+		if changed {
+			out[keyModel] = layerOverride{
+				Effective: eff,
+				Wanted:    modelProjection(fmt.Sprintf("%v", wantModel), customProvider, endpoint, keyEnv),
+				Layer:     layer,
+			}
+		}
+	}
+	for name, e := range desired.MCP {
+		eff := map[string]any{}
+		changed := false
+		if v, ok := kit.LookupYAML(root, "mcp_servers."+name+".command").(string); ok {
+			eff["command"] = v
+			if !kit.ValuesEqual(v, e.Command) {
+				changed = true
+			}
+		}
+		if v := kit.LookupYAML(root, "mcp_servers."+name+".args"); v != nil {
+			args := stringSlice(v)
+			eff["args"] = args
+			if !kit.ValuesEqual(args, normalizeArgs(e.Args)) {
+				changed = true
+			}
+		}
+		if changed {
+			out["mcp."+name] = layerOverride{
+				Effective: eff,
+				Wanted:    map[string]any{"command": e.Command, "args": normalizeArgs(e.Args)},
+				Layer:     layer,
+			}
+		}
+	}
+	return out, nil
+}
+
+// markHigherLayerOverrides 把 managed 生效值并入观测投影，并给被覆盖的键打 overriddenBy 标记。
+func markHigherLayerOverrides(proj map[string]any, over map[string]layerOverride) {
+	if len(over) == 0 {
+		return
+	}
+	markers := map[string]any{}
+	for key, o := range over {
+		markers[key] = o.Layer
+		switch {
+		case key == keyModel:
+			proj["model"] = mergeLayer(proj["model"], o.Effective)
+		default:
+			if name, ok := strings.CutPrefix(key, "mcp."); ok {
+				mcp, _ := proj["mcp"].(map[string]any)
+				if mcp == nil {
+					mcp = map[string]any{}
+					proj["mcp"] = mcp
+				}
+				mcp[name] = mergeLayer(mcp[name], o.Effective)
+			}
+		}
+	}
+	proj[overrideMarkerKey] = markers
+}
+
+// mergeLayer 把更高层的叶子值覆盖到本层投影（浅合并一层）。
+func mergeLayer(base, layer any) map[string]any {
+	out := map[string]any{}
+	if m, ok := base.(map[string]any); ok {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	if m, ok := layer.(map[string]any); ok {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// overrideSet 从观测投影里取出被覆盖的 plan 键集合。
+func overrideSet(proj map[string]any) map[string]bool {
+	out := map[string]bool{}
+	markers, _ := proj[overrideMarkerKey].(map[string]any)
+	for key := range markers {
+		out[key] = true
+	}
+	return out
+}
+
+func sortedOverrideKeys(over map[string]layerOverride) []string {
+	out := make([]string, 0, len(over))
+	for k := range over {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ---- 路径（相对注入的 home 根，护栏 #12）----

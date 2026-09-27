@@ -31,11 +31,11 @@ const (
 
 // ---- 桩与辅助 ----
 
-// recordProbe 返回版本桩并记录每次调用的参数（断言只用 `--version`）。
-func recordProbe(version string, calls *[][]string) kit.VersionProbe {
-	return func(_ context.Context, _ string, args ...string) (string, error) {
+// recordProbe 返回版本桩并记录每次调用的注入 home（默认探测必须钉 HOME/HERMES_HOME）。
+func recordProbe(version string, calls *[]string) VersionProbe {
+	return func(_ context.Context, home string) (string, error) {
 		if calls != nil {
-			*calls = append(*calls, append([]string{}, args...))
+			*calls = append(*calls, home)
 		}
 		return "Hermes Agent v" + version + " (2026.9.11) · upstream " + repoUpstream + "\n" +
 			"Install directory: /home/user/.hermes/hermes-agent\n" +
@@ -43,14 +43,14 @@ func recordProbe(version string, calls *[][]string) kit.VersionProbe {
 	}
 }
 
-func probeMissing() kit.VersionProbe {
-	return func(_ context.Context, bin string, _ ...string) (string, error) {
-		return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+func probeMissing() VersionProbe {
+	return func(_ context.Context, _ string) (string, error) {
+		return "", &exec.Error{Name: binaryName, Err: exec.ErrNotFound}
 	}
 }
 
-func probeGarbage() kit.VersionProbe {
-	return func(_ context.Context, _ string, _ ...string) (string, error) {
+func probeGarbage() VersionProbe {
+	return func(_ context.Context, _ string) (string, error) {
 		return "not the hermes banner\n", nil
 	}
 }
@@ -202,17 +202,18 @@ func TestDetectDistinguishesMissingFromUnparseable(t *testing.T) {
 	})
 
 	t.Run("installed", func(t *testing.T) {
-		var calls [][]string
+		var calls []string
+		home := t.TempDir()
 		a := &Adapter{Probe: recordProbe(repoVersion, &calls)}
-		d, err := a.Detect(ctx, t.TempDir())
+		d, err := a.Detect(ctx, home)
 		if err != nil {
 			t.Fatalf("Detect: %v", err)
 		}
 		if !d.Installed || d.Version != repoVersion {
 			t.Fatalf("got installed=%v version=%q", d.Installed, d.Version)
 		}
-		if len(calls) != 1 || len(calls[0]) != 1 || calls[0][0] != "--version" {
-			t.Fatalf("probe must be called once with --version (never `hermes version`), got %v", calls)
+		if len(calls) != 1 || calls[0] != home {
+			t.Fatalf("probe must run against the injected home, got %v (want %s)", calls, home)
 		}
 	})
 
@@ -901,5 +902,253 @@ func TestRealHermesBinaryConfigCheck(t *testing.T) {
 	reconcile(t, newTestAdapter(), home, desired)
 	if err := (&Adapter{}).HealthCheck(context.Background(), home, desired); err != nil {
 		t.Fatalf("real hermes rejected the merged config: %v", err)
+	}
+}
+
+// ---- 复核轮（B1/B2/B3 + MINOR）回归 ----
+
+// TestValidateRejectsMalformedDigest（B1）：digest 形状不符在任何写入之前被拒。
+func TestValidateRejectsMalformedDigest(t *testing.T) {
+	home := baselineHome(t)
+	for _, digest := range []string{"../../../../../..", "sha256:not-a-digest/../../../..", "sha256:cc", ""} {
+		desired := adapter.AgentDesiredState{Family: ID,
+			Skills: map[string]domain.SkillDesired{"ok": {ContentDigest: digest}}}
+		err := newTestAdapter().Validate(context.Background(), home, desired)
+		if err == nil || !strings.Contains(err.Error(), "contentDigest") {
+			t.Fatalf("digest %q must be rejected, got %v", digest, err)
+		}
+	}
+}
+
+// TestApplyPreflightRejectsBeforeAnyWrite（B1 + NIT）：绕过 Validate 的陈旧计划也不得发生
+// 部分写入——坏 digest / envRefs / `_config_version` 漂移 / 点号 MCP 名都在写 config 之前被拒。
+func TestApplyPreflightRejectsBeforeAnyWrite(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("bad-skill-digest", func(t *testing.T) {
+		home := baselineHome(t)
+		a, desired := newTestAdapter(), fullDesired(t, home)
+		before := readText(t, filepath.Join(home, ".hermes", "config.yaml"))
+		err := a.Apply(ctx, home, desired, []adapter.Change{
+			{Family: ID, Step: "config", Key: keyModel},
+			{Family: ID, Step: "skills", Key: "skill:ok", To: "../../../../.."},
+		})
+		if err == nil {
+			t.Fatal("bad digest must be rejected")
+		}
+		if got := readText(t, filepath.Join(home, ".hermes", "config.yaml")); got != before {
+			t.Fatal("config was written before the skill digest was checked")
+		}
+	})
+
+	t.Run("envRefs", func(t *testing.T) {
+		home := baselineHome(t)
+		a, desired := newTestAdapter(), fullDesired(t, home)
+		entry := desired.MCP["fleet-tool"]
+		entry.EnvRefs = map[string]string{"TOKEN": "FLEET_TOKEN"}
+		desired.MCP["fleet-tool"] = entry
+		before := readText(t, filepath.Join(home, ".hermes", "config.yaml"))
+		err := a.Apply(ctx, home, desired, []adapter.Change{
+			{Family: ID, Step: "mcp", Key: "mcp.fleet-tool"},
+		})
+		var ve *adapter.ValidateError
+		if !errors.As(err, &ve) {
+			t.Fatalf("envRefs must be rejected in Apply pre-flight, got %v", err)
+		}
+		if got := readText(t, filepath.Join(home, ".hermes", "config.yaml")); got != before {
+			t.Fatal("config was written before envRefs was checked")
+		}
+	})
+
+	t.Run("config-version-drift", func(t *testing.T) {
+		home := t.TempDir()
+		mustWrite(t, filepath.Join(home, ".hermes", "config.yaml"),
+			strings.Replace(fixtureConfig(t), "_config_version: 44", "_config_version: 45", 1))
+		a := newTestAdapter()
+		err := a.Apply(ctx, home, adapter.AgentDesiredState{Family: ID}, []adapter.Change{
+			{Family: ID, Step: "config", Key: keyModel},
+		})
+		if err == nil || !strings.Contains(err.Error(), "_config_version=45") {
+			t.Fatalf("stale plan on drifted config must be rejected, got %v", err)
+		}
+	})
+
+	t.Run("dotted-mcp-name", func(t *testing.T) {
+		home := baselineHome(t)
+		a := newTestAdapter()
+		err := a.Apply(ctx, home, adapter.AgentDesiredState{Family: ID},
+			[]adapter.Change{{Family: ID, Step: "mcp", Key: "mcp.a.b"}})
+		if err == nil || !strings.Contains(err.Error(), "mcp entry name") {
+			t.Fatalf("dotted mcp name must be rejected by Apply pre-flight, got %v", err)
+		}
+	})
+}
+
+// TestDefaultVersionProbePinsHome（B2）：默认探测必须把 HOME/HERMES_HOME 都钉到注入根，
+// 否则 `hermes --version` 会读另一个 ~/.hermes 并在真实 home 里初始化骨架。
+func TestDefaultVersionProbePinsHome(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "probe.env")
+	script := filepath.Join(dir, binaryName)
+	mustWrite(t, script, "#!/bin/sh\nprintf '%s\\n%s\\n' \"$HOME\" \"$HERMES_HOME\" > \"$PROBE_OUT\"\n"+
+		"printf 'Hermes Agent v0.21.2 (2026.9.11) · upstream be2f7e9c\\n'\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_OUT", out)
+
+	home := t.TempDir()
+	d, err := (&Adapter{}).Detect(context.Background(), home)
+	if err != nil {
+		t.Fatalf("Detect with default probe: %v", err)
+	}
+	if !d.Installed || d.Version != repoVersion {
+		t.Fatalf("got installed=%v version=%q", d.Installed, d.Version)
+	}
+	got := strings.Split(strings.TrimSpace(readText(t, out)), "\n")
+	if len(got) != 2 || got[0] != home || got[1] != configRoot(home) {
+		t.Fatalf("probe env = %v, want [%s %s]", got, home, configRoot(home))
+	}
+}
+
+// managedScope 建一个临时 managed-scope 目录（注入 ManagedDir，绝不读真实 /etc/hermes）。
+func managedScope(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if body != "" {
+		mustWrite(t, filepath.Join(dir, "config.yaml"), body)
+	}
+	return dir
+}
+
+// TestManagedScopeOverrideIsDistinguishable（B3）：managed scope 压过用户层时，
+// 观测投影带 overriddenBy + 生效值、Plan 整片空、HealthCheck 返回可区分失败、Apply 拒写。
+func TestManagedScopeOverrideIsDistinguishable(t *testing.T) {
+	ctx := context.Background()
+	home := baselineHome(t)
+	a := newTestAdapter()
+	desired := fullDesired(t, home)
+	reconcile(t, a, home, desired)
+	configPath := filepath.Join(home, ".hermes", "config.yaml")
+	before := readText(t, configPath)
+
+	a.ManagedDir = managedScope(t, "model:\n  default: managed-model\n  base_url: https://managed.example/v1\n")
+
+	inv, err := a.Inventory(ctx, home, desired)
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	markers, _ := inv.ManagedProjection[overrideMarkerKey].(map[string]any)
+	if _, ok := markers[keyModel]; !ok {
+		t.Fatalf("config.model must be marked overridden, got %v", inv.ManagedProjection)
+	}
+	model, _ := inv.ManagedProjection["model"].(map[string]any)
+	if model["default"] != "managed-model" || model["base_url"] != "https://managed.example/v1" {
+		t.Fatalf("observed model must carry the effective managed values, got %v", model)
+	}
+
+	changes, err := a.Plan(ctx, home, desired, inv)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("override must yield an empty plan, got %v", changes)
+	}
+
+	var oe *HigherLayerOverrideError
+	if err := a.HealthCheck(ctx, home, desired); !errors.As(err, &oe) || oe.Key != keyModel {
+		t.Fatalf("want *HigherLayerOverrideError(config.model), got %v", err)
+	}
+	if !strings.Contains(oe.Layer, "managed scope") {
+		t.Fatalf("override layer must name managed scope, got %q", oe.Layer)
+	}
+
+	// 陈旧计划（含受管键变更）同样拒写。
+	err = a.Apply(ctx, home, desired, []adapter.Change{{Family: ID, Step: "config", Key: keyModel}})
+	if !errors.As(err, &oe) {
+		t.Fatalf("stale plan under override must be refused, got %v", err)
+	}
+	if got := readText(t, configPath); got != before {
+		t.Fatal("wrote to the user layer while a managed scope pins the key")
+	}
+}
+
+// TestManagedScopeSameValueAndAbsenceAreNotOverrides（B3 反向对照）：
+// 同值不算覆盖；空文件不算覆盖；无 managed 目录不算覆盖。
+func TestManagedScopeSameValueAndAbsenceAreNotOverrides(t *testing.T) {
+	ctx := context.Background()
+	home := baselineHome(t)
+	a := newTestAdapter()
+	desired := fullDesired(t, home)
+
+	t.Run("same-value", func(t *testing.T) {
+		a.ManagedDir = managedScope(t, "model:\n  default: fleet-model\n  provider: custom\n"+
+			"  base_url: https://api.example.com/v1\n  api_key: \"${FLEET_API_KEY}\"\n")
+		inv, err := a.Inventory(ctx, home, desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := inv.ManagedProjection[overrideMarkerKey]; ok {
+			t.Fatalf("same-value managed config must not count as an override: %v", inv.ManagedProjection)
+		}
+	})
+
+	t.Run("empty-managed-file", func(t *testing.T) {
+		a.ManagedDir = managedScope(t, "")
+		inv, err := a.Inventory(ctx, home, desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := inv.ManagedProjection[overrideMarkerKey]; ok {
+			t.Fatalf("absent managed config must not count as an override: %v", inv.ManagedProjection)
+		}
+	})
+
+	t.Run("no-managed-dir", func(t *testing.T) {
+		a.ManagedDir = filepath.Join(t.TempDir(), "does-not-exist")
+		inv, err := a.Inventory(ctx, home, desired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := inv.ManagedProjection[overrideMarkerKey]; ok {
+			t.Fatal("missing managed dir must not count as an override")
+		}
+	})
+}
+
+// TestManagedScopeUnparseableFailsExplicitly（B3）：managed 文件不可解析时显式失败，不猜生效值。
+func TestManagedScopeUnparseableFailsExplicitly(t *testing.T) {
+	home := baselineHome(t)
+	a := newTestAdapter()
+	a.ManagedDir = managedScope(t, "model: [unclosed\n")
+	if _, err := a.Inventory(context.Background(), home, fullDesired(t, home)); err == nil ||
+		!strings.Contains(err.Error(), "managed scope") {
+		t.Fatalf("unparseable managed scope must fail explicitly, got %v", err)
+	}
+}
+
+// TestHealthCheckComparesMCPArgsAndRequiresVersionLine（MINOR）：
+// MCP args 也算受管健康面；`config check` 输出没有 `Config version:` 行不再静默通过。
+func TestHealthCheckComparesMCPArgsAndRequiresVersionLine(t *testing.T) {
+	ctx := context.Background()
+	home := baselineHome(t)
+	a := newTestAdapter()
+	desired := fullDesired(t, home)
+	reconcile(t, a, home, desired)
+
+	// 改掉受管 MCP 的 args → HealthCheck 必须失败。
+	configPath := filepath.Join(home, ".hermes", "config.yaml")
+	original := readText(t, configPath)
+	mustWrite(t, configPath, strings.Replace(original, "- -y", "- -x", 1))
+	if err := a.HealthCheck(ctx, home, desired); err == nil || !strings.Contains(err.Error(), "mcp server") {
+		t.Fatalf("tampered mcp args must fail health, got %v", err)
+	}
+	mustWrite(t, configPath, original)
+
+	// `config check` 输出缺少版本行 → 显式失败。
+	a.ConfigCheck = func(_ context.Context, _ string) (string, error) { return "no version here\n", nil }
+	if err := a.HealthCheck(ctx, home, desired); err == nil || !strings.Contains(err.Error(), "Config version") {
+		t.Fatalf("unversioned config check output must fail health, got %v", err)
 	}
 }
