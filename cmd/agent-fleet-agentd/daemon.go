@@ -11,7 +11,9 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/claude"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/dsh"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/grok"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/hermes"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/opencode"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
@@ -81,7 +83,9 @@ func runDaemon(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	reg := adapter.NewRegistry()
 	reg.Register(claude.New())
 	reg.Register(codex.New())
+	reg.Register(dsh.New())
 	reg.Register(grok.New())
+	reg.Register(hermes.New())
 	reg.Register(omp.New())
 	reg.Register(opencode.New())
 

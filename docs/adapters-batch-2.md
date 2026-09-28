@@ -937,3 +937,520 @@ env keys: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NO
 
 **修复后自查**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿（claude 包 24 个测试函数）。
 B1 的复现脚本已按核查给定的形状（`Validate(skill="..")` → `Apply` → `Lstat(~/.claude)`）转为永久回归。
+
+---
+
+## 10. 片 C：Hermes 适配器逐家族验收记录（KM-35）
+
+本片交付批次二第 3 片：接入 Hermes（可执行 `hermes`，Nous Research `hermes-agent`）适配器。
+沿用批次一范式（新增 `internal/agentlocal/adapter/hermes` + 注册，**控制面零改动**）。
+
+**编号依据**：开工时 KM-34（片 B / PR #14）仍是 `OPEN`（`headRefOid=984fbca3`），故按
+KM-35「开工须知」第 1 条把本片分支**叠在片 B 分支** `agent/agent/80b253847eb5` 上，
+PR 的 base 选该分支；#14 合入后 GitHub 会把它重定向到 `main`，diff 收敛为纯本片改动。
+因此验收记录为 §9 之后的 **§10**（为片 B 的 §9 留位），不另建片级文档。
+
+### 10.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/hermes/`：`Adapter` 8 方法（`ID`/`Capabilities`/`Validate`/`Detect`/`Inventory`/`Plan`/`Apply`/`HealthCheck`）+ `ManagedFiles`/`ExtractManaged`/`MergeManaged` |
+| 注册（3 处，跟随现状） | `cmd/agent-fleet-agentd/daemon.go:86`、`oneshot.go:346`、`doctor.go:134` 各一处 `reg.Register(hermes.New())`。片 A/片 B 未收敛，本片**不夹带**该重构 |
+| 写 kit | 按 KM-35 开工须知第 3 条，把 OMP 私有的 `omp/yamlpatch.go` **下沉共享**为 `kit/yamlpatch.go`（导出 `ParseYAML`/`LookupYAML`/`SetYAML`/`PatchYAML`/`EncodeYAML`），`omp/omp.go` 的 18 处引用改指 kit，删除 `omp/yamlpatch.go` 与 OMP 里随之失效的 `sortedKeys`/`sort` import（**未复制第二份实现**）。下沉在同一提交内完成、在 PR 描述里单列声明、不夹带。复核轮另在 `kit.EnsureSkillLink` 收口加了 digest 形状守卫（`kit.ValidDigest`，六家族一次修好，见 §10.10） |
+| fixture | `internal/agentlocal/adapter/hermes/testdata/config.yaml`：**本机真实形状的截断样本**——65 个顶层键（`_config_version: 44`，含 `model`/`mcp_servers`/`skills` 全形状与 60 余个未托管键）、`mcp_servers` 的 5 种条目形状（1 个仅 command+args；4 个带 `enabled`/`env`，其中 1 个另带 `timeout`）、注释、密钥占位符（值为 `${...}` 引用或假值，绝无真实凭据）。**两处刻意偏离真实值**：`model.context_length`（真实 `model` 段只有 `default`/`provider`）与 `skills.external_dirs: ["~/.agents/skills"]`（真实为 `[]`）——分别覆盖「同段未托管兄弟键保留」与「外部技能根不可写」两个回归面 |
+| 测试 | `internal/agentlocal/adapter/hermes/hermes_test.go`（29 个测试函数；矩阵 5 项 + 密钥边界 + 软链写穿 + B1/B2/B3 复核回归 + 真实二进制补证，全部临时 HOME） |
+| 注册实测 | `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → `"adapters": ["claude","codex","grok","hermes","omp","opencode"]` |
+
+### 10.2 受管面与所有权（实现口径）
+
+**单一 YAML 真源**：只写 `$HERMES_HOME/config.yaml`（默认 `~/.hermes/config.yaml`），
+用 **YAML Node 树合并**（`kit.PatchYAML`，注释保留）。只按**叶子键路径**读写，绝不整树
+`Decode`——同文档内的密钥面因此既不进期望状态也不进观测投影：
+
+- `model.default` ← 归一化 `config.model`
+- `model.provider` ← `custom`（官方：任意 OpenAI 兼容端点用 `provider: custom` + `base_url`）
+- `model.base_url` ← 归一化 `provider.endpoint`
+- `model.api_key` ← `${<归一化 provider.apiKeyEnv>}`（见 10.3 的建模裁决；只写变量名）
+- `mcp_servers.<name>.command` / `.args`（仅**期望点名**的条目；条目内其它键保留）
+- `~/.hermes/skills/<name>`：Skill 软链（复用 `kit.EnsureSkillLink`/`ReadSkillDigest`）
+
+**必须保留（未点名）**：其余 60 余个顶层键（`agent`/`terminal`/`display`/`auxiliary`/
+`delegation`/`dashboard`/`secrets`/`gateway`/…）、`model` 段内未托管兄弟键（如 `context_length`/
+`default_headers`/`streaming`）、受管 MCP 条目内的 `env`/`enabled`/`timeout`/`tools.*`，以及
+**密钥面** `delegation.api_key`、`auxiliary.*.api_key`、`secrets.bitwarden.*`、
+`dashboard.basic_auth.*`、顶层 `HTTP_PROXY`/`HTTPS_PROXY`。`~/.hermes/.env` 与
+`~/.hermes/auth.json` **完全不读**。`SOUL.md` 不纳入受管。
+
+**字节所有权的准确表述（复核 MINOR 3）**：这里的「保留」是**键值/键序/注释**级——
+YAML Node 树合并不会丢失任何未托管键、值或注释文本，但整树重编码会**合并全文空行**
+并规整缩进与引号（本机 fixture 实测 294 行 → 240 行，缺失 63 行中 61 行为空行，
+非空行只少了 2 行被替换的受管旧值）。故**不是字节级保留**；批次一同款。
+
+MCP 条目名限定 `[A-Za-z0-9_-]{1,100}`（点号会与 YAML 点分路径冲突）；Skill 名限定
+`skillNameRe`（`^[A-Za-z0-9._-]+$`）且非 `"."`/`".."`（防穿越，追加片 B 的 B1 回归口径）。
+
+### 10.3 建模裁决（复核确认 + 两处口径）
+
+1. **`model.api_key` 写为 `${apiKeyEnv}` 间接引用 —— 核查确认（2026-09-27）：按 (a) 采纳**；
+   §4.2 的字面清单由本片扩展，并在给父任务的汇总里单列这处扩展。依据：FR-3.1 规定归一化
+   provider **必带** `apiKeyEnv`；Hermes 的 `custom` provider 只从 `OPENAI_API_KEY` 或
+   `model.api_key` 取键（`agent/auxiliary_client.py` `_resolve_custom_branch`）；源码
+   `hermes_cli/config.py:_expand_env_vars` 对配置字符串递归展开 `${VAR}`/`${env:VAR}`，
+   仓库自带 `tests/hermes_cli/test_config_env_expansion.py` 与 `cli-config.yaml.example`
+   均使用该形态，故 `${<VAR>}` 是**原生间接引用**、值永不落盘（同片 A Grok 的 `env_key`）。
+   若改成「拒绝非空 `apiKeyEnv`」，每个真实 provider 都进不来。
+   **回退边界（复核要求写明）**：宿主机原本是**字面量** `model.api_key` 时，Fleet 会把它收敛成
+   `${VAR}`；此后「受管键级回退」（`MergeManaged`）**不会**还原文值——`ExtractManaged` 有意排除
+   字面量，只有「文件未被外部编辑时的整文件还原」能还原。桩复跑：配置里放
+   `sk-live-SUPERSECRET` 时 `Plan` 变更集与 `ExtractManaged` 都不含该值（无泄漏）。
+   **口径延伸**：`apiKeyEnv` 现为硬要求 → Hermes 的 no-auth 本地端点（`no-key-required` 分支）
+   本片不可管；归一化 provider 本必带该字段，属可接受口径（登记为 10.9 第 6 项）。
+2. **`skills.external_dirs` 在声明范围内但本片无可写来源**：§4.2 把它列为可管键，且
+   Hermes 的 external dirs 是**只读**技能根（`cli-config.yaml.example`：
+   "External dirs are read-only: skill creation always writes to ~/.hermes/skills/"），
+   但归一化 skills 契约（`domain.SkillDesired`）不携带外部技能根 → 本片**不写该键**、
+   列表内容保留，作为契约缺口上报（10.9 第 2 项）。技能落地走
+   `~/.hermes/skills/<name>` 软链（与全家族同范式，本机该目录既有条目正是
+   `-> ../../.agents/skills/<name>` 的软链，不点名即不触碰）。
+3. **Rules = `unsupported`**：用户级指令是 `SOUL.md`（用户身份/人格），§4.2 建议不纳入、
+   §4.4 第 8 项仍属未决；项目级 `AGENTS.md`/`.hermes.md` 是仓库相对路径，不在 home 受管面。
+   本片不做受管块，`Validate` 对 rules 请求显式拒绝。
+
+### 10.4 本机实测补证（临时 `HERMES_HOME`，未触碰受管面与凭据文件）
+
+```
+$ hermes --version
+Hermes Agent v0.21.2 (2026.9.11) · upstream be2f7e9c
+Install directory: /home/shelwin/.hermes/hermes-agent
+Install method: git
+Python: 3.11.15
+OpenAI SDK: 2.24.0
+Update available: 10455 commits behind — run 'hermes update'
+
+$ hermes config path
+/home/shelwin/.hermes/config.yaml
+
+$ hermes config check        # 不改受管文件，退出 0
+  Config version: 44 ✓
+
+# 受管合并写落到临时 HERMES_HOME 后，真实二进制复验（TestRealHermesBinaryConfigCheck，HERMES_REAL=1）：
+$ HERMES_REAL=1 go test ./internal/agentlocal/adapter/hermes/ -run TestRealHermesBinaryConfigCheck
+--- PASS: TestRealHermesBinaryConfigCheck (5.03s)
+
+# managed scope 的真实解释器复核（临时 home + 临时 managed dir）：
+$ HERMES_HOME=<tmp>/.hermes HERMES_MANAGED_DIR=<tmp-managed> venv/bin/python -c 'load_config()...'
+model.default = managed-model
+model.base_url = https://managed.example/v1
+```
+
+- `hermes version` **不是子命令**（choices 无 `version`，退出码 2）→ 探测只用 `--version`，
+  且只取首行严格匹配（`TestVersionParserRejectsAnomalies`）。
+- `upstream be2f7e9c` 是 checkout 提交号（`origin/main`），**不是产品版本**；`0.21.2` 才是包版本。
+- 本机 `~/.hermes/config.yaml` 实测 65 个顶层键、`_config_version: 44`；`model` 只有
+  `default`/`provider`（无 `base_url`），`mcp_servers` 5 项多形状，`skills.external_dirs: []`。
+- `hermes config check` 对 `_config_version: 43` 仍**退出 0** 并打印 `43 → 44 (update available)`
+  → 版本判定不能只看退出码：适配器**另按文件里的 `_config_version` 判定**（见 10.5）。
+- **`hermes config check` 不是纯只读（复核 MINOR 1）**：它不改受管文件，但会在 `HERMES_HOME`
+  下补齐缺失的 profile 产物（`SOUL.md`、`logs/agent.log`、`logs/errors.log`、`logs/curator/`、
+  `audio_cache/`、`cron/`、`hooks/`、`image_cache/`、`memories/`、`pairing/`、`sessions/`、
+  `skills/`）。本片仍按 KM-35 口径第 6 条保留该命令作健康检查，但措辞改为「不改受管文件；
+  会补齐缺失 profile 产物」，并把副作用产物不在 `ManagedFiles` 内、回退不清理登记进 10.9。
+- **版本/配置探测都钉注入根（复核 B2）**：`defaultVersionProbe` 与 `defaultConfigCheck` 都把
+  `HOME`+`HERMES_HOME` 指到 `<home>`；不钉会让 `hermes --version` 读另一个 `~/.hermes`
+  并在真实 home 初始化骨架（复核实测 11.3s + 新建 `~/.hermes/*`）。回归
+  `TestDefaultVersionProbePinsHome`（假二进制记录 `$HOME`/`$HERMES_HOME`）。
+
+### 10.5 无机器可读 schema：`_config_version` 与更高配置层（显式，不静默降级）
+
+`config.yaml` 的规范是 2138 行注释样例 + 文档，**无 JSON Schema**。适配器对配置版本的处置：
+
+- `supportedConfigVersion = 44`；`Validate`/`Inventory`/`HealthCheck`/`Apply` 四处都先经
+  `requireSupportedConfig`：
+  - 文件缺失/为空 → 显式失败（"Hermes home is not initialized"，拒绝创建无版本号的配置）；
+  - 无整数 `_config_version` → 显式失败；
+  - `_config_version != 44` → 显式失败（点名观测值与对位值，写明 "rather than silently degrade"）。
+- 因此上游迁移（44 → 45）时流水线是**一次干净、零写入的可区分失败**，不会把未知语义的键
+  写进一个已迁移的配置。`HealthCheck` 再加一层：解析 `hermes config check` 输出里的
+  `Config version: <n>`，**缺失该行或与 44 不符都失败**（不再静默通过，复核 MINOR/NIT）。
+
+**更高配置层：managed scope（复核 B3，此前误判为"不存在文件层"）**。Hermes 的
+`hermes_cli/managed_scope.py:get_managed_dir` 给出管理员层目录：`$HERMES_MANAGED_DIR`（非空且
+目录存在）优先，否则 `/etc/hermes`（存在时）；`hermes_cli/config.py:_merge_managed_overlay`
+把该目录的 `config.yaml` 在用户配置**之后**按叶子深合并（"Managed wins at the leaf"，反向于
+通常的 env-over-config 优先级）。真实解释器复核见 §10.4。适配器据此实现与片 A/片 B 同形的三态：
+
+- **判据**：只有 managed 层确实设了某个受管叶子键、且值不同于期望才算覆盖；同值不算；空文件/
+  无目录不算（`TestManagedScopeSameValueAndAbsenceAreNotOverrides`）。managed 值按读取值比较
+  （不展开 `${VAR}`），方向是保守的"报覆盖、停写"。managed 文件不可解析时显式失败，不猜生效值
+  （`TestManagedScopeUnparseableFailsExplicitly`）。
+- **行为**：任一受管键被覆盖 → 观测投影带 `overriddenBy` 标记 + 生效值、
+  `Plan` **整片返回空计划**、`HealthCheck` 返回 `*HigherLayerOverrideError`（点名键/层/生效值/
+  期望值）、`Apply` 对陈旧计划直接拒写（`TestManagedScopeOverrideIsDistinguishable`）。
+  这样流水线是"一次干净、零写入、可区分的失败"，不产生备份/回滚循环。
+- `hermes config check` 对 managed 覆盖**无区分度**（有/无覆盖输出逐字节相同、均退出 0），
+  故判定必须按 managed 目录/文件做，不能依赖该命令。
+
+环境变量层（`HERMES_*`）与 managed `.env` 的运行时优先级**未验证**，已记入
+`Capabilities(modelProvider).Reason` 与 10.8 第 9/11 项——本片不对该层声称收敛。KM-35 开工须知
+第 4 条要求的"写入前拒绝"落点是 `envRefs`（见 §10.6 第 2 项）。
+
+### 10.6 逐家族验收 5 项（矩阵口径）
+
+1. **身份与兼容性**：`TestDetectDistinguishesMissingFromUnparseable`——已装/未装/版本不可解析
+   三态可区分（程序缺失 `Installed=false` 且非错误；首行形态不符显式报错），并断言探测只对
+   注入 home 执行。`TestDefaultVersionProbePinsHome`（复核 B2）——默认探测把 `HOME`/`HERMES_HOME`
+   都钉到注入根（假二进制记录两者）。`TestVersionParserRejectsAnomalies`——缺 upstream/缺日期/
+   错前缀/非三段版本/`hermes version` 的 invalid-choice 输出/空输出全部解析失败。非 linux → 阶段 1 拒绝。
+2. **配置与所有权**：`TestMergeWritePreservesUnmanagedAndIsIdempotent`——以 65 顶层键 fixture
+   为输入，未托管顶层键与 `model` 段内未托管兄弟键、受管 MCP 条目内的 `env`/`enabled`/`timeout`
+   键值/键序/注释保留，密钥面 `${DELEGATION_KEY}`/`${AUX_*}`/`${DASHBOARD_*}`/`BW_ACCESS_TOKEN`/
+   代理串与注释保留；受管键到位；重复 reconcile 无变更且字节不变。
+   `TestInvalidMCPEntryIsNotTouched`——未点名的 `mcp_servers.*` 原样保留。
+   `TestValidateRejectsUnverifiedBeforeWrite` + `TestValidateRejectsMalformedRequests` +
+   `TestValidateRejectsRulesRequest` + `TestValidateRejectsUnparseableAndVersionDrift` +
+   `TestValidateRejectsMalformedDigest`（复核 B1）——`envRefs`（`*ValidateError`/unverified）、
+   rules、非法 MCP 名、缺 command、model/provider 不成对、空 endpoint、空/非法 `apiKeyEnv`、
+   非对象 config、穿越 Skill 名、非法 digest、配置不可解析、缺配置、`_config_version` 漂移：
+   全部在**任何写入之前**拒绝且零写入产物。
+   `TestTraversalSkillNamesAreRejectedBeforeWrite`（`.`/`..`：Validate 与 Apply 双挡，路径未创建）。
+   `TestApplyPreflightRejectsBeforeAnyWrite`（复核 NIT）——绕过 Validate 的陈旧计划里，
+   坏 digest / `envRefs` / `_config_version` 漂移 / 点号 MCP 名都在写 config 之前被拒（无部分写入）。
+   `TestPatchGoldenPreservesCommentsAndOrder`——YAML 合并的小黄金文件（注释/键序/缩进/空行规整）。
+3. **生命周期**：`TestDriftOnlyFromManagedFields`——幂等；未托管改动（`display.theme`、
+   `model.context_length`、受管 MCP 条目内的 `env`、`hooks_auto_accept`）不误报；
+   受管改动（`model.default`/`base_url`/`api_key`、MCP `command`/`args`）各自触发 drift 并在
+   `Apply` 后收敛。`TestMCPEntryWithoutArgsConverges`（批次一复核缺陷 1 回归）、
+   `TestProviderChangeConvergesOnSecondApply`（整节点替换回归）。安装/升级不在片内：
+   `TestApplyVersionMismatchFailsExplicitly` 在版本不匹配时显式失败，不谎报成功。
+4. **恢复与一致性**：`TestManagedFilesExtractAndMergeRollback`——`ManagedFiles` 一条
+   （`.hermes/config.yaml`；**skills 软链不在其中**，属既有契约，见 10.9 第 7 项）；
+   `ExtractManaged` 只提取受管 model 叶子键（未托管键与密钥面不进备份），
+   受管键级回退保留未托管内容与注释，未知受管键/非受管文件显式失败；
+   `TestExtractManagedNeverPersistsLiteralSecret`（字面量 `api_key` 绝不进 manifest）。
+   `TestSkillLinksAreSymlinkSetAndIdempotent`、`TestSkillLinkRequiresMaterializedArtifact`
+   （缓存未物化显式失败、不写坏链）、`TestConfigWritePreservesSymlink`（config.yaml 软链写穿，护栏 #3）。
+   `TestHealthCheckComparesMCPArgsAndRequiresVersionLine`——MCP `args` 也算健康面；
+   `config check` 输出缺 `Config version:` 行不再静默通过。
+5. **验收记录**：本节；§4.4 未验证项逐条落点见 10.8。
+
+### 10.7 本片自身验证
+
+- `go build ./...`、`go vet ./...` 通过；`gofmt -l` 干净。
+- `go test ./...` 全绿（含 hermes 包 29 个测试函数、kit 的 B1 收口回归、以及既有五家族 + fixture 回归；
+  OMP 在 kit 下沉后回归全绿）。
+- `go run ./cmd/agent-fleet-agentd doctor --home <临时> --json` → 注册表含 `hermes`（10.1）。
+- `HERMES_REAL=1` 下真实 `hermes --version` + `hermes config check` 接受适配器合并写产物（10.4）；
+  真实解释器复核 managed-scope 深合并（10.4）。
+
+### 10.8 §4.4 未验证项逐条落点
+
+| # | §4.4 项 | 落点 |
+|---|---|---|
+| 1 | 线上文档与本机 0.21.2 未逐页 diff | `Capabilities(version).Reason` 未验证清单；本文件 §4 与本节的来源分别标注 |
+| 2 | `hermes doctor` / `status --deep` 完整输出未采集 | `Capabilities(version).Reason`；健康检查只用只读 `config check`（绝不用 `--live`/`--deep`），见 §10.4/10.6 |
+| 3 | `mcp list` / `mcp test` 未执行、MCP 无连通性验证 | `Capabilities(mcp).Reason`；适配器不作 MCP 连通性健康检查 |
+| 4 | `envRefs` 的 `${VAR}` 语义未验证 | `Capabilities(mcp).Reason` + `Validate` 在任何写入前拒绝（`TestValidateRejectsUnverifiedBeforeWrite`） |
+| 5 | 无机器可读 schema、`_config_version` 迁移清单未展开 | `Capabilities(modelProvider).Reason` + §10.5（版本漂移显式失败）；迁移清单本身仍未展开 |
+| 6 | PyPI `hermes-agent` 官方性未定论 | `Capabilities(version).Reason` 未验证清单（不改本机 git-checkout 结论） |
+| 7 | Windows/macOS/Termux 未实测 | `Capabilities(version)`/`(modelProvider)`/`(mcp)`/`(skills)` 四个 `Reason` 都带该项；`Validate` 对非 linux 明确拒绝 |
+| 8 | `SOUL.md` 是否纳入受管未决 | `Capabilities(rules).Reason`（本片明确不纳入）+ §10.3 第 3 项 |
+| 9 | `.env` / `auth.json` 运行时优先级未验证 | `Capabilities(modelProvider).Reason` 未验证清单 + §10.5 更高层段；两文件全程不读 |
+| 10 | **超出 §4.4**：`model.base_url` 与 shell 导出优先级 | `Capabilities(modelProvider).Reason` 未验证清单 |
+| 11 | **超出 §4.4**：环境变量层（`HERMES_*`）与 managed `.env` | `Capabilities(modelProvider).Reason` 未验证清单 + §10.5（本片不判定该层） |
+
+### 10.9 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **归一化 provider 契约只给 `endpoint`+`apiKeyEnv`，未表达"凭据引用如何落地"**：本片按
+   Hermes 原生 `${VAR}` 落到 `model.api_key`（片 A 用 `env_key`、opencode 用 `{env:VAR}`、
+   片 B 无承载故拒绝）。建议契约层明确"凭据引用"是 family-agnostic 的 env 名，还是允许家族各自映射。
+2. **归一化 skills 契约不携带外部技能根**：`skills.external_dirs` 在 §4.2 受管范围内但本片
+   不可写（只读技能根本身也不是写面），登记为缺口。
+3. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**（同 §8.8 第 1 项）：§4.2 列出的
+   `url`/`headers`/`transport`/`timeout`/`enabled`/`tools.*` 在本片不可达。
+4. **"更高配置层"三态未定义**（同 §8.8 第 2 项 / §9.8 第 3 项）：本片已按片 A/片 B 的
+   "观测投影带 `overriddenBy` + `Plan` 整片空 + `HealthCheck` 可区分失败"表达 Hermes 的
+   managed scope；建议在 §6 缺口 3 / §7.1 正式定义该三态与归属。
+5. **`kit/yamlpatch.go` 下沉是 YAML 写工具的第一份共享实现**：片 A/片 B 的
+   `HigherLayerOverrideError`/`overriddenBy` 仍是第二份实现（§9.8 第 4 项已登记），本片不夹带。
+6. **归一化 provider 无"无鉴权端点"表达**：`apiKeyEnv` 为必填后，Hermes 的
+   `no-key-required` 本地端点（如 LM Studio 无鉴权模式）本片不可管；建议契约层允许显式空凭据。
+7. **skills 软链不在 `ManagedFiles` / 回退不清理**（复核 B1 补充）：`ManagedFiles` 只声明
+   `config.yaml`，`Apply` 种下的 `~/.hermes/skills/<name>` 软链不在备份/回退范围内——即使后续
+   `HealthCheck` 失败触发回滚，已种软链也不会被清理。这是既有契约（六家族同款），本片登记；
+   本次已用 `kit.EnsureSkillLink` 的 digest 形状守卫把入口收紧（§10.10）。
+8. **`hermes config check` 的副作用产物不在受管面**（复核 MINOR 1）：该命令不改受管文件，但会在
+   `HERMES_HOME` 下补齐 `SOUL.md`/`logs/`/`audio_cache/` 等 profile 产物；它们不在 `ManagedFiles`
+   内、回退不清理。口径第 6 条要求保留该命令，故按"不改受管文件"表述并登记此缺口。
+9. **重复 YAML 键的取值语义不一致**（复核 NIT）：`kit.LookupYAML` 取**第一个**匹配键，
+   Hermes（PyYAML）取**最后一个**（实测 `default` 出现两次时 `load_config()` 取后者）。因此
+   含重复受管键的文件可能被 Fleet 判为收敛而实际生效值不同。未在本片修（涉及共享 kit 的
+   `LookupYAML` 语义与六家族），登记待统一。
+
+
+### 10.10 核查退回（B1/B2/B3 + MINOR/NIT）的修复记录（2026-09-27，复核轮）
+
+核查在 `9be686f` 上给了 3 项阻断（B1/B2/B3）+ 5 项 MINOR + 若干 NIT。逐条修复如下
+（阻断项与 Apply pre-flight 都用"去掉修复即失败"验证过）：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| B1 | skill `ContentDigest` 全程无校验：digest 是缓存目录分量，`../../../../../..` 之类会让 `~/.hermes/skills/<name>` 指向任意已存在目录；且 `ManagedFiles` 不含 skills，回滚不清理 | 在唯一收口 `kit.EnsureSkillLink` 加 `kit.ValidDigest`（`^sha256:[0-9a-f]{64}$`）守卫（六家族一次修好）；`hermes.Validate` 与 `Apply.preflightChanges` 各加一道 | `kit.TestEnsureSkillLinkRejectsMalformedDigest`（8 种坏值 + 有效值对照，断言 link 未创建）；`TestValidateRejectsMalformedDigest`；`TestApplyPreflightRejectsBeforeAnyWrite/bad-skill-digest`（断言 config 未被写） |
+| B2 | 版本探测继承进程环境：`hermes --version` 读另一个 `~/.hermes`、在真实 home 初始化骨架、每次健康检查付 10s+ | 新增 `hermes.VersionProbe(ctx, home)` 与 `defaultVersionProbe`，用 `hermesEnv` 把 `HOME`/`HERMES_HOME` 都钉到注入根；`defaultConfigCheck` 同步改用 `hermesEnv` | `TestDefaultVersionProbePinsHome`（假二进制把 `$HOME`/`$HERMES_HOME` 写文件）；`TestDetect…/installed` 断言探测收到注入 home |
+| B3 | managed scope（`$HERMES_MANAGED_DIR` 或 `/etc/hermes` 的 `config.yaml`）实际压过用户层，适配器零感知 → 假收敛；§10.5 断言被证伪 | 新增 `managedDir`/`readManagedConfig`/`higherLayerOverrides`/`markHigherLayerOverrides`/`overrideSet`/`HigherLayerOverrideError`：任一受管键被覆盖 → 观测带 `overriddenBy` + 生效值、`Plan` 整片空、`HealthCheck` 可区分失败、`Apply` 拒陈旧计划；§10.5 重写 | `TestManagedScopeOverrideIsDistinguishable`；反向对照 `TestManagedScopeSameValueAndAbsenceAreNotOverrides`（同值/空文件/无目录均不算覆盖）；`TestManagedScopeUnparseableFailsExplicitly`；真实解释器复核（§10.4） |
+| MINOR 1 | `config check` 被写成"只读"，实际会补齐 profile 产物 | 代码注释、`Capabilities` 未改口径、§10.4/§10.8 措辞改为"不改受管文件；会补齐缺失 profile 产物"，副作用登记 §10.9 第 8 项 | 文档/SQL 一致性；`HERMES_REAL=1` 复跑 |
+| MINOR 2 | `Capabilities(skills).Reason` 称 `external_dirs` 含 `~/.agents/skills`，与真实 `[]` 不符 | Reason 改为"本机真实值为 `[]`"；`~/.agents/skills` 表述为既有软链的目标；`Evidence` 计数改为实测 95 项 | `TestCapabilitiesDeclareSurfaceAndRecordUnverifiedItems` + 人工对照 §10.4 |
+| MINOR 3 | "逐字节保留"过度声明（整树重编码会合并空行、规整缩进/引号） | 包注释、`modelProvider`/`skills` Reason、`applyConfig` 注释、§10.2 改为"键值/键序/注释保留；非字节级"并登记 | 文档；§10.2 附 fixture 实测行数对比 |
+| MINOR 4 | OMP 引用数 19 → 实为 18 | §10.1 与 PR 描述统一为 18（`6 lookupPath + 9 parseYAML + 3 patchYAML`） | 人工对照 `git show 984fbca` |
+| MINOR 5 | §10.8 第 7 项称"各能力 Reason"，实际只有 2 个带 OS | `modelProvider`/`mcp` Reason 补 macOS/Windows/Termux；§10.8 第 7 项点名 4 个能力 | `TestCapabilitiesDeclareSurfaceAndRecordUnverifiedItems` |
+| NIT | 重复 YAML 键首/末值语义不一致 | 登记 §10.9 第 9 项（不夹带共享 `LookupYAML` 语义变更） | — |
+| NIT | `Apply` 缺写前 pre-flight（部分写入 / 静默忽略 envRefs / 版本漂移照写） | 新增 `preflightChanges` + `requireSupportedConfig` + managed 覆盖检查，全部在任何写入之前 | `TestApplyPreflightRejectsBeforeAnyWrite`（4 子用例）；`TestManagedScopeOverrideIsDistinguishable` 的陈旧计划分支 |
+| NIT | `HealthCheck` 只比 MCP `command`；`config check` 缺版本行静默通过 | 改为按 `{command,args}` 整体比较；缺 `Config version:` 行显式失败 | `TestHealthCheckComparesMCPArgsAndRequiresVersionLine` |
+| NIT | `Capabilities(skills).Evidence` "38 项"失真 | 改为实测"95 个非隐藏条目、含大量软链" | 文档/声明 |
+| NIT | fixture 两处刻意偏离真实值未说明 | §10.1 注明 `model.context_length` 与 `skills.external_dirs` 是刻意样本 | 文档 |
+| NIT | §10.2 用了片 B 的 `safeName` 标识符 | 改为本包的 `skillNameRe` | 文档 |
+| NIT | §10.7 "既有六家族回归"实为 5 家 + fixture | 改为"五家族 + fixture" | 文档 |
+| NIT | "未触碰真实 ~/.hermes"措辞（真实 home 是在跑实例） | §10.4 改为"未触碰受管面与凭据文件" | 文档 |
+
+**修复后自查**：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿
+（hermes 29 个测试函数 + kit 收口回归 + 五家族/fixture 回归）。B1 的复现探针（坏 digest → link
+指向已存在目录）已按核查给定的形状转为永久回归。
+
+---
+
+## 11. 片 D：DeepSeek Harness 适配器逐家族验收记录（KM-36）
+
+本片交付批次二第 4 片：接入 **DeepSeek Harness**（可执行 `dsh`，DeepSeek AI）适配器，沿用批次一
+范式（新增 `internal/agentlocal/adapter/dsh` + 注册，**控制面零改动**），按 KM-32 §2.4 的裁决 **(c)**
+只接 **version 探测 + rules + skills**，`mcp` 声明 `unsupported`，`modelProvider` 经 §11.2 前置复验后
+声明 `unverified`。
+
+**基线**：复核时点（2026-09-28）`#14`/`#15` 仍 `OPEN`（`#14` head `984fbca`、base `main`；
+`#15` head `09fc3eb`、base `agent/agent/de10c9c6b91f`；`main` 停在 `e76a1d10f5`），故本片分支叠在
+**片 C head `09fc3eb`** 上，PR base 选 `agent/agent/de10c9c6b91f`（合入顺序交仓主）。本片**不**收敛
+3 处 `reg.Register`（跟随片 A/B/C 现状），注册块按适配器 ID 字母序把 `dsh` 插在 `codex` 之后、
+`grok` 之前；YAML 写工具复用片 C 下沉的 `kit/yamlpatch.go` 所在 `kit`（本片实际只需要受管标记块与
+软链，不新增第二份实现）。
+
+### 11.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/dsh/dsh.go`（`Adapter` 8 方法 + `ManagedFiles`/`ExtractManaged`/`MergeManaged`） |
+| fixture | `internal/agentlocal/adapter/dsh/dsh_test.go`；`testdata/AGENTS.md`、`testdata/skills/existing.md`、`testdata/settings.yaml` |
+| 注册（3 处） | `cmd/agent-fleet-agentd/daemon.go`、`oneshot.go`、`doctor.go` 各一行 `reg.Register(dsh.New())` |
+| 文档 | 本节 |
+| 不动的 | 控制面、spec/架构、批次一契约、其余五家族；未顺手收敛注册点，未改共享 kit |
+
+### 11.2 两条前置复验（命令与输出原文）
+
+复验环境：本机 Linux x86_64；写入面复验全程只用**临时 HOME**（`$DSH_HOME` 指到临时根），
+未触碰真实 `~/.dsh`。
+
+**P1 版本复验**（0/1 片记录的 `0.1.5-rc.3` 已再次漂移）：
+
+```
+$ dsh --version
+0.1.7-rc.1
+$ dsh -V
+0.1.7-rc.1
+$ curl -s https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags
+{"latest":"0.1.7-rc.2","alpha":"0.1.7-alpha.2","next":"0.1.7-rc.2"}
+$ ls -la ~/.dsh/settings.yaml ~/.dsh/settings.yaml.imported
+ls: cannot access '/home/shelwin/.dsh/settings.yaml': No such file or directory
+-rw------- 1 shelwin shelwin 1583 Sep 25 00:46 /home/shelwin/.dsh/settings.yaml.imported
+```
+
+结论：`VerifiedVersions` 按**复核时点实际安装**的 `0.1.7-rc.1` 登记；`dist-tags.latest` 仍是预发布
+（本次为 `0.1.7-rc.2`），**"按 latest 接入"不成立**；未知版本在 `Apply(version)` 显式失败。
+`dsh --version` 零副作用（见 P2a），是唯一可直接使用的健康探测。
+
+**P2 写入面复验**（`$DSH_HOME/settings.yaml` 是否核心读写的活设置面）：
+
+```
+### P2a: 临时 HOME 内探测路径解析与创建时机（不触碰真实 ~/.dsh）
+$ dsh --version   # 探测零副作用
+0.1.7-rc.1
+$ find $T -maxdepth 3   # after --version
+$T
+$ dsh --profile web --dump-config >/dev/null; echo exit=$?
+exit=0
+$ find $T \( -name "settings.yaml*" -o -name "cordis.patch.yml" \)
+$T/.dsh/profiles/web/cordis.patch.yml
+
+### P2b: 预置 $DSH_HOME/settings.yaml 后真实启动 web profile（timeout 25s，仅临时 HOME）
+$ cat $DSH_HOME/settings.yaml
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-flash
+  reasoningEffort: high
+fixture-namespace:
+  keep: true
+$ timeout 25 dsh --profile web >/dev/null 2>&1; echo exit=$?
+exit=124 (124 = timeout/SIGTERM)
+$ ls $DSH_HOME/ | grep settings
+settings.yaml.imported
+$ cat $DSH_HOME/profiles/web/cordis.patch.yml
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+    reasoningEffort: high
+```
+
+**结论（与片描述的判定分支）**：**不成立**——0.1.7-rc.1 起核心**不**把 `$DSH_HOME/settings.yaml`
+当活设置面读写：
+
+- `dsh --version` 不创建任何文件；`--dump-config` 只在临时 home 里建出
+  `profiles/web/cordis.patch.yml`，**没有** `settings.yaml`（"懒创建"不成立，因为该文件根本不由核心创建）；
+- 预置 `$DSH_HOME/settings.yaml` 后启动真实 web profile：文件被**先改名** `settings.yaml.imported`，
+  其 `agent-default-model` 段经 `@deepseek-ai/dsh-config-editor` 写进**当前 profile** 的 patch
+  （`- id: agent-default-model` 行）；未知名段（`fixture-namespace`）未被导入、只留在改名后的文件里。
+  这是**一次性 legacy 导入通道**，不是可以安全反复外部写入的设置平面。
+
+安装树源码与该一致：`@deepseek-ai/dsh-settings.importLegacyDocument()` 读
+`join(profile.home, "settings.yaml")` 后 `rename` 到 `.imported`
+（`profileContext.home = resolveDshHome()` = `$DSH_HOME`，见 `lib/profile-boot-CO0MPY31.js`）；
+`@deepseek-ai/dsh-config-editor` 的 `documentPath` 是**当前 profile** 的 `cordis.patch.yml`，且
+`edit()` 用 `withFileLock(profile.dir/package.json)` 串行化、写好后校验"组合结果等于 next"，被
+**home patch（`$DSH_HOME/cordis.patch.yml`）或 `--patch`** 覆盖时直接拒绝
+（`Configuration for "x" is overridden by a home patch or command-line overlay`）。
+
+→ 按片描述："结论不成立 → modelProvider 声明 `unverified`，`Validate` 写入前拒绝，本片只落
+version + rules + skills"。活的设置面（profile patch 列表数组）与 `$DSH_HOME/cordis.patch.yml` 的
+优先级关系已取证，属 batch-2 §6 缺口 1 的**行级所有权**，与 MCP 同款新形态，本片不实现。
+
+### 11.3 受管面与所有权（实现口径）
+
+| 能力 | 路径 | 写法 / 所有权 |
+|---|---|---|
+| version | 可执行 `dsh`（`$DSH_HOME` 由注入 home 派生） | 只探测 `dsh --version`；安装/升级不在片内 |
+| rules | `$DSH_HOME/AGENTS.md` | `kit.WriteManagedBlock` 受管标记块；**块外逐字节保留**；文件为软链时写穿 |
+| skills | `$DSH_HOME/skills/<name>.md` | **扁平 `*.md`** 软链 → `kit.SkillCacheDir(home,name,digest)`；未点名的既有条目（真实文件或第三方软链）不触碰；digest 形状不符或缓存未物化在写入前失败 |
+| mcp | — | `unsupported`：patch 行插删（新形态）本片不实现，`Validate` 拒绝 |
+| modelProvider | — | `unverified`：见 §11.2，`Validate` 拒绝 |
+
+**必须保留未托管**：`$DSH_HOME/AGENTS.md` 块外全部内容；`$DSH_HOME/skills/` 内未点名条目
+（含 `.system` 子目录，本机 provider 自身会跳过它）；`$DSH_HOME/settings.yaml` 与
+`settings.yaml.imported`；`$DSH_HOME/cordis.patch.yml` 与 `profiles/*/cordis.patch.yml` 的既有 patch 行；
+`profiles/*/package.json` 的 `dsh.profile.bundles`；`$DSH_HOME/.credentials.yaml`、`$DSH_HOME/.env`、
+调用目录 `.env`（**凭据链绝不读值**）。`~/.dsh/` 下的 `dsh-mcp-catalog*`、`dsh-mcp-manager` 段与
+`@wingsky-1/` 是第三方社区插件产物（§2.3），不写进受管契约。
+
+**非字节级声明**：rules 文件的写法是"块外内容逐字节保留"；本片 skills 只做软链、不重编码
+YAML/JSON，故没有批次一/片 C 那类"整树重编码合并空行"的过度声明空间。
+
+### 11.4 本机实测补证（临时 HOME）
+
+```
+$ DSH_REAL=1 go test ./internal/agentlocal/adapter/dsh/ -run TestRealDshBinaryVersionProbe -v
+=== RUN   TestRealDshBinaryVersionProbe
+--- PASS: TestRealDshBinaryVersionProbe (0.06s)
+```
+
+fixture 以本机真实形态为基线：`~/.dsh/AGENTS.md`（1728 B 纯 Markdown 全局指令文件）；
+`~/.dsh/skills/` 是**扁平** `feishu-cli.md`、`workflow-one.md`（带 `name`/`description` frontmatter，
+另有 `<!-- managed-by: … -->` 注释）。`testdata/AGENTS.md`、`testdata/skills/existing.md` 为脱敏后的
+同形样本；`testdata/settings.yaml` 是 legacy 导入文件的同形样本，专门用于断言**该文件不被本适配器
+触碰**（`TestSettingsYamlIsNotAManagedSurface`）。
+
+### 11.5 逐家族验收 5 项（矩阵口径）
+
+| # | 项 | 断言 |
+|---|---|---|
+| 1 | 身份与兼容性 | `TestDetectDistinguishesMissingFromUnparseable`（未装/不可解析/已装三态 + 非 linux 拒绝）；`TestVersionParserRejectsAnomalies`（裸 semver 与 prerelease 通过，带前缀/两段/尾随文本/空输出拒绝）；`TestDefaultVersionProbePinsHome`（默认探测把 `HOME`/`DSH_HOME` 都钉到注入根） |
+| 2 | 配置与所有权 | `TestMergeWritePreservesUnmanagedAndIsIdempotent`（`AGENTS.md` 块外内容与非点名 skill 文件保留、受管块与软链到位、第二轮 Plan 空 + 空 Apply 零写入）；`TestValidateRejectsUnverifiedBeforeWrite`（`mcp` 与 `modelProvider` 都在写入前被拒且零写入）；`TestValidateRejectsMalformedRequests`；`TestTraversalSkillNamesAreRejectedBeforeWrite`；`TestSettingsYamlIsNotAManagedSurface` |
+| 3 | 生命周期 | `TestDriftOnlyFromManagedFields`（未托管编辑不漂移；受管块/软链漂移且 Apply 后收敛）；`TestApplyVersionMismatchFailsExplicitly` |
+| 4 | 恢复与一致性 | `TestManagedFilesExtractAndMergeRollback`（`ManagedFiles` + `ExtractManaged`/`MergeManaged` 两条回退分支 + 非受管文件显式失败）；`TestManagedBlockWritePreservesSymlink`；`TestSkillLinksAreSymlinkSetAndIdempotent`；`TestSkillLinkRequiresMaterializedArtifact`；`TestApplyPreflightRejectsBeforeAnyWrite` |
+| 5 | 验收记录 | 本节；§2.5 未验证项逐条落点见 §11.7 |
+
+### 11.6 更高配置层与写前 pre-flight
+
+**更高配置层三态在本片不适用（限定在 patch「文件层」，不是全称结论）**：dsh 的层序（各 bundle →
+profile → home 级 `cordis.patch.yml` → `--patch`）只作用于**组合平面的插件行配置**；本片受管面是
+`$DSH_HOME/AGENTS.md` 与 `$DSH_HOME/skills/`，**就 patch 文件层而言**任何 patch 层都覆盖不到它们。
+唯一会被 home patch/`--patch` 压过的是 settings 写入（settings 曾写 profile patch，而 home patch 在
+它之上）——但那条路径正是 modelProvider，已在 §11.2 判为 `unverified` 并在写入前拒绝。
+`@deepseek-ai/dsh-config-editor.edit()` 的"被 home patch/命令行覆盖即拒写"是该三态在 dsh 侧的
+原生表达，登记为后续 modelProvider 片的实现依据。
+
+**"patch 文件层覆盖不到"不等于"没有可达的假收敛路径"**：另有两类**非 patch 文件层**的错位/覆盖，
+本片按 §8.7 第 8 项（`GROK_*` 环境变量层）先例**登记为未验证**、不实现三态（不臆断为已解决）：
+
+- **`$DSH_HOME` 非默认**：适配器按注入 home 派生 `<home>/.dsh`，而 dsh 的配置根由 `$DSH_HOME` 决定
+  （适配器只在**探测时**把 `DSH_HOME` 钉到注入根，见 `dsh.go` 的 `dshEnv`）。若机器上 `$DSH_HOME`
+  指向别处，Fleet 的两个受管面都写在 dsh 不读的位置，而 `HealthCheck` 只校验 Fleet 自己写的位置 →
+  仍可能报 Reconciled。已点进 `Capabilities(rules).Reason` 与 `Capabilities(skills).Reason` 的未验证清单。
+- **skill 根序**：`@deepseek-ai/dsh-skill-filesystem` 的根序是 项目根（rank 100 `<projectRoot>/.dsh/skills`、
+  rank 200 `<projectRoot>/.agents/skills`）→ `$DSH_HOME`（rank 400 `user-dsh`）→ `$DSH_AGENTS_HOME`
+  （rank 500）；**项目根同名 flat skill 会压过** Fleet 写的 home 级，`$DSH_AGENTS_HOME` 根也未纳入。
+  已点进 `Capabilities(skills).Reason` 未验证清单。
+
+**写前 pre-flight（沿用片 B/C 默认做法）**：`Validate` 与 `Apply` 的 pre-flight 都在写第一个字节
+之前拒掉未支持/未验证能力（`mcp`/`modelProvider`）、坏 digest、点号/非法 skill 名、不完整的受管标记块；
+`Apply` 唯一的写入副作用是 rules 受管块与 skill 软链。
+
+### 11.7 §2.5 未验证项逐条落点
+
+| # | §2.5 项 | 落点 |
+|---|---|---|
+| 1 | patch 行完整 schema（`$defs.patchList` 未导出） | `Capabilities(mcp).Reason`/`Evidence`；本片不实现 patch 行插删（§11.2/§11.6） |
+| 2 | `env` 值的 `${env:VAR}` 官方 deferred | `Capabilities(mcp).Reason`（记 `unsupported`，不是 `unverified`） |
+| 3 | WSL 未提及、Windows 走 semaphore 与 Linux Landlock 不等价 | `Capabilities(version).Reason` 未验证清单；`Validate` 对非 linux 显式拒绝 |
+| 4 | `settings.yaml` 并发写协议未实测 | `Capabilities(modelProvider).Reason` 未验证清单；本片完全不读写该文件（`TestSettingsYamlIsNotAManagedSurface`） |
+| 5 | 设置平面 `llm-pi-ai` namespace 与注册条件 | `Capabilities(modelProvider).Reason` 未验证清单 |
+| 6 | `--dump-config` 输出作为机器判据的稳定性 | `Capabilities(version).Reason`；健康检查只用 `dsh --version`，绝不用 dump 类命令（`TestHealthCheck/health-does-not-run-dump-commands`） |
+| 7 | install/upgrade（`npx`/`pnpm`）未纳入 | `Capabilities(version).Reason`；`Apply(version)` 不匹配显式失败（`TestApplyVersionMismatchFailsExplicitly`） |
+| 8 | 桌面端（Electron）profile 契约未验证 | `Capabilities(version).Reason` 未验证清单 |
+| 9 | **超出 §2.5**：`$DSH_HOME` 非默认时 Fleet 写入位置与 dsh 读取位置可能错位（假收敛） | `Capabilities(rules).Reason` / `Capabilities(skills).Reason` 未验证清单 + §11.6 |
+| 10 | **超出 §2.5**：skill 根序——项目根同名 flat skill 压过 Fleet 写的 home 级、`$DSH_AGENTS_HOME` 根未纳入 | `Capabilities(skills).Reason` 未验证清单 + §11.6 |
+
+### 11.8 本片自身验证
+
+`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿（新增 dsh 包测试 +
+五家族/fixture 回归 + 依赖方向护栏）。`DSH_REAL=1` 的真实二进制探测见 §11.4。
+
+### 11.9 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **受管设置面的定位随上游版本迁移，"配置文件里的受管键"这一默认假设对 dsh 不再成立**：
+   0.1.7-rc.1 的活设置面是**当前 profile** 的 patch 列表数组（行级、整 config 替换），
+   `$DSH_HOME/settings.yaml` 降级为一次性导入通道。建议契约层像 batch-2 §6 缺口 1 那样显式区分
+   "文件键级"与"patch 行级"两种所有权，并明确"设置面在哪个文件"由适配器探测而非契约假设
+   （本片已按探测结论声明 `unverified`）。
+2. **归一化 skills 契约不表达目的地形态**：dsh 是扁平淡 `<name>.md`，批次一是 `<name>/SKILL.md`
+   目录。本片由适配器封装（`skillPath` 加 `.md`），但契约层若要求"跨家族可比的 skills 投影"，
+   需说明形态差异是否影响摘要语义。
+3. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**（同 §8.8 第 1 项 / §10.9 第 3 项）：
+   `transport`/`serverName`/`env`/`cwd`/`toolCallTimeoutMs` 等在 dsh core 契约里存在但本片不可达。
+4. **"更高配置层"三态未定义**（同 §8.8 第 2 项 / §9.8 第 3 项 / §10.9 第 4 项）：dsh 侧的原生表达是
+   `config-editor` 对 home patch/`--patch` 覆盖的拒写（§11.6），建议在 §6 缺口 3 正式定义该三态与归属。
+5. **skills 软链不在 `ManagedFiles`、回退不清理**（同 §10.9 第 7 项，既有契约、六家族同款）：本片登记。
+6. **dsh home 没有受管 schema/version 哨兵**：Hermes/Claude 有 `_config_version`/schema 可对位，
+   dsh 的受管面（`AGENTS.md`、扁平 skills）无版本标识；本片以 `SchemaVersion = "dsh-home-v1"` 随
+   `DetectedAgent` 上报，形态变化时靠版本探测与显式失败兜底，不静默降级。
+7. **unverified/unsupported 能力上的 `Paths` 与「实际读写的原生路径」措辞有出入**（NIT 3）：本片
+   `modelProvider`/`mcp` 声明里的 `Paths` 列的是本片**从不读写**的文件（含 `settings.yaml`），与
+   `capability.go` 对 `Paths` 的定义（"该能力实际读写的原生路径"）不符；hermes 的 unsupported rules
+   （`hermes.go:229`）是同形既有形态。建议契约层区分"已读写路径"与"能力涉及的候选路径"，
+   本片登记、不改共享 `CapabilityDecl` 语义。
+
+### 11.10 核查退回（MINOR/NIT）的修复记录（2026-09-28，复核轮）
+
+核查在 `c2b3437` 上判为**通过（无阻断）**，留 3 项 MINOR + 3 项 NIT + 一条被判为与本片无关的 CI flake。
+逐条修复如下（MINOR 3 用"去掉修复即失败"验证过）：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| MINOR 1 | §11.6 的"没有『写入成功但生效值不同』的可达路径"断言过宽：只证了 patch 文件层，忽略了 `$DSH_HOME` 非默认的错位与 skill 根序（项目根同名 flat skill 压过 home 级、`$DSH_AGENTS_HOME` 未纳入） | §11.6 把结论**限定到 patch 文件层**，另列两类**非 patch 文件层**的未验证项；`$DSH_HOME` 非默认点进 `Capabilities(rules).Reason` 与 `Capabilities(skills).Reason`，skill 根序两项点进 `Capabilities(skills).Reason`；§11.7 追加第 9/10 行（标注「超出 §2.5」） | `TestCapabilitiesDeclareSurfaceAndRecordUnverifiedItems` 新增 needle（`非默认`、`rank 400`、`$DSH_AGENTS_HOME`） |
+| MINOR 2 | §11.7 第 6 行把 §2.5 第 6 项（`--dump-config` 输出作为机器判据的稳定性）挂到 `Capabilities(version).Reason`，但该 Reason 未提 dump | `Capabilities(version).Reason` 补：dump 类命令**有写入副作用**（官方原文 "A dump initializes missing profile files"）且输出作为机器判据的稳定性**未验证** → 不作漂移/健康判据，健康检查只用 `dsh --version` | 同测试新增 needle `--dump-config`；`TestHealthCheck/health-does-not-run-dump-commands` |
+| MINOR 3 | `ExtractManaged` 的 `err == nil && ok` 吞掉"块不完整"错误；`MergeManaged` 对缺键/非字符串静默取 `""`，回退会把受管块写成**空块**（§8.9 #4 同款） | `ExtractManaged` 对块标记不完整/乱序**显式报错**；`MergeManaged` 校验未知受管键、缺键、非字符串值，全部显式失败且不写文件 | 新增 `TestExtractManagedRejectsIncompleteBlockAndMergeValidatesBackup`（3 个坏备份子用例 + 合法备份仍回退成功）；**去掉修复即失败**已实测（回退到 `c2b3437` 的 `dsh.go` → `incomplete managed block must fail extraction` FAIL，恢复修复后 PASS） |
+| NIT 1 | 用户可见错误写 `batch-2 §20.2`，但 batch-2 只到 §11 | 改为 `docs/agent-fleet-architecture-v1.1.2.md §20.2 / FR-2.2/FR-2.5` | `TestApplyVersionMismatchFailsExplicitly`（断言 `CLI installer`） |
+| NIT 2 | 口径 4 点名的"含 `envRefs` 的条目"只靠 MCP 能力级拒绝覆盖，测试未钉住该意图 | 代码无需改；补子用例把意图钉住 | `TestValidateRejectsUnverifiedBeforeWrite/mcp-envrefs-covered-by-capability-rejection`（`EnvRefs` 非空 → `capability "mcp" is unsupported`，零写入） |
+| NIT 3 | unverified/unsupported 能力的 `Paths` 列的是本片从不读写的文件（含 `settings.yaml`），与 `capability.go` 的"实际读写的原生路径"措辞有出入 | **登记即可**：写入 §11.9 第 7 项，不改共享 `CapabilityDecl` 语义 | 文档 |
+| CI | 同一 head `c2b3437` 的 push-run `36365352297` 在 `cmd/agent-fleet-agentd` 的 `TestRunStreamReportsVerifyEvidence` 间歇失败（PR-run 全绿；本地 `-race -count=1` 连跑 12 次全过；该测试自建**只含 fixture 适配器**的 registry，不经过本片改动的 `runDaemon` 注册表） | 判为与本片无关的独立 flake（**不是 KM-30**），重跑该 run 并等新 head 的 `go`+`web` 全绿；不夹带该 flake 的修复 | 重跑结果记录在本轮 issue 回复与 PR #16 checks |
+
+**修复后自查**：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿（新增
+dsh 包回归 + 五家族/fixture 回归 + 依赖方向护栏）。CI 重跑结论见本轮 issue 回复。

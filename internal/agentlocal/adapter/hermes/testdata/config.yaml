@@ -1,0 +1,293 @@
+# Hermes Agent configuration (fixture: truncated sample of the real 65-top-level-key shape).
+# Values are sanitized placeholders; the managed/unmanaged key shapes mirror the on-host file
+# documented in docs/adapters-batch-2.md §4. Secret-bearing keys hold placeholder references only.
+_config_version: 44
+
+# Top-level proxy settings may embed credentials; Fleet must preserve them byte-for-byte.
+HTTP_PROXY: "http://proxy.example:3128"
+HTTPS_PROXY: "http://proxy.example:3128"
+
+model:
+  # Managed: default model id.
+  default: "deepseek-flash"
+  # Managed: provider selection ("custom" for an OpenAI-compatible endpoint).
+  provider: "deepseek"
+  # Unmanaged sibling key (nested key-level ownership must keep it).
+  context_length: 131072
+
+model_catalog:
+  enabled: true
+  url: "https://models.dev/api.json"
+
+fallback_providers:
+  - provider: "glm"
+    model: "glm-5.3-flash"
+
+agent:
+  max_iterations: 500
+  # Unmanaged nested keys: representative truncated sample.
+  max_tokens: 8192
+  tool_loop_max_retries: 3
+
+approvals:
+  auto_approve_tools: false
+
+auxiliary:
+  # Secret face: auxiliary.<task>.api_key must never be read or written by Fleet.
+  approval:
+    provider: "deepseek"
+    model: "deepseek-flash"
+    base_url: "https://api.deepseek.com/v1"
+    api_key: "${AUX_APPROVAL_KEY}"
+    timeout: 30
+  compression:
+    provider: "glm"
+    model: "glm-5.3-flash"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    api_key: "${AUX_COMPRESSION_KEY}"
+    timeout: 60
+  vision:
+    provider: "glm"
+    model: "glm-4v"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    api_key: "${AUX_VISION_KEY}"
+    timeout: 60
+
+bedrock:
+  region: "us-east-1"
+
+browser:
+  enabled: false
+  engine: "browserbase"
+
+checkpoints:
+  enabled: true
+  max_checkpoints: 20
+
+code_execution:
+  enabled: true
+
+command_allowlist: []
+
+compression:
+  enabled: true
+  threshold: 0.8
+
+context:
+  max_tokens: 131072
+
+credential_pool_strategies:
+  deepseek: "round-robin"
+
+cron:
+  enabled: false
+
+curator:
+  enabled: true
+  prune_after_days: 30
+
+dashboard:
+  # Secret face: dashboard.basic_auth.* and dashboard.oauth.* must never be read or written.
+  basic_auth:
+    username: "admin"
+    password: "${DASHBOARD_PASSWORD}"
+    password_hash: "${DASHBOARD_PASSWORD_HASH}"
+    secret: "${DASHBOARD_SECRET}"
+    session_ttl_seconds: 86400
+  oauth:
+    client_id: "fleet-dashboard"
+    portal_url: "https://example.invalid/oauth"
+  public_url: "https://example.invalid"
+  theme: "dark"
+
+delegation:
+  # Secret face: delegation.api_key must never be read or written.
+  provider: "deepseek"
+  model: "deepseek-flash"
+  api_key: "${DELEGATION_KEY}"
+  base_url: "https://api.deepseek.com/v1"
+  max_spawn_depth: 2
+  orchestrator_enabled: true
+
+discord:
+  enabled: false
+
+display:
+  theme: "dark"
+  show_token_usage: true
+  streaming: true
+
+file_read_max_chars: 200000
+
+gateway:
+  enabled: false
+
+goals:
+  enabled: true
+
+hooks_auto_accept: false
+
+human_delay:
+  enabled: false
+
+kanban:
+  enabled: true
+
+logging:
+  level: "info"
+
+lsp:
+  enabled: false
+
+matrix:
+  enabled: false
+
+mattermost:
+  enabled: false
+
+# Multi-shape entries: one command+args only; four with enabled/env (and one with timeout).
+# The env values are unmanaged and must survive any Fleet merge byte-for-byte.
+mcp_servers:
+  code-review-graph:
+    command: "uvx"
+    args:
+      - "code-review-graph"
+      - "serve"
+  hermes-studio-api:
+    command: "node"
+    args:
+      - "hermes-studio-mcp.mjs"
+      - "api"
+    enabled: true
+    env:
+      HERMES_MCP_SERVER_NAME: "hermes-studio-api"
+      HERMES_MCP_TOOLSET: "web"
+      HERMES_WEB_UI_URL: "http://127.0.0.1:8787"
+  hermes-studio-browser:
+    command: "node"
+    args:
+      - "hermes-studio-mcp.mjs"
+      - "browser"
+    enabled: true
+    env:
+      HERMES_MCP_SERVER_NAME: "hermes-studio-browser"
+      HERMES_WEB_UI_MANAGED_MCP: "1"
+  hermes-studio-devices:
+    command: "node"
+    args:
+      - "hermes-studio-mcp.mjs"
+      - "devices"
+    enabled: true
+    env:
+      HERMES_MCP_SERVER_NAME: "hermes-studio-devices"
+  hermes-studio-use:
+    command: "node"
+    args:
+      - "hermes-studio-mcp.mjs"
+      - "use"
+    enabled: true
+    timeout: 1860
+    env:
+      HERMES_MCP_SERVER_NAME: "hermes-studio-use"
+
+memory:
+  enabled: true
+
+network:
+  enabled: true
+
+onboarding:
+  completed: true
+
+openrouter:
+  enabled: false
+
+paste_collapse_char_threshold: 8000
+paste_collapse_threshold: 8000
+paste_collapse_threshold_fallback: 8000
+
+platforms:
+  enabled: true
+
+prefill_messages_file: ""
+
+privacy:
+  telemetry: false
+
+prompt_caching:
+  enabled: true
+
+secrets:
+  # Secret face: secrets.bitwarden.* must never be read or written.
+  bitwarden:
+    enabled: true
+    auto_install: false
+    access_token_env: "BW_ACCESS_TOKEN"
+    project_id: "00000000-0000-0000-0000-000000000000"
+    server_url: "https://vault.bitwarden.com"
+    cache_ttl_seconds: 3600
+    override_existing: false
+
+security:
+  sandbox: true
+  allow_shell: true
+
+session_reset:
+  enabled: false
+
+sessions:
+  enabled: true
+
+skills:
+  # External skill roots are read-only; the list (and its entries) is preserved by Fleet.
+  external_dirs:
+    - "~/.agents/skills"
+  template_vars: true
+  inline_shell: false
+  inline_shell_timeout: 30
+  guard_agent_created: true
+  write_approval: false
+
+slack:
+  enabled: false
+
+streaming:
+  enabled: true
+
+stt:
+  provider: "local"
+
+telegram:
+  enabled: false
+
+terminal:
+  backend: "local"
+
+timezone: "Asia/Shanghai"
+
+tool_loop_guardrails:
+  enabled: true
+
+tool_output:
+  max_chars: 200000
+
+tools:
+  enabled: true
+
+toolsets:
+  - "core"
+
+tts:
+  provider: "edge"
+
+updates:
+  auto_check: true
+
+voice:
+  enabled: false
+
+web:
+  enabled: true
+
+x_search:
+  enabled: false

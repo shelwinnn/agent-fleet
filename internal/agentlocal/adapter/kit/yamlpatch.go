@@ -1,4 +1,4 @@
-package omp
+package kit
 
 import (
 	"fmt"
@@ -7,12 +7,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// yamlpatch 用 yaml.v3 的 Node 树写受管键：Node 保留 HeadComment/LineComment/
-// FootComment，因此未托管内容与注释在合并写后仍在（§16.1）。整树重新编码会
-// 规整缩进与键序，但语义与注释不丢失。
+// YAML Node 树合并（批次二片 C 从 omp 下沉到 kit，避免家族间复制第二份实现）：
+// 用 yaml.v3 的 Node 写受管键，Node 保留 HeadComment/LineComment/FootComment，
+// 因此未托管内容与注释在合并写后仍在（架构 v1.1.2 §16.1）。整树重新编码会规整
+// 缩进与空行，但键序与注释不丢失。
+//
+// 调用方只按叶子键路径读写（如 model.default、mcp_servers.<name>.command），
+// 绝不整树 Decode：同文档内的密钥面（delegation.api_key、auxiliary.*.api_key、
+// secrets.bitwarden.*、dashboard.basic_auth.*、HTTP_PROXY/HTTPS_PROXY）因此不会被
+// 读入比较或写入期望状态（护栏：密钥面逐字节保留）。
 
-// parseYAML 解析 YAML 文档（空文档 → 空映射节点）。
-func parseYAML(doc string) (*yaml.Node, error) {
+// ParseYAML 解析 YAML 文档（空文档 → 空映射节点）。
+func ParseYAML(doc string) (*yaml.Node, error) {
 	if strings.TrimSpace(doc) == "" {
 		return &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}, nil
 	}
@@ -31,7 +37,7 @@ func parseYAML(doc string) (*yaml.Node, error) {
 
 // mappingRoot 返回文档的根映射节点。
 func mappingRoot(root *yaml.Node) (*yaml.Node, error) {
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+	if root == nil || root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
 		return nil, fmt.Errorf("yaml: document root is not a mapping")
 	}
 	node := root.Content[0]
@@ -41,8 +47,8 @@ func mappingRoot(root *yaml.Node) (*yaml.Node, error) {
 	return node, nil
 }
 
-// lookupPath 按点分路径读取标量值（不存在返回 nil）。
-func lookupPath(root *yaml.Node, path string) any {
+// LookupYAML 按点分路径读取值（不存在返回 nil）。只解码该子树，不触碰兄弟键。
+func LookupYAML(root *yaml.Node, path string) any {
 	m, err := mappingRoot(root)
 	if err != nil {
 		return nil
@@ -74,8 +80,8 @@ func mapValue(mapping *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// setPath 写入点分路径的标量值，缺失的中间映射就地创建。
-func setPath(root *yaml.Node, path string, value any) error {
+// SetYAML 写入点分路径的值，缺失的中间映射就地创建（叶子可为标量/映射/序列）。
+func SetYAML(root *yaml.Node, path string, value any) error {
 	m, err := mappingRoot(root)
 	if err != nil {
 		return err
@@ -115,25 +121,26 @@ func setPath(root *yaml.Node, path string, value any) error {
 	return nil
 }
 
-// patchYAML 写入多个受管键路径并返回新文档。
-func patchYAML(doc string, sets map[string]any) (string, error) {
-	root, err := parseYAML(doc)
+// PatchYAML 写入多个受管键路径并返回新文档（确定性：按键排序）。
+func PatchYAML(doc string, sets map[string]any) (string, error) {
+	root, err := ParseYAML(doc)
 	if err != nil {
 		return "", err
 	}
 	for _, path := range sortedKeys(sets) {
-		if err := setPath(root, path, sets[path]); err != nil {
+		if err := SetYAML(root, path, sets[path]); err != nil {
 			return "", err
 		}
 	}
-	out, err := encodeYAML(root)
+	out, err := EncodeYAML(root)
 	if err != nil {
 		return "", err
 	}
 	return out, nil
 }
 
-func encodeYAML(root *yaml.Node) (string, error) {
+// EncodeYAML 把 Node 树编码回 YAML 文本（缩进 2）。
+func EncodeYAML(root *yaml.Node) (string, error) {
 	var sb strings.Builder
 	enc := yaml.NewEncoder(&sb)
 	enc.SetIndent(2)
