@@ -1214,3 +1214,243 @@ model.base_url = https://managed.example/v1
 **修复后自查**：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿
 （hermes 29 个测试函数 + kit 收口回归 + 五家族/fixture 回归）。B1 的复现探针（坏 digest → link
 指向已存在目录）已按核查给定的形状转为永久回归。
+
+---
+
+## 11. 片 D：DeepSeek Harness 适配器逐家族验收记录（KM-36）
+
+本片交付批次二第 4 片：接入 **DeepSeek Harness**（可执行 `dsh`，DeepSeek AI）适配器，沿用批次一
+范式（新增 `internal/agentlocal/adapter/dsh` + 注册，**控制面零改动**），按 KM-32 §2.4 的裁决 **(c)**
+只接 **version 探测 + rules + skills**，`mcp` 声明 `unsupported`，`modelProvider` 经 §11.2 前置复验后
+声明 `unverified`。
+
+**基线**：复核时点（2026-09-28）`#14`/`#15` 仍 `OPEN`（`#14` head `984fbca`、base `main`；
+`#15` head `09fc3eb`、base `agent/agent/de10c9c6b91f`；`main` 停在 `e76a1d10f5`），故本片分支叠在
+**片 C head `09fc3eb`** 上，PR base 选 `agent/agent/de10c9c6b91f`（合入顺序交仓主）。本片**不**收敛
+3 处 `reg.Register`（跟随片 A/B/C 现状），注册块按适配器 ID 字母序把 `dsh` 插在 `codex` 之后、
+`grok` 之前；YAML 写工具复用片 C 下沉的 `kit/yamlpatch.go` 所在 `kit`（本片实际只需要受管标记块与
+软链，不新增第二份实现）。
+
+### 11.1 交付物
+
+| 项 | 产物 |
+|---|---|
+| 适配器包 | `internal/agentlocal/adapter/dsh/dsh.go`（`Adapter` 8 方法 + `ManagedFiles`/`ExtractManaged`/`MergeManaged`） |
+| fixture | `internal/agentlocal/adapter/dsh/dsh_test.go`；`testdata/AGENTS.md`、`testdata/skills/existing.md`、`testdata/settings.yaml` |
+| 注册（3 处） | `cmd/agent-fleet-agentd/daemon.go`、`oneshot.go`、`doctor.go` 各一行 `reg.Register(dsh.New())` |
+| 文档 | 本节 |
+| 不动的 | 控制面、spec/架构、批次一契约、其余五家族；未顺手收敛注册点，未改共享 kit |
+
+### 11.2 两条前置复验（命令与输出原文）
+
+复验环境：本机 Linux x86_64；写入面复验全程只用**临时 HOME**（`$DSH_HOME` 指到临时根），
+未触碰真实 `~/.dsh`。
+
+**P1 版本复验**（0/1 片记录的 `0.1.5-rc.3` 已再次漂移）：
+
+```
+$ dsh --version
+0.1.7-rc.1
+$ dsh -V
+0.1.7-rc.1
+$ curl -s https://registry.npmjs.org/-/package/@deepseek-ai/dsh/dist-tags
+{"latest":"0.1.7-rc.2","alpha":"0.1.7-alpha.2","next":"0.1.7-rc.2"}
+$ ls -la ~/.dsh/settings.yaml ~/.dsh/settings.yaml.imported
+ls: cannot access '/home/shelwin/.dsh/settings.yaml': No such file or directory
+-rw------- 1 shelwin shelwin 1583 Sep 25 00:46 /home/shelwin/.dsh/settings.yaml.imported
+```
+
+结论：`VerifiedVersions` 按**复核时点实际安装**的 `0.1.7-rc.1` 登记；`dist-tags.latest` 仍是预发布
+（本次为 `0.1.7-rc.2`），**"按 latest 接入"不成立**；未知版本在 `Apply(version)` 显式失败。
+`dsh --version` 零副作用（见 P2a），是唯一可直接使用的健康探测。
+
+**P2 写入面复验**（`$DSH_HOME/settings.yaml` 是否核心读写的活设置面）：
+
+```
+### P2a: 临时 HOME 内探测路径解析与创建时机（不触碰真实 ~/.dsh）
+$ dsh --version   # 探测零副作用
+0.1.7-rc.1
+$ find $T -maxdepth 3   # after --version
+$T
+$ dsh --profile web --dump-config >/dev/null; echo exit=$?
+exit=0
+$ find $T \( -name "settings.yaml*" -o -name "cordis.patch.yml" \)
+$T/.dsh/profiles/web/cordis.patch.yml
+
+### P2b: 预置 $DSH_HOME/settings.yaml 后真实启动 web profile（timeout 25s，仅临时 HOME）
+$ cat $DSH_HOME/settings.yaml
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-flash
+  reasoningEffort: high
+fixture-namespace:
+  keep: true
+$ timeout 25 dsh --profile web >/dev/null 2>&1; echo exit=$?
+exit=124 (124 = timeout/SIGTERM)
+$ ls $DSH_HOME/ | grep settings
+settings.yaml.imported
+$ cat $DSH_HOME/profiles/web/cordis.patch.yml
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+    reasoningEffort: high
+```
+
+**结论（与片描述的判定分支）**：**不成立**——0.1.7-rc.1 起核心**不**把 `$DSH_HOME/settings.yaml`
+当活设置面读写：
+
+- `dsh --version` 不创建任何文件；`--dump-config` 只在临时 home 里建出
+  `profiles/web/cordis.patch.yml`，**没有** `settings.yaml`（"懒创建"不成立，因为该文件根本不由核心创建）；
+- 预置 `$DSH_HOME/settings.yaml` 后启动真实 web profile：文件被**先改名** `settings.yaml.imported`，
+  其 `agent-default-model` 段经 `@deepseek-ai/dsh-config-editor` 写进**当前 profile** 的 patch
+  （`- id: agent-default-model` 行）；未知名段（`fixture-namespace`）未被导入、只留在改名后的文件里。
+  这是**一次性 legacy 导入通道**，不是可以安全反复外部写入的设置平面。
+
+安装树源码与该一致：`@deepseek-ai/dsh-settings.importLegacyDocument()` 读
+`join(profile.home, "settings.yaml")` 后 `rename` 到 `.imported`
+（`profileContext.home = resolveDshHome()` = `$DSH_HOME`，见 `lib/profile-boot-CO0MPY31.js`）；
+`@deepseek-ai/dsh-config-editor` 的 `documentPath` 是**当前 profile** 的 `cordis.patch.yml`，且
+`edit()` 用 `withFileLock(profile.dir/package.json)` 串行化、写好后校验"组合结果等于 next"，被
+**home patch（`$DSH_HOME/cordis.patch.yml`）或 `--patch`** 覆盖时直接拒绝
+（`Configuration for "x" is overridden by a home patch or command-line overlay`）。
+
+→ 按片描述："结论不成立 → modelProvider 声明 `unverified`，`Validate` 写入前拒绝，本片只落
+version + rules + skills"。活的设置面（profile patch 列表数组）与 `$DSH_HOME/cordis.patch.yml` 的
+优先级关系已取证，属 batch-2 §6 缺口 1 的**行级所有权**，与 MCP 同款新形态，本片不实现。
+
+### 11.3 受管面与所有权（实现口径）
+
+| 能力 | 路径 | 写法 / 所有权 |
+|---|---|---|
+| version | 可执行 `dsh`（`$DSH_HOME` 由注入 home 派生） | 只探测 `dsh --version`；安装/升级不在片内 |
+| rules | `$DSH_HOME/AGENTS.md` | `kit.WriteManagedBlock` 受管标记块；**块外逐字节保留**；文件为软链时写穿 |
+| skills | `$DSH_HOME/skills/<name>.md` | **扁平 `*.md`** 软链 → `kit.SkillCacheDir(home,name,digest)`；未点名的既有条目（真实文件或第三方软链）不触碰；digest 形状不符或缓存未物化在写入前失败 |
+| mcp | — | `unsupported`：patch 行插删（新形态）本片不实现，`Validate` 拒绝 |
+| modelProvider | — | `unverified`：见 §11.2，`Validate` 拒绝 |
+
+**必须保留未托管**：`$DSH_HOME/AGENTS.md` 块外全部内容；`$DSH_HOME/skills/` 内未点名条目
+（含 `.system` 子目录，本机 provider 自身会跳过它）；`$DSH_HOME/settings.yaml` 与
+`settings.yaml.imported`；`$DSH_HOME/cordis.patch.yml` 与 `profiles/*/cordis.patch.yml` 的既有 patch 行；
+`profiles/*/package.json` 的 `dsh.profile.bundles`；`$DSH_HOME/.credentials.yaml`、`$DSH_HOME/.env`、
+调用目录 `.env`（**凭据链绝不读值**）。`~/.dsh/` 下的 `dsh-mcp-catalog*`、`dsh-mcp-manager` 段与
+`@wingsky-1/` 是第三方社区插件产物（§2.3），不写进受管契约。
+
+**非字节级声明**：rules 文件的写法是"块外内容逐字节保留"；本片 skills 只做软链、不重编码
+YAML/JSON，故没有批次一/片 C 那类"整树重编码合并空行"的过度声明空间。
+
+### 11.4 本机实测补证（临时 HOME）
+
+```
+$ DSH_REAL=1 go test ./internal/agentlocal/adapter/dsh/ -run TestRealDshBinaryVersionProbe -v
+=== RUN   TestRealDshBinaryVersionProbe
+--- PASS: TestRealDshBinaryVersionProbe (0.06s)
+```
+
+fixture 以本机真实形态为基线：`~/.dsh/AGENTS.md`（1728 B 纯 Markdown 全局指令文件）；
+`~/.dsh/skills/` 是**扁平** `feishu-cli.md`、`workflow-one.md`（带 `name`/`description` frontmatter，
+另有 `<!-- managed-by: … -->` 注释）。`testdata/AGENTS.md`、`testdata/skills/existing.md` 为脱敏后的
+同形样本；`testdata/settings.yaml` 是 legacy 导入文件的同形样本，专门用于断言**该文件不被本适配器
+触碰**（`TestSettingsYamlIsNotAManagedSurface`）。
+
+### 11.5 逐家族验收 5 项（矩阵口径）
+
+| # | 项 | 断言 |
+|---|---|---|
+| 1 | 身份与兼容性 | `TestDetectDistinguishesMissingFromUnparseable`（未装/不可解析/已装三态 + 非 linux 拒绝）；`TestVersionParserRejectsAnomalies`（裸 semver 与 prerelease 通过，带前缀/两段/尾随文本/空输出拒绝）；`TestDefaultVersionProbePinsHome`（默认探测把 `HOME`/`DSH_HOME` 都钉到注入根） |
+| 2 | 配置与所有权 | `TestMergeWritePreservesUnmanagedAndIsIdempotent`（`AGENTS.md` 块外内容与非点名 skill 文件保留、受管块与软链到位、第二轮 Plan 空 + 空 Apply 零写入）；`TestValidateRejectsUnverifiedBeforeWrite`（`mcp` 与 `modelProvider` 都在写入前被拒且零写入）；`TestValidateRejectsMalformedRequests`；`TestTraversalSkillNamesAreRejectedBeforeWrite`；`TestSettingsYamlIsNotAManagedSurface` |
+| 3 | 生命周期 | `TestDriftOnlyFromManagedFields`（未托管编辑不漂移；受管块/软链漂移且 Apply 后收敛）；`TestApplyVersionMismatchFailsExplicitly` |
+| 4 | 恢复与一致性 | `TestManagedFilesExtractAndMergeRollback`（`ManagedFiles` + `ExtractManaged`/`MergeManaged` 两条回退分支 + 非受管文件显式失败）；`TestManagedBlockWritePreservesSymlink`；`TestSkillLinksAreSymlinkSetAndIdempotent`；`TestSkillLinkRequiresMaterializedArtifact`；`TestApplyPreflightRejectsBeforeAnyWrite` |
+| 5 | 验收记录 | 本节；§2.5 未验证项逐条落点见 §11.7 |
+
+### 11.6 更高配置层与写前 pre-flight
+
+**更高配置层三态在本片不适用（限定在 patch「文件层」，不是全称结论）**：dsh 的层序（各 bundle →
+profile → home 级 `cordis.patch.yml` → `--patch`）只作用于**组合平面的插件行配置**；本片受管面是
+`$DSH_HOME/AGENTS.md` 与 `$DSH_HOME/skills/`，**就 patch 文件层而言**任何 patch 层都覆盖不到它们。
+唯一会被 home patch/`--patch` 压过的是 settings 写入（settings 曾写 profile patch，而 home patch 在
+它之上）——但那条路径正是 modelProvider，已在 §11.2 判为 `unverified` 并在写入前拒绝。
+`@deepseek-ai/dsh-config-editor.edit()` 的"被 home patch/命令行覆盖即拒写"是该三态在 dsh 侧的
+原生表达，登记为后续 modelProvider 片的实现依据。
+
+**"patch 文件层覆盖不到"不等于"没有可达的假收敛路径"**：另有两类**非 patch 文件层**的错位/覆盖，
+本片按 §8.7 第 8 项（`GROK_*` 环境变量层）先例**登记为未验证**、不实现三态（不臆断为已解决）：
+
+- **`$DSH_HOME` 非默认**：适配器按注入 home 派生 `<home>/.dsh`，而 dsh 的配置根由 `$DSH_HOME` 决定
+  （适配器只在**探测时**把 `DSH_HOME` 钉到注入根，见 `dsh.go` 的 `dshEnv`）。若机器上 `$DSH_HOME`
+  指向别处，Fleet 的两个受管面都写在 dsh 不读的位置，而 `HealthCheck` 只校验 Fleet 自己写的位置 →
+  仍可能报 Reconciled。已点进 `Capabilities(rules).Reason` 与 `Capabilities(skills).Reason` 的未验证清单。
+- **skill 根序**：`@deepseek-ai/dsh-skill-filesystem` 的根序是 项目根（rank 100 `<projectRoot>/.dsh/skills`、
+  rank 200 `<projectRoot>/.agents/skills`）→ `$DSH_HOME`（rank 400 `user-dsh`）→ `$DSH_AGENTS_HOME`
+  （rank 500）；**项目根同名 flat skill 会压过** Fleet 写的 home 级，`$DSH_AGENTS_HOME` 根也未纳入。
+  已点进 `Capabilities(skills).Reason` 未验证清单。
+
+**写前 pre-flight（沿用片 B/C 默认做法）**：`Validate` 与 `Apply` 的 pre-flight 都在写第一个字节
+之前拒掉未支持/未验证能力（`mcp`/`modelProvider`）、坏 digest、点号/非法 skill 名、不完整的受管标记块；
+`Apply` 唯一的写入副作用是 rules 受管块与 skill 软链。
+
+### 11.7 §2.5 未验证项逐条落点
+
+| # | §2.5 项 | 落点 |
+|---|---|---|
+| 1 | patch 行完整 schema（`$defs.patchList` 未导出） | `Capabilities(mcp).Reason`/`Evidence`；本片不实现 patch 行插删（§11.2/§11.6） |
+| 2 | `env` 值的 `${env:VAR}` 官方 deferred | `Capabilities(mcp).Reason`（记 `unsupported`，不是 `unverified`） |
+| 3 | WSL 未提及、Windows 走 semaphore 与 Linux Landlock 不等价 | `Capabilities(version).Reason` 未验证清单；`Validate` 对非 linux 显式拒绝 |
+| 4 | `settings.yaml` 并发写协议未实测 | `Capabilities(modelProvider).Reason` 未验证清单；本片完全不读写该文件（`TestSettingsYamlIsNotAManagedSurface`） |
+| 5 | 设置平面 `llm-pi-ai` namespace 与注册条件 | `Capabilities(modelProvider).Reason` 未验证清单 |
+| 6 | `--dump-config` 输出作为机器判据的稳定性 | `Capabilities(version).Reason`；健康检查只用 `dsh --version`，绝不用 dump 类命令（`TestHealthCheck/health-does-not-run-dump-commands`） |
+| 7 | install/upgrade（`npx`/`pnpm`）未纳入 | `Capabilities(version).Reason`；`Apply(version)` 不匹配显式失败（`TestApplyVersionMismatchFailsExplicitly`） |
+| 8 | 桌面端（Electron）profile 契约未验证 | `Capabilities(version).Reason` 未验证清单 |
+| 9 | **超出 §2.5**：`$DSH_HOME` 非默认时 Fleet 写入位置与 dsh 读取位置可能错位（假收敛） | `Capabilities(rules).Reason` / `Capabilities(skills).Reason` 未验证清单 + §11.6 |
+| 10 | **超出 §2.5**：skill 根序——项目根同名 flat skill 压过 Fleet 写的 home 级、`$DSH_AGENTS_HOME` 根未纳入 | `Capabilities(skills).Reason` 未验证清单 + §11.6 |
+
+### 11.8 本片自身验证
+
+`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿（新增 dsh 包测试 +
+五家族/fixture 回归 + 依赖方向护栏）。`DSH_REAL=1` 的真实二进制探测见 §11.4。
+
+### 11.9 本片上报的契约缺口（不改 spec/架构文档，只在评论里报告）
+
+1. **受管设置面的定位随上游版本迁移，"配置文件里的受管键"这一默认假设对 dsh 不再成立**：
+   0.1.7-rc.1 的活设置面是**当前 profile** 的 patch 列表数组（行级、整 config 替换），
+   `$DSH_HOME/settings.yaml` 降级为一次性导入通道。建议契约层像 batch-2 §6 缺口 1 那样显式区分
+   "文件键级"与"patch 行级"两种所有权，并明确"设置面在哪个文件"由适配器探测而非契约假设
+   （本片已按探测结论声明 `unverified`）。
+2. **归一化 skills 契约不表达目的地形态**：dsh 是扁平淡 `<name>.md`，批次一是 `<name>/SKILL.md`
+   目录。本片由适配器封装（`skillPath` 加 `.md`），但契约层若要求"跨家族可比的 skills 投影"，
+   需说明形态差异是否影响摘要语义。
+3. **归一化 MCP 契约只携带 `command`/`args`/`envRefs`**（同 §8.8 第 1 项 / §10.9 第 3 项）：
+   `transport`/`serverName`/`env`/`cwd`/`toolCallTimeoutMs` 等在 dsh core 契约里存在但本片不可达。
+4. **"更高配置层"三态未定义**（同 §8.8 第 2 项 / §9.8 第 3 项 / §10.9 第 4 项）：dsh 侧的原生表达是
+   `config-editor` 对 home patch/`--patch` 覆盖的拒写（§11.6），建议在 §6 缺口 3 正式定义该三态与归属。
+5. **skills 软链不在 `ManagedFiles`、回退不清理**（同 §10.9 第 7 项，既有契约、六家族同款）：本片登记。
+6. **dsh home 没有受管 schema/version 哨兵**：Hermes/Claude 有 `_config_version`/schema 可对位，
+   dsh 的受管面（`AGENTS.md`、扁平 skills）无版本标识；本片以 `SchemaVersion = "dsh-home-v1"` 随
+   `DetectedAgent` 上报，形态变化时靠版本探测与显式失败兜底，不静默降级。
+7. **unverified/unsupported 能力上的 `Paths` 与「实际读写的原生路径」措辞有出入**（NIT 3）：本片
+   `modelProvider`/`mcp` 声明里的 `Paths` 列的是本片**从不读写**的文件（含 `settings.yaml`），与
+   `capability.go` 对 `Paths` 的定义（"该能力实际读写的原生路径"）不符；hermes 的 unsupported rules
+   （`hermes.go:229`）是同形既有形态。建议契约层区分"已读写路径"与"能力涉及的候选路径"，
+   本片登记、不改共享 `CapabilityDecl` 语义。
+
+### 11.10 核查退回（MINOR/NIT）的修复记录（2026-09-28，复核轮）
+
+核查在 `c2b3437` 上判为**通过（无阻断）**，留 3 项 MINOR + 3 项 NIT + 一条被判为与本片无关的 CI flake。
+逐条修复如下（MINOR 3 用"去掉修复即失败"验证过）：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| MINOR 1 | §11.6 的"没有『写入成功但生效值不同』的可达路径"断言过宽：只证了 patch 文件层，忽略了 `$DSH_HOME` 非默认的错位与 skill 根序（项目根同名 flat skill 压过 home 级、`$DSH_AGENTS_HOME` 未纳入） | §11.6 把结论**限定到 patch 文件层**，另列两类**非 patch 文件层**的未验证项；`$DSH_HOME` 非默认点进 `Capabilities(rules).Reason` 与 `Capabilities(skills).Reason`，skill 根序两项点进 `Capabilities(skills).Reason`；§11.7 追加第 9/10 行（标注「超出 §2.5」） | `TestCapabilitiesDeclareSurfaceAndRecordUnverifiedItems` 新增 needle（`非默认`、`rank 400`、`$DSH_AGENTS_HOME`） |
+| MINOR 2 | §11.7 第 6 行把 §2.5 第 6 项（`--dump-config` 输出作为机器判据的稳定性）挂到 `Capabilities(version).Reason`，但该 Reason 未提 dump | `Capabilities(version).Reason` 补：dump 类命令**有写入副作用**（官方原文 "A dump initializes missing profile files"）且输出作为机器判据的稳定性**未验证** → 不作漂移/健康判据，健康检查只用 `dsh --version` | 同测试新增 needle `--dump-config`；`TestHealthCheck/health-does-not-run-dump-commands` |
+| MINOR 3 | `ExtractManaged` 的 `err == nil && ok` 吞掉"块不完整"错误；`MergeManaged` 对缺键/非字符串静默取 `""`，回退会把受管块写成**空块**（§8.9 #4 同款） | `ExtractManaged` 对块标记不完整/乱序**显式报错**；`MergeManaged` 校验未知受管键、缺键、非字符串值，全部显式失败且不写文件 | 新增 `TestExtractManagedRejectsIncompleteBlockAndMergeValidatesBackup`（3 个坏备份子用例 + 合法备份仍回退成功）；**去掉修复即失败**已实测（回退到 `c2b3437` 的 `dsh.go` → `incomplete managed block must fail extraction` FAIL，恢复修复后 PASS） |
+| NIT 1 | 用户可见错误写 `batch-2 §20.2`，但 batch-2 只到 §11 | 改为 `docs/agent-fleet-architecture-v1.1.2.md §20.2 / FR-2.2/FR-2.5` | `TestApplyVersionMismatchFailsExplicitly`（断言 `CLI installer`） |
+| NIT 2 | 口径 4 点名的"含 `envRefs` 的条目"只靠 MCP 能力级拒绝覆盖，测试未钉住该意图 | 代码无需改；补子用例把意图钉住 | `TestValidateRejectsUnverifiedBeforeWrite/mcp-envrefs-covered-by-capability-rejection`（`EnvRefs` 非空 → `capability "mcp" is unsupported`，零写入） |
+| NIT 3 | unverified/unsupported 能力的 `Paths` 列的是本片从不读写的文件（含 `settings.yaml`），与 `capability.go` 的"实际读写的原生路径"措辞有出入 | **登记即可**：写入 §11.9 第 7 项，不改共享 `CapabilityDecl` 语义 | 文档 |
+| CI | 同一 head `c2b3437` 的 push-run `36365352297` 在 `cmd/agent-fleet-agentd` 的 `TestRunStreamReportsVerifyEvidence` 间歇失败（PR-run 全绿；本地 `-race -count=1` 连跑 12 次全过；该测试自建**只含 fixture 适配器**的 registry，不经过本片改动的 `runDaemon` 注册表） | 判为与本片无关的独立 flake（**不是 KM-30**），重跑该 run 并等新 head 的 `go`+`web` 全绿；不夹带该 flake 的修复 | 重跑结果记录在本轮 issue 回复与 PR #16 checks |
+
+**修复后自查**：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿（新增
+dsh 包回归 + 五家族/fixture 回归 + 依赖方向护栏）。CI 重跑结论见本轮 issue 回复。
