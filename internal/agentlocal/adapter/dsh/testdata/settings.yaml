@@ -1,0 +1,13 @@
+# Legacy `$DSH_HOME/settings.yaml` shape (fixture).
+#
+# Since 0.1.7-rc.1 this file is NOT the live settings plane: `@deepseek-ai/dsh-settings`
+# imports it once at boot (renaming it to `settings.yaml.imported`) and writes the
+# sections into the active profile's `cordis.patch.yml`. Fleet must never read or
+# write this file; the fixture exists to prove that.
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-flash
+  reasoningEffort: high
+
+unmanaged-third-party-plugin:
+  keep: true

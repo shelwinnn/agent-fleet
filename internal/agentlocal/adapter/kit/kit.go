@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -183,6 +184,15 @@ func RulesContent(rules map[string]adapter.RulesEntry) string {
 
 // ---- Skill 目的地（FR-6.3）----
 
+// DigestRe 是受支持的内容摘要形状（FR-6.2：精确 revision/内容 digest，禁止浮动引用）。
+// 只在 kit 收口校验，六家族共用（复核 B1）。
+var DigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ValidDigest 判断摘要是否为本系统的规范形状（`sha256:<64 hex>`）。
+// 摘要最终成为缓存的目录分量，形状不符会让 `SkillCacheDir`/`EnsureSkillLink`
+// 把软链种到任意已存在目录（复核 B1）。
+func ValidDigest(digest string) bool { return DigestRe.MatchString(digest) }
+
 // SkillCacheDir 是节点规范缓存目录（FR-6.3）：<home>/.local/share/agent-fleet/skills/<name>/<digest>。
 // 约定与 reconciler 的备份目录一致（同以 home 为根，护栏 #12）。
 func SkillCacheDir(home, name, digest string) string {
@@ -219,7 +229,14 @@ func digestFromPath(target string) string {
 // EnsureSkillLink 把家族 Skill 目的地指向规范缓存（FR-6.3）。
 // 缓存目录缺失时**显式失败**（不静默跳过、不写坏链）：工件物化由
 // FetchArtifact/bundle 路径负责，本片未实现该路径，故不会伪装成功。
+// 摘要形状不合法时同样在**任何写入之前**显式失败：digest 是缓存目录分量，
+// 非法值（如 `../../../../..`）会把软链种到任意已存在目录（复核 B1 / 护栏 #3）。
+// 这是六家族唯一收口，一次修好，各家族不再各写一份。
 func EnsureSkillLink(linkPath, name, digest, cacheDir string) error {
+	if !ValidDigest(digest) {
+		return fmt.Errorf("skill %q digest %q is not %s; refusing to create a symlink",
+			name, digest, DigestRe)
+	}
 	if _, err := os.Stat(cacheDir); err != nil {
 		return fmt.Errorf("skill %q artifact %s is not materialized at %s (artifact fetch is not wired yet): %w",
 			name, digest, cacheDir, err)
