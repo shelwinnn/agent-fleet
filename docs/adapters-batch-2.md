@@ -1369,13 +1369,25 @@ fixture 以本机真实形态为基线：`~/.dsh/AGENTS.md`（1728 B 纯 Markdow
 
 ### 11.6 更高配置层与写前 pre-flight
 
-**更高配置层三态在本片不适用（有依据，不是省略）**：dsh 的层序（各 bundle → profile → home 级
-`cordis.patch.yml` → `--patch`）只作用于**组合平面的插件行配置**；本片受管面是
-`$DSH_HOME/AGENTS.md` 与 `$DSH_HOME/skills/`，二者不经 patch 层组合，任何 patch 层都覆盖不到它们。
+**更高配置层三态在本片不适用（限定在 patch「文件层」，不是全称结论）**：dsh 的层序（各 bundle →
+profile → home 级 `cordis.patch.yml` → `--patch`）只作用于**组合平面的插件行配置**；本片受管面是
+`$DSH_HOME/AGENTS.md` 与 `$DSH_HOME/skills/`，**就 patch 文件层而言**任何 patch 层都覆盖不到它们。
 唯一会被 home patch/`--patch` 压过的是 settings 写入（settings 曾写 profile patch，而 home patch 在
-它之上）——但那条路径正是 modelProvider，已在 §11.2 判为 `unverified` 并在写入前拒绝，故本片没有
-"Fleet 写入成功但生效值不同"的可达路径。`@deepseek-ai/dsh-config-editor.edit()` 的"被 home patch/
-命令行覆盖即拒写"是该三态在 dsh 侧的原生表达，登记为后续 modelProvider 片的实现依据。
+它之上）——但那条路径正是 modelProvider，已在 §11.2 判为 `unverified` 并在写入前拒绝。
+`@deepseek-ai/dsh-config-editor.edit()` 的"被 home patch/命令行覆盖即拒写"是该三态在 dsh 侧的
+原生表达，登记为后续 modelProvider 片的实现依据。
+
+**"patch 文件层覆盖不到"不等于"没有可达的假收敛路径"**：另有两类**非 patch 文件层**的错位/覆盖，
+本片按 §8.7 第 8 项（`GROK_*` 环境变量层）先例**登记为未验证**、不实现三态（不臆断为已解决）：
+
+- **`$DSH_HOME` 非默认**：适配器按注入 home 派生 `<home>/.dsh`，而 dsh 的配置根由 `$DSH_HOME` 决定
+  （适配器只在**探测时**把 `DSH_HOME` 钉到注入根，见 `dsh.go` 的 `dshEnv`）。若机器上 `$DSH_HOME`
+  指向别处，Fleet 的两个受管面都写在 dsh 不读的位置，而 `HealthCheck` 只校验 Fleet 自己写的位置 →
+  仍可能报 Reconciled。已点进 `Capabilities(rules).Reason` 与 `Capabilities(skills).Reason` 的未验证清单。
+- **skill 根序**：`@deepseek-ai/dsh-skill-filesystem` 的根序是 项目根（rank 100 `<projectRoot>/.dsh/skills`、
+  rank 200 `<projectRoot>/.agents/skills`）→ `$DSH_HOME`（rank 400 `user-dsh`）→ `$DSH_AGENTS_HOME`
+  （rank 500）；**项目根同名 flat skill 会压过** Fleet 写的 home 级，`$DSH_AGENTS_HOME` 根也未纳入。
+  已点进 `Capabilities(skills).Reason` 未验证清单。
 
 **写前 pre-flight（沿用片 B/C 默认做法）**：`Validate` 与 `Apply` 的 pre-flight 都在写第一个字节
 之前拒掉未支持/未验证能力（`mcp`/`modelProvider`）、坏 digest、点号/非法 skill 名、不完整的受管标记块；
@@ -1393,6 +1405,8 @@ fixture 以本机真实形态为基线：`~/.dsh/AGENTS.md`（1728 B 纯 Markdow
 | 6 | `--dump-config` 输出作为机器判据的稳定性 | `Capabilities(version).Reason`；健康检查只用 `dsh --version`，绝不用 dump 类命令（`TestHealthCheck/health-does-not-run-dump-commands`） |
 | 7 | install/upgrade（`npx`/`pnpm`）未纳入 | `Capabilities(version).Reason`；`Apply(version)` 不匹配显式失败（`TestApplyVersionMismatchFailsExplicitly`） |
 | 8 | 桌面端（Electron）profile 契约未验证 | `Capabilities(version).Reason` 未验证清单 |
+| 9 | **超出 §2.5**：`$DSH_HOME` 非默认时 Fleet 写入位置与 dsh 读取位置可能错位（假收敛） | `Capabilities(rules).Reason` / `Capabilities(skills).Reason` 未验证清单 + §11.6 |
+| 10 | **超出 §2.5**：skill 根序——项目根同名 flat skill 压过 Fleet 写的 home 级、`$DSH_AGENTS_HOME` 根未纳入 | `Capabilities(skills).Reason` 未验证清单 + §11.6 |
 
 ### 11.8 本片自身验证
 
@@ -1417,3 +1431,26 @@ fixture 以本机真实形态为基线：`~/.dsh/AGENTS.md`（1728 B 纯 Markdow
 6. **dsh home 没有受管 schema/version 哨兵**：Hermes/Claude 有 `_config_version`/schema 可对位，
    dsh 的受管面（`AGENTS.md`、扁平 skills）无版本标识；本片以 `SchemaVersion = "dsh-home-v1"` 随
    `DetectedAgent` 上报，形态变化时靠版本探测与显式失败兜底，不静默降级。
+7. **unverified/unsupported 能力上的 `Paths` 与「实际读写的原生路径」措辞有出入**（NIT 3）：本片
+   `modelProvider`/`mcp` 声明里的 `Paths` 列的是本片**从不读写**的文件（含 `settings.yaml`），与
+   `capability.go` 对 `Paths` 的定义（"该能力实际读写的原生路径"）不符；hermes 的 unsupported rules
+   （`hermes.go:229`）是同形既有形态。建议契约层区分"已读写路径"与"能力涉及的候选路径"，
+   本片登记、不改共享 `CapabilityDecl` 语义。
+
+### 11.10 核查退回（MINOR/NIT）的修复记录（2026-09-28，复核轮）
+
+核查在 `c2b3437` 上判为**通过（无阻断）**，留 3 项 MINOR + 3 项 NIT + 一条被判为与本片无关的 CI flake。
+逐条修复如下（MINOR 3 用"去掉修复即失败"验证过）：
+
+| # | 问题 | 修复 | 回归断言 |
+|---|---|---|---|
+| MINOR 1 | §11.6 的"没有『写入成功但生效值不同』的可达路径"断言过宽：只证了 patch 文件层，忽略了 `$DSH_HOME` 非默认的错位与 skill 根序（项目根同名 flat skill 压过 home 级、`$DSH_AGENTS_HOME` 未纳入） | §11.6 把结论**限定到 patch 文件层**，另列两类**非 patch 文件层**的未验证项；`$DSH_HOME` 非默认点进 `Capabilities(rules).Reason` 与 `Capabilities(skills).Reason`，skill 根序两项点进 `Capabilities(skills).Reason`；§11.7 追加第 9/10 行（标注「超出 §2.5」） | `TestCapabilitiesDeclareSurfaceAndRecordUnverifiedItems` 新增 needle（`非默认`、`rank 400`、`$DSH_AGENTS_HOME`） |
+| MINOR 2 | §11.7 第 6 行把 §2.5 第 6 项（`--dump-config` 输出作为机器判据的稳定性）挂到 `Capabilities(version).Reason`，但该 Reason 未提 dump | `Capabilities(version).Reason` 补：dump 类命令**有写入副作用**（官方原文 "A dump initializes missing profile files"）且输出作为机器判据的稳定性**未验证** → 不作漂移/健康判据，健康检查只用 `dsh --version` | 同测试新增 needle `--dump-config`；`TestHealthCheck/health-does-not-run-dump-commands` |
+| MINOR 3 | `ExtractManaged` 的 `err == nil && ok` 吞掉"块不完整"错误；`MergeManaged` 对缺键/非字符串静默取 `""`，回退会把受管块写成**空块**（§8.9 #4 同款） | `ExtractManaged` 对块标记不完整/乱序**显式报错**；`MergeManaged` 校验未知受管键、缺键、非字符串值，全部显式失败且不写文件 | 新增 `TestExtractManagedRejectsIncompleteBlockAndMergeValidatesBackup`（3 个坏备份子用例 + 合法备份仍回退成功）；**去掉修复即失败**已实测（回退到 `c2b3437` 的 `dsh.go` → `incomplete managed block must fail extraction` FAIL，恢复修复后 PASS） |
+| NIT 1 | 用户可见错误写 `batch-2 §20.2`，但 batch-2 只到 §11 | 改为 `docs/agent-fleet-architecture-v1.1.2.md §20.2 / FR-2.2/FR-2.5` | `TestApplyVersionMismatchFailsExplicitly`（断言 `CLI installer`） |
+| NIT 2 | 口径 4 点名的"含 `envRefs` 的条目"只靠 MCP 能力级拒绝覆盖，测试未钉住该意图 | 代码无需改；补子用例把意图钉住 | `TestValidateRejectsUnverifiedBeforeWrite/mcp-envrefs-covered-by-capability-rejection`（`EnvRefs` 非空 → `capability "mcp" is unsupported`，零写入） |
+| NIT 3 | unverified/unsupported 能力的 `Paths` 列的是本片从不读写的文件（含 `settings.yaml`），与 `capability.go` 的"实际读写的原生路径"措辞有出入 | **登记即可**：写入 §11.9 第 7 项，不改共享 `CapabilityDecl` 语义 | 文档 |
+| CI | 同一 head `c2b3437` 的 push-run `36365352297` 在 `cmd/agent-fleet-agentd` 的 `TestRunStreamReportsVerifyEvidence` 间歇失败（PR-run 全绿；本地 `-race -count=1` 连跑 12 次全过；该测试自建**只含 fixture 适配器**的 registry，不经过本片改动的 `runDaemon` 注册表） | 判为与本片无关的独立 flake（**不是 KM-30**），重跑该 run 并等新 head 的 `go`+`web` 全绿；不夹带该 flake 的修复 | 重跑结果记录在本轮 issue 回复与 PR #16 checks |
+
+**修复后自查**：`go build ./...`、`go vet ./...`、`gofmt -l` 干净；`go test ./...` 全绿（新增
+dsh 包回归 + 五家族/fixture 回归 + 依赖方向护栏）。CI 重跑结论见本轮 issue 回复。

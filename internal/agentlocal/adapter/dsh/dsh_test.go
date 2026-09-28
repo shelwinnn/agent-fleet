@@ -263,11 +263,11 @@ func TestCapabilitiesDeclareSurfaceAndRecordUnverifiedItems(t *testing.T) {
 	}
 	// §2.5 未验证项必须落进 Reason/Evidence，而不是被静默省略。
 	checks := map[adapter.Capability][]string{
-		adapter.CapabilityVersion:       {"0.1.7-rc.1", "developer preview", "COMPATIBILITY-BREAKING", "WSL", "Windows", "安装/升级"},
+		adapter.CapabilityVersion:       {"0.1.7-rc.1", "developer preview", "COMPATIBILITY-BREAKING", "WSL", "Windows", "安装/升级", "--dump-config"},
 		adapter.CapabilityModelProvider: {"settings.yaml", ".imported", "cordis.patch.yml", "llm-pi-ai", "deferred", "unverified"},
 		adapter.CapabilityMCP:           {"patch", "行级", "env:VAR", "deferred"},
-		adapter.CapabilitySkills:        {"扁平", "SKILL.md", "customSkillDirs"},
-		adapter.CapabilityRules:         {"AGENTS.md", "dsh-agent-instructions"},
+		adapter.CapabilitySkills:        {"扁平", "SKILL.md", "customSkillDirs", "$DSH_AGENTS_HOME", "非默认", "rank 400"},
+		adapter.CapabilityRules:         {"AGENTS.md", "dsh-agent-instructions", "非默认"},
 	}
 	for cap, needles := range checks {
 		decl := byCap[cap]
@@ -373,6 +373,23 @@ func TestValidateRejectsUnverifiedBeforeWrite(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), `capability "mcp" is unsupported`) {
 			t.Fatalf("want an explicit mcp/unsupported rejection, got %v", err)
+		}
+	})
+
+	t.Run("mcp-envrefs-covered-by-capability-rejection", func(t *testing.T) {
+		// NIT 2：口径 4 点名的"含 envRefs 的条目"由 MCP 能力级拒绝覆盖
+		// （MCP 非空即请求该能力），这里把意图钉住。
+		desired := fullDesired(t, home)
+		desired.MCP = map[string]adapter.MCPEntry{"fleet-tool": {
+			Command: "npx", Args: []string{"-y", "@fleet/tool"},
+			EnvRefs: map[string]string{"TOKEN": "FLEET_TOKEN"},
+		}}
+		err := newTestAdapter().Validate(context.Background(), home, desired)
+		if err == nil {
+			t.Fatal("envRefs must be rejected before any write")
+		}
+		if !strings.Contains(err.Error(), `capability "mcp" is unsupported`) {
+			t.Fatalf("envRefs must be covered by the mcp capability rejection, got %v", err)
 		}
 	})
 
@@ -586,6 +603,52 @@ func TestManagedFilesExtractAndMergeRollback(t *testing.T) {
 	// 非受管文件显式失败（不静默跳过）。
 	if err := a.MergeManaged(home, ".dsh/settings.yaml", managed); err == nil {
 		t.Fatal("non-managed file must fail explicitly")
+	}
+}
+
+// TestExtractManagedRejectsIncompleteBlockAndMergeValidatesBackup 是 MINOR 3 的回归
+// （§8.9 #4 同款口径）：不完整块显式报错；缺键/非字符串/未知键的回退显式失败，
+// 不把受管块静默写成空块。
+func TestExtractManagedRejectsIncompleteBlockAndMergeValidatesBackup(t *testing.T) {
+	a := newTestAdapter()
+	home := baselineHome(t)
+	before := readText(t, agentsPath(home))
+
+	// ExtractManaged：不完整块不得静默返回空 map（会让备份丢掉受管块）。
+	if _, err := a.ExtractManaged([]byte("# user file\n" + kit.BlockBegin + "\nno end marker\n")); err == nil {
+		t.Fatal("incomplete managed block must fail extraction, not silently return empty")
+	}
+	if _, err := a.ExtractManaged([]byte(kit.BlockEnd + "\n" + kit.BlockBegin + "\n")); err == nil {
+		t.Fatal("out-of-order markers must fail extraction")
+	}
+
+	// MergeManaged：缺键 / 非字符串 / 未知键都显式失败，且不写文件。
+	for _, c := range []struct {
+		name    string
+		managed map[string]any
+	}{
+		{"missing-key", map[string]any{}},
+		{"non-string", map[string]any{"agentFleetRules": 42}},
+		{"unknown-key", map[string]any{"agentFleetRules": rulesBody, "bogus": "x"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := a.MergeManaged(home, rulesRel, c.managed); err == nil {
+				t.Fatalf("backup %v must be rejected", c.managed)
+			}
+			if got := readText(t, agentsPath(home)); got != before {
+				t.Fatal("rejected rollback wrote AGENTS.md")
+			}
+		})
+	}
+
+	// 合法备份仍须回退成功（证明改动没有把回退路径一并堵死）。
+	reconcile(t, a, home, fullDesired(t, home))
+	mustWrite(t, agentsPath(home), strings.Replace(readText(t, agentsPath(home)), rulesBody, "tampered", 1))
+	if err := a.MergeManaged(home, rulesRel, map[string]any{"agentFleetRules": rulesBody}); err != nil {
+		t.Fatalf("valid backup must still roll back: %v", err)
+	}
+	if !strings.Contains(readText(t, agentsPath(home)), rulesBody) {
+		t.Fatal("valid rollback did not restore the block")
 	}
 }
 

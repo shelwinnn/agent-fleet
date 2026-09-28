@@ -150,7 +150,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			Capability: adapter.CapabilityVersion, State: adapter.SupportSupported,
 			VerifiedVersions: "DeepSeek Harness 0.1.7-rc.1 (linux/amd64)",
 			Reason: "版本**探测**已验证：`dsh --version` / `dsh -V` 输出**裸 semver**（允许 prerelease 后缀），" +
-				"按整行严格匹配，形态不符显式报错；`--version` 零副作用（临时 HOME 下不创建任何文件）。" +
+				"按整行严格匹配，形态不符显式报错；`--version` 零副作用（临时 HOME 下不创建任何文件），是唯一可直接使用的健康探测。`--dump-config` / `--dump-default-config` / `--dump-config-schema` **有写入副作用**（官方原文 \"A dump initializes missing profile files\"）且其输出作为机器判据的稳定性**未验证**（§2.5 第 6 项），故作漂移/健康判据不成立。" +
 				"官方 README 明写 developer preview 且 \"THERE WILL BE COMPATIBILITY-BREAKING CHANGES\"，" +
 				"故 `VerifiedVersions` 只登记复核时点**实际安装**的 0.1.7-rc.1，未知版本在 Apply(version) 显式失败。" +
 				"安装/升级（`npx @deepseek-ai/dsh` / `pnpm add`）不在本片，**「按 latest 接入」不成立**" +
@@ -207,8 +207,8 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 				"（本机为 `feishu-cli.md`/`workflow-one.md` 等真实文件，且 user DSH root 会跳过 `.system` 子目录）" +
 				"**不点名即不触碰**；目标已存在但不是 agent-fleet 软链时显式失败（护栏 #3）。" +
 				"缓存未物化或 digest 形状不符（非 `sha256:<64 hex>`）时在**写入前**显式失败，不写坏链、不静默跳过。" +
-				"未验证：项目根（`<projectRoot>/.dsh/skills`、`<projectRoot>/.agents/skills`）与 `customSkillDirs`" +
-				"不在本片受管范围（归一化 skills 契约不携带外部技能根 → 无可写来源）；`$DSH_AGENTS_HOME` 根未纳入；" +
+				"未验证：**`$DSH_HOME` 非默认**时本适配器按注入 home 派生 `<home>/.dsh`（探测时才把 `DSH_HOME` 钉到注入根），若机器上的 `$DSH_HOME` 指向别处，写入落在 dsh 不读的位置而 Fleet 仍报 Reconciled；**项目根同名 flat skill**（rank 100 `<projectRoot>/.dsh/skills`、rank 200 `<projectRoot>/.agents/skills`）会压过 Fleet 写的 home 级（rank 400）" +
+				"；`$DSH_AGENTS_HOME`（rank 500）根与 `customSkillDirs` 不在本片受管范围（归一化 skills 契约不携带外部技能根 → 无可写来源）；" +
 				"macOS/Windows/WSL 未实测",
 			Evidence: "本机实测 `ls ~/.dsh/skills/` → `feishu-cli.md`、`workflow-one.md`（扁平 `*.md`，带 `name`/`description` frontmatter，另带 `<!-- managed-by: … -->` 注释）；" +
 				"官方 `@deepseek-ai/dsh-skill-filesystem` README §Skill format（`<name>/SKILL.md` **或** flat `<name>.md`；嵌套 `**/SKILL.md` 不发现）" +
@@ -221,7 +221,7 @@ func (a *Adapter) Capabilities() []adapter.CapabilityDecl {
 			Reason: "`$DSH_HOME/AGENTS.md` 是 `@deepseek-ai/dsh-agent-instructions` 的**固定用户级全局指令文件**" +
 				"（官方 catalog：\"Harness home containing the fixed user-global `AGENTS.md`\"）。Fleet 只写自有受管标记块，" +
 				"块外内容逐字节保留（护栏 #3）；该路径为软链时写穿软链。文件不存在时按批次一惯例追加受管块。" +
-				"未验证：本片未对 AGENTS.md 的运行时加载做端到端交互验证（只验证文件形态与块读写）；" +
+				"未验证：**`$DSH_HOME` 非默认**时本适配器按注入 home 派生 `<home>/.dsh/AGENTS.md`（探测时才把 `DSH_HOME` 钉到注入根），若机器上的 `$DSH_HOME` 指向别处，写入落在 dsh 不读的位置而 Fleet 仍报 Reconciled；本片未对 AGENTS.md 的运行时加载做端到端交互验证（只验证文件形态与块读写）；" +
 				"项目级 `.dsh/AGENTS.md` / `.agents/` 等其它指令文件不在 home 受管面",
 			Evidence: "本机实测 `ls -la ~/.dsh/AGENTS.md` → 1728 B 纯 Markdown 全局指令文件；" +
 				"官方 `docs/config-catalog.md` `@deepseek-ai/dsh-agent-instructions` 段（默认 `$DSH_HOME` 或 `~/.dsh`）",
@@ -376,7 +376,7 @@ func (a *Adapter) Apply(ctx context.Context, home string, desired adapter.AgentD
 		v := a.probeVersionQuiet(ctx, home)
 		if v != desired.Version {
 			return fmt.Errorf("dsh: version %s is required but %q is installed and the CLI installer "+
-				"(npx/pnpm, batch-2 §20.2) is not wired in this slice", desired.Version, v)
+				"(npx/pnpm; docs/agent-fleet-architecture-v1.1.2.md §20.2 / FR-2.2/FR-2.5) is not wired in this slice", desired.Version, v)
 		}
 	}
 	if len(byStep["rules"]) != 0 {
@@ -467,20 +467,39 @@ func (a *Adapter) ManagedFiles(_ string) ([]string, error) {
 }
 
 // ExtractManaged 提取受管块内容（其余内容是用户 AGENTS.md，绝不进备份）。
+// 块标记不完整（只有开始没有结束，或顺序颠倒）时显式失败：静默返回空 map 会让备份
+// 丢失受管块，回退时把受管规则清空（§8.9 #4 同款口径）。
 func (a *Adapter) ExtractManaged(content []byte) (map[string]any, error) {
-	if block, ok, err := kit.ManagedBlockIn(string(content)); err == nil && ok {
-		return map[string]any{"agentFleetRules": block}, nil
+	block, ok, err := kit.ManagedBlockIn(string(content))
+	if err != nil {
+		return nil, fmt.Errorf("dsh: refusing to back up a file with an incomplete managed block: %w", err)
 	}
-	return map[string]any{}, nil
+	if !ok {
+		return map[string]any{}, nil
+	}
+	return map[string]any{"agentFleetRules": block}, nil
 }
 
 // MergeManaged 受管块级回退（§5.3 契约 3）：只还原受管标记块，保留块外（未托管）内容。
-// 未知受管文件显式失败，不静默跳过。
+// 未知受管文件、未知受管键、缺键或非字符串值都显式失败（§8.9 #4 口径：宁可报错，
+// 不静默把受管块写成空块）。
 func (a *Adapter) MergeManaged(home, relPath string, managed map[string]any) error {
 	if relPath != rulesRel {
 		return fmt.Errorf("dsh: %s is not a managed-key-restorable file", relPath)
 	}
-	content, _ := managed["agentFleetRules"].(string)
+	for k := range managed {
+		if k != "agentFleetRules" {
+			return fmt.Errorf("dsh: unknown managed key %q in backup for %s", k, relPath)
+		}
+	}
+	raw, present := managed["agentFleetRules"]
+	if !present {
+		return fmt.Errorf("dsh: backup for %s has no agentFleetRules entry; refusing to write an empty managed block", relPath)
+	}
+	content, isString := raw.(string)
+	if !isString {
+		return fmt.Errorf("dsh: managed agentFleetRules for %s is %T, want string", relPath, raw)
+	}
 	return kit.WriteManagedBlock(a.rulesPath(home), content)
 }
 
