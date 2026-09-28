@@ -27,6 +27,7 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/claude"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/dsh"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/grok"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/hermes"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
@@ -342,6 +343,7 @@ func newOneshotCollector(home, dataDir string) *inventory.Collector {
 	reg := adapter.NewRegistry()
 	reg.Register(claude.New())
 	reg.Register(codex.New())
+	reg.Register(dsh.New())
 	reg.Register(grok.New())
 	reg.Register(hermes.New())
 	reg.Register(omp.New())
