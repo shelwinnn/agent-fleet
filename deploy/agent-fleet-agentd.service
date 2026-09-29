@@ -1,0 +1,38 @@
+# agent-fleet-agentd（daemon 模式）systemd 模板（KM-37，随 v0.1.0 交付）。
+#
+# 未在本机 systemctl 实机加载验证（演练环境为用户会话）。前置：该机已完成
+# `agent-fleet-agentd enroll`（client cert 0600 已落盘），enroll 流程见 README
+# 「注册第一台机器」。
+#
+# agentd 是单操作者工作站代理，按**用户服务**安装更贴合受管 home 的所有权：
+#   cp deploy/agent-fleet-agentd.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now agent-fleet-agentd
+#   loginctl enable-linger <user>    # 退出登录后保持运行
+# 系统级安装同理（cp 到 /etc/systemd/system/ 并按需改 User=/HOME=）。
+
+[Unit]
+Description=agent-fleet node agent (daemon, mTLS long connection)
+Documentation=https://github.com/shelwinnn/agent-fleet#readme
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# %h = 运行用户 home。EnvironmentFile 里可放 FLEET_SERVER / FLEET_MACHINE 覆盖。
+EnvironmentFile=-%h/.config/agent-fleet/agentd.env
+ExecStart=/usr/local/bin/agent-fleet-agentd daemon \
+    --server 127.0.0.1:7789 \
+    --machine ws-1 \
+    --ca %h/.config/agent-fleet/ca.crt \
+    --data-dir %h/.local/share/agent-fleet
+Restart=on-failure
+RestartSec=5s
+# daemon 自身已做退避重连；systemd 只兜底进程崩溃。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+# 受管内容写进用户 home（受管键、执行权锁、回滚备份）。
+ReadWritePaths=%h
+
+[Install]
+WantedBy=default.target
