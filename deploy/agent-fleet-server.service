@@ -1,0 +1,38 @@
+# agent-fleet-server systemd 模板（KM-37，随 v0.1.0 交付）。
+#
+# 未在本机 systemctl 实机加载验证（演练环境为用户会话）——首装时先
+# systemctl start 后核对 journal 与 GET /healthz。字段与 docs/deployment-drill.md
+# 演练命令一致：HTTP 127.0.0.1:7788、agent gRPC 0.0.0.0:7789（mTLS）。
+#
+# 安装：
+#   sudo cp deploy/agent-fleet-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agent-fleet-server
+#
+# 二进制与数据目录默认按 root 运行；改专用用户时同步 chown StateDirectory，
+# 且非回环监听必须配置 FLEET_ADMIN_TOKEN（EnvironmentFile），见 README 速查表。
+
+[Unit]
+Description=agent-fleet control plane (HTTP API + SPA + agent gRPC mTLS)
+Documentation=https://github.com/shelwinnn/agent-fleet#readme
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+StateDirectory=agent-fleet
+EnvironmentFile=-/etc/default/agent-fleet-server
+ExecStart=/usr/local/bin/agent-fleet-server \
+    --addr 127.0.0.1:7788 \
+    --grpc-addr 0.0.0.0:7789 \
+    --data-dir /var/lib/agent-fleet \
+    --spa-dir /usr/local/share/agent-fleet/web/dist
+Restart=on-failure
+RestartSec=5s
+# CA 私钥与 SQLite 都在 StateDirectory；systemd 默认对 StateDirectory 收紧为 0700。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=
+
+[Install]
+WantedBy=multi-user.target
