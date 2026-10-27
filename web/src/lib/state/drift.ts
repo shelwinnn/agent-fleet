@@ -203,23 +203,19 @@ export interface ConditionSummary {
   lastTransitionTime?: string;
 }
 
-export const CONDITION_LABELS: Record<Condition['type'], string> = {
-  SSHReachable: 'SSH 可达',
-  AgentConnected: 'agentd 在线',
-  InventoryReady: 'inventory 就绪',
-  Drifted: '漂移',
-  Reconciled: '已收敛',
-  Degraded: '降级',
-};
+/** 六条件类型的展示名取自 i18n 消息目录（condition.*），此处不再维护硬编码文案。 */
 
-export function summarizeCondition(c: ConditionView & { type: Condition['type'] }): ConditionSummary {
+export function summarizeCondition(
+  c: ConditionView & { type: Condition['type'] },
+  locale: Locale = 'zh-CN',
+): ConditionSummary {
   const type = c.type;
   const status = (c.status ?? 'Unknown') as ConditionStatus;
   return {
     type,
     status,
     tone: status === 'True' ? 'ok' : status === 'False' ? 'muted' : 'warn',
-    label: `${CONDITION_LABELS[type] ?? type}: ${status}`,
+    label: `${translate(locale, `condition.${type}`)}: ${status}`,
     reason: c.reason,
     message: c.message,
     lastTransitionTime: c.lastTransitionTime,
@@ -236,14 +232,18 @@ export const CONDITION_ORDER: Condition['type'][] = [
   'Degraded',
 ];
 
-export function allConditionSummaries(conditions: Condition[] | undefined): ConditionSummary[] {
+export function allConditionSummaries(
+  conditions: Condition[] | undefined,
+  locale: Locale = 'zh-CN',
+): ConditionSummary[] {
   return CONDITION_ORDER.map((type) => {
     const view = conditionView(conditions, type);
     // conditionView 只带四要素（与 GET /drift 的响应同形），这里补回条件类型。
     return summarizeCondition(
       view
         ? { ...view, type }
-        : { type, status: 'Unknown' as ConditionStatus, reason: 'NeverReported', message: '该条件尚未记录' },
+        : { type, status: 'Unknown' as ConditionStatus, reason: 'NeverReported', message: translate(locale, 'condition.notRecorded') },
+      locale,
     );
   });
 }

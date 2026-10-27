@@ -133,3 +133,11 @@ export function overviewStats(
 }
 
 export { allConditionSummaries };
+
+/** SSHReachable 条件三态的展示词（True/False/Unknown → 可达/不可达/未知）。 */
+export function sshStatusLabel(status: string, locale: Locale = 'zh-CN'): string {
+  if (status === 'True') return translate(locale, 'machines.ssh.reachable');
+  if (status === 'False') return translate(locale, 'machines.ssh.unreachable');
+  if (status === 'Unknown') return translate(locale, 'machines.ssh.unknown');
+  return status;
+}

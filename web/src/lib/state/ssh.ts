@@ -1,16 +1,20 @@
 /**
- * SSH 路径的状态呈现（FR-14.5 第 4 组、FR-12.3、FR-12.7、§9.3、§7.6）。
+ * SSH 路径的状态呈现。
  *
  * 覆盖三件事：
  *  1. `AwaitingConfirmation`：显示"等待确认（剩余 T）"，给出确认/取消入口；
  *  2. **plan 基线失效**：确认后 apply 仍会重算 plan 并比对基线，不一致则拒绝执行
  *     并报 `ReplanRequired`（零变更），UI 必须把这条提示放在确认入口旁边；
- *  3. host-key 失败与"需升级 agentd"必须显式呈现，禁止静默降级（FR-12.3/§7.6）。
+ *  3. host-key 失败与"需升级 agentd"必须显式呈现，禁止静默降级。
+ *
+ * 全部面向用户的文案经 i18n 取值（locale 尾参，默认 zh-CN）；后端 reason code
+ * 与服务端 message 原样保留（定位价值），未知失败给出准确的通用说明。
  */
 import type { ApiError } from '../api/client';
 import type { Machine, Operation } from '../api/types';
+import { translate, type Locale } from '../i18n/messages.js';
 import { formatDuration } from './format';
-import { viewOperations, type OperationView } from './operations';
+import { operationPhaseLabel, viewOperations, type OperationView } from './operations';
 
 export interface AwaitingConfirmationView {
   operation: OperationView;
@@ -18,32 +22,34 @@ export interface AwaitingConfirmationView {
   remainingText: string;
   expired: boolean;
   planDigest?: string;
-  /** 确认入口旁的强制提示（§9.3 第 3 条：确认不等于计划仍有效）。 */
+  /** 确认入口旁的强制提示（确认不等于计划仍有效）。 */
   baselineNotice: string;
 }
 
-export const CONFIRM_BASELINE_NOTICE =
-  '确认只表示"确认的是这份计划"：apply 阶段仍会重取观测、重算 plan 并比对基线，基线不一致将拒绝执行、零变更，并报 ReplanRequired（需重新 plan 与重新确认）。';
+export function confirmBaselineNotice(locale: Locale = 'zh-CN'): string {
+  return translate(locale, 'ops.baselineNotice');
+}
 
-export function awaitingConfirmations(ops: Operation[], now: Date = new Date()): AwaitingConfirmationView[] {
-  return viewOperations(ops, now)
+export function awaitingConfirmations(ops: Operation[], now: Date = new Date(), locale: Locale = 'zh-CN'): AwaitingConfirmationView[] {
+  return viewOperations(ops, now, locale)
     .filter((v) => v.phase === 'AwaitingConfirmation')
     .map((v) => {
       const remainingMs = v.planRemainingMs ?? 0;
       return {
         operation: v,
         remainingMs,
-        remainingText: v.planExpiresAt ? formatDuration(remainingMs) : '未报告截止时间',
+        remainingText: v.planExpiresAt ? formatDuration(remainingMs, locale) : translate(locale, 'ops.noDeadline'),
         expired: v.planExpired,
         planDigest: v.planDigest,
-        baselineNotice: CONFIRM_BASELINE_NOTICE,
+        baselineNotice: confirmBaselineNotice(locale),
       };
     });
 }
 
-/** 计划超时提示（§9.3 第 4 条：超时后操作以 Failed 终结、互斥释放）。 */
-export const PLAN_TIMEOUT_NOTICE =
-  '计划确认窗口超时后，该操作以 Failed 终结并释放互斥（审计保留原 planDigest 与超时时刻）；超时计划不会被继续推进，需要重新 plan。';
+/** 计划超时提示（超时后操作以 Failed 终结、互斥释放）。 */
+export function planTimeoutNotice(locale: Locale = 'zh-CN'): string {
+  return translate(locale, 'ops.timeoutNotice');
+}
 
 export interface SshNotice {
   level: 'info' | 'warn' | 'danger';
@@ -51,39 +57,41 @@ export interface SshNotice {
   detail: string;
 }
 
-/** host-key 失败（FR-12.3）：标准校验保留，禁止 StrictHostKeyChecking=no。 */
-export function hostKeyNotice(machine: Machine): SshNotice | null {
+/** host-key 失败：标准校验保留，不出现 StrictHostKeyChecking=no。 */
+export function hostKeyNotice(machine: Machine, locale: Locale = 'zh-CN'): SshNotice | null {
   const cond = machine.status?.conditions?.find((c) => c.type === 'SSHReachable');
   if (!cond || cond.status !== 'False') return null;
   const reason = cond.reason ?? '';
   const hostKeyRelated = /hostkey|host_key|knownhost|fingerprint/i.test(reason) || /host.?key/i.test(cond.message ?? '');
   if (!hostKeyRelated && cond.reason !== 'SSHUnreachable') return null;
+  const reasonText = reason ? `（reason=${reason}）` : '';
   return {
     level: 'danger',
-    title: hostKeyRelated ? 'SSH host-key 校验失败' : 'SSH 不可达',
-    detail: `${cond.message ?? ''}${cond.reason ? `（reason=${cond.reason}）` : ''}${
-      hostKeyRelated
-        ? '——保留标准 host-key 校验，不使用 StrictHostKeyChecking=no；请人工核对目标机指纹后重试。'
-        : '——请检查网络、端口与凭据配置。'
-    }`,
+    title: translate(locale, hostKeyRelated ? 'ssh.hostKey.title' : 'ssh.unreachable.title'),
+    detail: translate(locale, hostKeyRelated ? 'ssh.hostKey.detail' : 'ssh.unreachable.detail', {
+      message: cond.message ?? '',
+      reason: reasonText,
+    }),
   };
 }
 
-/** agentd 版本协商被拒（§7.6）：条件保持 False，绝不下发期望状态。 */
-export function agentVersionNotice(machine: Machine): SshNotice | null {
+/** agentd 版本协商被拒：条件保持 False，绝不下发期望状态。 */
+export function agentVersionNotice(machine: Machine, locale: Locale = 'zh-CN'): SshNotice | null {
   const cond = machine.status?.conditions?.find((c) => c.type === 'AgentConnected');
   if (!cond || cond.status !== 'Unknown') return null;
   const reason = cond.reason ?? '';
   if (!/version|upgrade|incompatible/i.test(reason)) return null;
   return {
     level: 'warn',
-    title: '需升级 agentd',
-    detail: `${cond.message ?? ''}（reason=${reason}）——服务端拒绝不支持的 daemon 主版本，不会向其下发期望状态。`,
+    title: translate(locale, 'ssh.agentVersion.title'),
+    detail: translate(locale, 'ssh.agentVersion.detail', { message: cond.message ?? '', reason }),
   };
 }
 
-/** 动作失败后的提示映射（409 三种 reason + 400 无效期望状态）。 */
+/** 动作失败后的提示映射（409 三种 reason + 400 Invalid 等）。 */
 export interface ActionFailure {
+  /** rejected = 服务端明确拒绝（4xx/业务 409）；failed = 未完成（网络/5xx）。 */
+  kind: 'rejected' | 'failed';
   title: string;
   detail: string;
   /** 是否提供"重新 plan"之类的后续入口提示。 */
@@ -92,68 +100,95 @@ export interface ActionFailure {
   unresolvedPhase?: string;
 }
 
-export function describeActionFailure(err: unknown): ActionFailure {
+export function describeActionFailure(err: unknown, locale: Locale = 'zh-CN'): ActionFailure {
   const api = err as ApiError;
   if (api && typeof api === 'object' && 'reason' in api) {
+    const kind: ActionFailure['kind'] = api.status > 0 && api.status < 500 ? 'rejected' : 'failed';
     switch (api.reason) {
       case 'MachineBusy':
         return {
-          title: '409 MachineBusy：该机存在未决操作',
-          detail: `${api.message}。未决操作占用机器级互斥，新的变更类操作会被拒绝，Deployment 该目标保持阻塞；可用入口只有对同一操作的确认/取消/跳过。`,
+          kind,
+          title: translate(locale, 'error.busy.title'),
+          detail: translate(locale, 'error.busy.detail', { message: api.message }),
           unresolvedOperationId: api.unresolvedOperationId,
           unresolvedPhase: api.unresolvedPhase,
         };
       case 'ReplanRequired':
         return {
-          title: '409 ReplanRequired：计划基线已失效',
-          detail: `${api.message}。确认后本地受管文件发生变化，apply 重算的基线与之不一致，因此拒绝执行且零变更。`,
-          replanHint: '重新 plan 并重新确认后才会执行。',
+          kind,
+          title: translate(locale, 'error.replan.title'),
+          detail: translate(locale, 'error.replan.detail', { message: api.message }),
+          replanHint: translate(locale, 'error.replan.hint'),
         };
       case 'RollbackUnsupported':
-        return { title: '409 RollbackUnsupported：回滚目标不可用', detail: api.message };
+        return { kind, title: translate(locale, 'error.rollbackUnsupported.title'), detail: api.message };
       case 'DesiredStateInvalid':
         return {
-          title: '400 DesiredStateInvalid：期望状态不可渲染',
-          detail: `${api.message}。节点阶段 1 会就此显式失败；未注册的家族（如 zcode）按范围决策原样报错，UI 不做特例。`,
+          kind,
+          title: translate(locale, 'error.desiredInvalid.title'),
+          detail: translate(locale, 'error.desiredInvalid.detail', { message: api.message }),
         };
       case 'NotFound':
-        return { title: '404 NotFound：对象不存在', detail: api.message };
+        return {
+          kind,
+          title: translate(locale, 'error.notFound.title'),
+          detail: translate(locale, 'error.notFound.detail', { message: api.message }),
+        };
       case 'Invalid':
         return {
-          title: '400 Invalid：请求被服务端拒绝',
-          detail: `${api.message}（§6.4 错误体原文，UI 不改写服务端拒绝理由。）`,
+          kind,
+          title: translate(locale, 'error.invalid.title'),
+          detail: translate(locale, 'error.invalid.detail', { message: api.message }),
         };
       default:
-        return { title: `${api.reason}`, detail: api.message };
+        // 未识别的业务 reason：保留原码定位，说明用准确的通用文案。
+        return {
+          kind,
+          title: translate(locale, 'error.knownReason.title', { reason: api.reason }),
+          detail: api.message,
+        };
     }
   }
-  return { title: '请求失败', detail: err instanceof Error ? err.message : String(err) };
+  // 未知原因（网络断开等）：通用说明，不把原始异常当作默认提示。
+  return { kind: 'failed', title: translate(locale, 'error.requestFailed'), detail: translate(locale, 'error.unexpected') };
 }
 
-/**
- * 仍未实现的 SSH 路径动作端点（登记见 docs/ssh-only-oneshot.md）——UI 禁用入口并
- * 如实标注，不假装可用，也不暗示后续切片会自动有。
- */
-export const UNIMPLEMENTED_SSH_ENDPOINTS = [
-  'POST /machines/{name}/ssh/bootstrap',
-  'POST /machines/{name}/ssh/repair-agentd',
-];
+/** 错误提示的标题词：业务拒绝与未完成分开表述（网络失败不是"被拒绝"）。 */
+export function actionOutcomeTitle(err: unknown, locale: Locale = 'zh-CN'): string {
+  return translate(locale, describeActionFailure(err, locale).kind === 'rejected' ? 'common.actionRejected' : 'common.actionFailed');
+}
 
-/** SSH 路径未实现禁用入口的统一口径。 */
-export const UNIMPLEMENTED_NOTICE = '未实现，见 docs/ssh-only-oneshot.md';
+/** `标题。详情` 的一行式组合（页面提示正文用）。 */
+export function failureText(err: unknown, locale: Locale = 'zh-CN'): string {
+  const f = describeActionFailure(err, locale);
+  return `${f.title}。${f.detail}`;
+}
 
-/**
- * 未实现的 Skill 端点（POST /skills/{name}/resolve）的口径：它不在
- * docs/ssh-only-oneshot.md 的登记范围，UI 侧的 doc-of-record 是 docs/web-ui.md §6。
- */
-export const UNIMPLEMENTED_SKILL_NOTICE = '未实现，见 docs/web-ui.md';
+/** 列表/详情加载失败的完整提示：对象 + 原因 + 下一步。 */
+export function loadErrorText(err: unknown, locale: Locale = 'zh-CN'): string {
+  const f = describeActionFailure(err, locale);
+  return locale === 'zh-CN' ? `（${f.title}）${f.detail}` : ` (${f.title}) ${f.detail}`;
+}
+
+/** 尚未交付功能的统一口径：禁用入口如实标注，不假装可用。 */
+export function featureUnavailableNotice(locale: Locale = 'zh-CN'): string {
+  return translate(locale, 'ssh.featureUnavailable');
+}
 
 /**
  * install 结果里 skippedHosts（服务端 SkippedHost：{Name,Reason}，JSON 键为 Go
  * 字段名）的呈现：`Name（Reason）`——绝不把对象直接 join 成 [object Object]。
  */
-export function formatSkippedHosts(skipped: { Name: string; Reason: string }[]): string {
+export function formatSkippedHosts(skipped: { Name: string; Reason: string }[], locale: Locale = 'zh-CN'): string {
+  const joiner = locale === 'zh-CN' ? '、' : ', ';
+  const open = locale === 'zh-CN' ? '（' : ' (';
+  const close = locale === 'zh-CN' ? '）' : ')';
   return skipped
-    .map((s) => (s.Reason ? `${s.Name}（${s.Reason}）` : s.Name))
-    .join('、');
+    .map((s) => (s.Reason ? `${s.Name}${open}${s.Reason}${close}` : s.Name))
+    .join(joiner);
+}
+
+/** 供页面提示引用的相位展示名（转发 operations 的映射，减少页面导入面）。 */
+export function sshPhaseLabel(phase: string, locale: Locale = 'zh-CN'): string {
+  return operationPhaseLabel(phase as Parameters<typeof operationPhaseLabel>[0], locale);
 }

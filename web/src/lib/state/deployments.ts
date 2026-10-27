@@ -117,23 +117,23 @@ export function deploymentPhaseLabel(deployment: Deployment, locale: Locale = 'z
 }
 
 /**
- * 回滚型 Deployment 的展示文案（§7.2：回滚不把机器拉回旧代）。
+ * 回滚型 Deployment 的展示文案：回滚不把机器拉回旧代。
  * 形如：回滚自 gen14 至 gen12 的内容（逐机物化为新代）。
  */
-export function rollbackLabel(deployment: Deployment): string | null {
+export function rollbackLabel(deployment: Deployment, locale: Locale = 'zh-CN'): string | null {
   const rollbackOf = deployment.spec?.rollbackOf;
   if (rollbackOf === undefined || rollbackOf === null) return null;
   const target = deployment.spec?.targetGeneration;
-  return `回滚自 gen${rollbackOf} 至 gen${target ?? '?'} 的内容（逐机物化为新代，代计数不回退）`;
+  return translate(locale, 'deploy.rollback.label', { from: rollbackOf, to: target ?? '?' });
 }
 
-/** 自动/手动来源与批次策略摘要（§6.1 策略字段）。 */
-export function strategyLabel(deployment: Deployment): string {
+/** 自动/手动来源与批次策略摘要（策略字段的人话摘要）。 */
+export function strategyLabel(deployment: Deployment, locale: Locale = 'zh-CN'): string {
   const s = deployment.spec?.strategy ?? {};
   const parts: string[] = [];
-  if (s.canary) parts.push(`金丝雀 ${s.canary} 台`);
-  if (s.batchSize) parts.push(`批大小 ${s.batchSize}`);
-  if (s.maxUnavailable) parts.push(`同批上限 ${s.maxUnavailable}`);
-  parts.push(s.pauseOnFailure ? '失败即暂停' : '失败不自动暂停');
+  if (s.canary) parts.push(translate(locale, 'deploy.strategy.canary', { n: s.canary }));
+  if (s.batchSize) parts.push(translate(locale, 'deploy.strategy.batchSize', { n: s.batchSize }));
+  if (s.maxUnavailable) parts.push(translate(locale, 'deploy.strategy.maxUnavailable', { n: s.maxUnavailable }));
+  parts.push(translate(locale, s.pauseOnFailure ? 'deploy.strategy.pauseOnFailure' : 'deploy.strategy.continueOnFailure'));
   return parts.join(' · ');
 }

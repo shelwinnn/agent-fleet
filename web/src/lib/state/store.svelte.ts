@@ -24,7 +24,8 @@ export interface MachineDetail {
   machine?: Machine;
   drift?: MachineDrift;
   operations: Operation[];
-  error?: string;
+  /** 原始加载错误（未本地化）；页面用 loadErrorText 按当前语言渲染。 */
+  error?: unknown;
   loading: boolean;
 }
 
@@ -46,8 +47,8 @@ export class FleetStore {
   recentOperations = $state<Operation[]>([]);
 
   loading = $state<Record<string, boolean>>({});
-  /** 最近一次加载失败的提示（按视图键，如 "machines"、"machine:ws-1"）。 */
-  errors = $state<Record<string, string>>({});
+  /** 最近一次加载失败的原始错误（按视图键，如 "machines"、"machine:ws-1"）；页面按当前语言渲染。 */
+  errors = $state<Record<string, unknown>>({});
   /** 上次成功重取时间（Overview 顶部显示"数据新鲜度"）。 */
   lastRefreshAt = $state<Date | null>(null);
 
@@ -217,9 +218,9 @@ export class FleetStore {
       this.details[name] = {
         ...(this.details[name] ?? { operations: [] }),
         loading: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: err,
       };
-      this.errors[`machine:${name}`] = err instanceof Error ? err.message : String(err);
+      this.errors[`machine:${name}`] = err;
     }
   }
 
@@ -234,7 +235,7 @@ export class FleetStore {
         this.deployments = this.deployments.filter((d) => d.metadata.name !== name);
         return;
       }
-      this.errors[`deployment:${name}`] = err instanceof Error ? err.message : String(err);
+      this.errors[`deployment:${name}`] = err;
     }
   }
 
@@ -296,7 +297,8 @@ export class FleetStore {
       await fn();
       delete this.errors[key];
     } catch (err) {
-      this.errors[key] = err instanceof ApiError ? `${err.reason}: ${err.message}` : String(err);
+      // 存原始错误对象，页面在渲染时按当前语言本地化（ApiError 含 reason 等定位信息）。
+      this.errors[key] = err;
     } finally {
       this.loading[key] = false;
     }

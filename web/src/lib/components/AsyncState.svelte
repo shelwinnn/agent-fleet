@@ -18,9 +18,9 @@
     {/each}
   </div>
 {:else if error}
-  <div class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+  <div class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
     {error}
   </div>
 {:else if empty}
-  <div class="rounded-md border border-dashed p-4 text-sm text-muted-foreground">{empty}</div>
+  <div class="rounded-md border border-dashed p-4 text-sm text-muted-foreground" role="status">{empty}</div>
 {/if}

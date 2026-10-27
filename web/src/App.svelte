@@ -68,6 +68,16 @@
     }[store.streamState],
   );
 
+  // sse 层只给语言中立的原因码；这里按当前语言渲染（切换语言立即跟随）。
+  const streamDetailText = $derived.by(() => {
+    const d = store.streamDetail;
+    if (!d || store.streamState === 'open') return '';
+    if (d.startsWith('http:')) return t('app.stream.reason.http', { status: d.slice('http:'.length) });
+    if (d.startsWith('content-type:')) return t('app.stream.reason.contentType', { type: d.slice('content-type:'.length) });
+    if (d === 'server-closed') return t('app.stream.reason.serverClosed');
+    return t('app.stream.reason.network');
+  });
+
   const isActive = (path: string) =>
     path === '/' ? router.path === '/' : router.path === path || router.path.startsWith(`${path}/`);
 
@@ -105,8 +115,8 @@
       {:else}
         <span class="text-xs text-muted-foreground">{t('app.noEvents')}</span>
       {/if}
-      {#if store.streamDetail && store.streamState !== 'open'}
-        <span class="text-xs text-muted-foreground">{store.streamDetail}</span>
+      {#if streamDetailText && store.streamState !== 'open'}
+        <span class="text-xs text-muted-foreground">{streamDetailText}</span>
       {/if}
 
       <div class="ml-auto flex items-center gap-2">
@@ -198,7 +208,7 @@
         <SshInventory {store} />
       {:else}
         <div class="rounded-lg border p-6 text-sm">
-          {t('app.unknownRoute')} <code>{router.path}</code>。<button class="underline" onclick={() => navigate('/')}
+          {t('app.unknownRoute')} <code>{router.path}</code> <button class="underline" onclick={() => navigate('/')}
             >{t('app.backToOverview')}</button
           >
         </div>

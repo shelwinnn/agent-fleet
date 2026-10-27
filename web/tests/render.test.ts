@@ -1,13 +1,14 @@
 /**
- * 页面与状态呈现证据（KM-25 验收项："页面与状态呈现的证据"）。
+ * 页面与状态呈现证据。
  *
- * 用 `svelte/server` 把**真实的页面组件**渲染成 HTML，数据来自真实控制面
- * （FLEET_INTEGRATION=1 时）；断言 FR-14.5 的四组状态确实出现在渲染结果里：
+ * 用 `svelte/server` 把**真实的页面组件**渲染成 HTML，断言用户可观察的正确含义：
  * drift 三态（Unknown 不得显示为"一致"）、未决操作与阻塞、Deployment 目标的
- * Superseded/Skipped 原因、以及"无证书吊销"限制标注与路由清单。
+ * Superseded/Skipped 原因、真实限制与风险的呈现、禁用入口的原因标注、空态与
+ * 加载/错误的无障碍呈现。
  *
  * 说明：SSR 不跑 $effect/onMount（数据加载在浏览器侧），所以这里先把 store 填好
- * 再渲染——渲染路径与浏览器一致（同一批组件、同一批派生视图）。
+ * 再渲染——渲染路径与浏览器一致（同一批组件、同一批派生视图）。默认语言为
+ * zh-CN（源语言）；英文下的整页渲染证据见 i18n.test.ts。
  */
 import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
@@ -18,6 +19,8 @@ import Overview from '../src/routes/Overview.svelte';
 import Machines from '../src/routes/Machines.svelte';
 import MachineDetail from '../src/routes/MachineDetail.svelte';
 import Deployments from '../src/routes/Deployments.svelte';
+import Profiles from '../src/routes/Profiles.svelte';
+import Skills from '../src/routes/Skills.svelte';
 import SshInventory from '../src/routes/SshInventory.svelte';
 import type { Deployment, Machine, Operation } from '../src/lib/api/types.js';
 
@@ -97,12 +100,11 @@ function seededStore(): FleetStore {
 }
 
 describe('页面渲染（状态呈现证据）', () => {
-  it('路由清单覆盖 FR-14.3 的七个页面', () => {
+  it('路由清单覆盖七个页面', () => {
     const pages = ROUTE_TABLE.map((r) => r.page).join('\n');
     for (const page of ['Overview', 'Machines', 'Machine Detail', 'Profiles', 'Skills', 'Deployments', 'SSH Inventory']) {
       expect(pages).toContain(page);
     }
-    console.log(ROUTE_TABLE.map((r) => `${r.path}  →  ${r.page}`).join('\n'));
   });
 
   it('Overview 渲染六张卡片与"需关注"表，且明确区分未知与一致', () => {
@@ -117,24 +119,46 @@ describe('页面渲染（状态呈现证据）', () => {
     expect(body).not.toContain('已确认一致'); // 该机是 Unknown，绝不能被渲染成一致
   });
 
-  it('Machines 渲染八列，并对 Unknown 使用"未知或过期"而不是"一致"', () => {
+  it('Machines 渲染九列中文化的表头，Unknown 不显示为一致，动作入口带可用性原因', () => {
     const store = seededStore();
     const { body } = render(Machines, { props: { store } });
-    for (const column of ['Name', 'OS/Arch', 'Profile', 'agentd', 'SSH', 'Drift', 'Reconciled', 'Last Seen']) {
+    for (const column of ['机器名', '系统 · 架构', '配置档', 'agentd', 'SSH', '漂移', '收敛', '最近上报', '操作']) {
       expect(body).toContain(column);
     }
     expect(body).toContain('未知或过期');
-    expect(body).toContain('未决 AwaitingConfirmation');
-    // KM-28：probe / inventory 是接通的真实动作（逐行按钮）；仍未实现的端点必须
-    // 标注"未实现，见 docs/ssh-only-oneshot.md"，不暗示后续切片会自动有。
-    expect(body).toContain('Probe SSH');
-    expect(body).toContain('Inventory');
-    expect(body).toContain('未实现，见 docs/ssh-only-oneshot.md');
-    expect(body).not.toContain('属第 6 片');
-    // 该夹具是 agentd 机器：inventory 入口必须禁用（仅 SSH 通道机器可用）。
-    const inventory = body.indexOf('>Inventory<');
-    expect(inventory, 'Inventory 按钮存在').toBeGreaterThan(-1);
+    // 未决操作以徽章 + 原因呈现（相位翻译为"等待确认"）。
+    expect(body).toContain('未决操作');
+    expect(body).toContain('等待确认');
+    // probe / inventory 是接通的真实动作；SSH 通道限制如实标注。
+    expect(body).toContain('SSH 探测');
+    expect(body).toContain('观测采集');
+    const inventory = body.indexOf('>观测采集<');
+    expect(inventory, '观测采集按钮存在').toBeGreaterThan(-1);
     expect(body.slice(inventory - 600, inventory)).toContain('disabled');
+    expect(body).toContain('仅 SSH 管理的机器支持手动观测采集');
+    // 尚未交付的功能：禁用 + 原因，不提供假入口；不出现内部文档指引。
+    expect(body).toContain('引导与修复 agentd 功能尚未提供');
+    expect(body).not.toContain('docs/');
+    expect(body).not.toContain('属第');
+  });
+
+  it('空态告诉用户可以做什么；加载与错误状态有无障碍语义', () => {
+    const emptyStore = new FleetStore();
+    const { body } = render(Machines, { props: { store: emptyStore } });
+    expect(body).toContain('还没有机器');
+    expect(body).toContain('添加机器');
+
+    const loadingStore = new FleetStore();
+    loadingStore.loading.machines = true;
+    const loading = render(Machines, { props: { store: loadingStore } }).body;
+    expect(loading).toContain('aria-busy="true"');
+
+    const errorStore = new FleetStore();
+    errorStore.errors.machines = new Error('boom');
+    const errored = render(Machines, { props: { store: errorStore } }).body;
+    expect(errored).toContain('机器列表加载失败');
+    expect(errored).toContain('role="alert"');
+    expect(errored).toContain('全量刷新'); // 错误提示给出下一步
   });
 
   it('Machine Detail 渲染 9 个区块，含等待确认、plan 基线与阻塞说明', () => {
@@ -155,40 +179,41 @@ describe('页面渲染（状态呈现证据）', () => {
     store.details = { 'ws-drift-demo': detail };
     const { body } = render(MachineDetail, { props: { store, name: 'ws-drift-demo' } });
     for (const section of [
-      '1 · 联通与状态',
-      '2 · 当前 Agents 与版本',
-      '3 · desired vs observed',
-      '4 · Skills',
-      '5 · model / provider',
-      '6 · MCP',
-      '7 · drift diff',
-      '8 · 操作历史与未决操作',
-      '9 · bootstrap / repair / 回滚动作',
+      '联通与状态',
+      'Agents 与版本',
+      '期望与观测',
+      '技能',
+      '模型与 Provider',
+      'MCP',
+      '漂移详情',
+      '操作历史与未决操作',
+      '回滚与其他动作',
     ]) {
       expect(body).toContain(section);
     }
     expect(body).toContain('等待确认（剩余');
-    expect(body).toContain('确认不等于'); // plan 基线失效提示
+    expect(body).toContain('确认只表示'); // plan 基线提示：确认的只是这份计划
     expect(body).toContain('未知或过期');
     expect(body).toContain('取消');
     expect(body).toContain('跳过');
-    expect(body).toContain('不臆造 diff'); // §3：不推断字段级差异
-    // 六个条件各自保留类型名（回归：曾因 conditionView 不带 type 而全部渲染成 Drifted）
+    expect(body).toContain('字段级差异暂不可查看'); // 期望与观测：如实说明看不到字段级 diff
+    // 六个条件各自保留类型名与三态（回归：曾因 conditionView 不带 type 而全部渲染成 Drifted）
     for (const label of [
       'SSH 可达: True',
       'agentd 在线: True',
       'inventory 就绪: True',
       '漂移: Unknown',
-      '已收敛: Unknown',
+      '收敛: Unknown',
       '降级: False',
     ]) {
       expect(body).toContain(label);
     }
     // 未验证的能力声明逐字转述，不宣称已验证
     expect(body).toContain('unverified');
+    expect(body).toContain('未验证的能力不会标为已验证');
   });
 
-  it('drifted 状态下 §7 区块显式说明"逐字段 diff 未由 API 暴露"', () => {
+  it('drifted 状态下漂移区块如实说明字段级 diff 不可用，入口禁用并指向收敛', () => {
     const store = seededStore();
     const drifted: Machine = {
       ...machineFixture,
@@ -217,47 +242,61 @@ describe('页面渲染（状态呈现证据）', () => {
     };
     const { body } = render(MachineDetail, { props: { store, name: 'ws-drift-demo' } });
     expect(body).toContain('已漂移');
-    expect(body).toContain('逐字段 diff 未由 API 暴露');
-    expect(body).toContain('不推断');
-    // 裁定 3：Show Diff 必须是"禁用 + 原因标注"的入口，而不是只留一句说明。
-    expect(body).toContain('Show Diff（未实现：缺字段级 diff 端点）');
-    expect(body).toContain('没有字段级 diff 端点');
-    const showDiff = body.slice(body.indexOf('Show Diff') - 1200, body.indexOf('Show Diff'));
-    expect(showDiff, 'Show Diff 必须是禁用按钮（disabled 属性在按钮上）').toContain('disabled');
+    expect(body).toContain('字段级对比暂不可用');
+    expect(body).toContain('可执行收敛使机器与期望一致'); // 失败/受限时的下一步
+    // "查看差异"必须是"禁用 + 原因标注"的入口，而不是只留一句说明。
+    expect(body).toContain('查看字段级差异（暂不可用）');
+    const showDiff = body.slice(body.indexOf('查看字段级差异') - 1200, body.indexOf('查看字段级差异'));
+    expect(showDiff, '查看差异必须是禁用按钮（disabled 属性在按钮上）').toContain('disabled');
   });
 
   it('Deployments 把 Superseded/Skipped 与 Failed 分开呈现并带原因', () => {
     const store = seededStore();
     const { body } = render(Deployments, { props: { store, name: 'rollout-42' } });
     expect(body).toContain('已被取代');
-    expect(body).toContain('已在更新代'); // Superseded 的原因说明
+    expect(body).toContain('已在更新代'); // Superseded 的原因说明（不是失败）
     expect(body).toContain('已跳过');
     expect(body).toContain('不计入成功'); // Skipped 的边界说明
     expect(body).toContain('失败');
     expect(body).toContain('回滚自 gen14 至 gen12 的内容');
     expect(body).toContain('不计入失败'); // Blocked 的边界说明
+    // 尚未提供的暂停/恢复：禁用并写明原因。
+    expect(body).toContain('暂停功能尚未提供');
+    expect(body).toContain('恢复功能尚未提供');
+  });
+
+  it('Profiles 与 Skills 渲染空态与选择提示，未交付的解析入口禁用并写明原因', () => {
+    const empty = new FleetStore();
+    const profiles = render(Profiles, { props: { store: empty, name: null } }).body;
+    expect(profiles).toContain('还没有配置档');
+
+    const skills = render(Skills, { props: { store: empty } }).body;
+    expect(skills).toContain('还没有技能资源');
+
+    const store = seededStore();
+    const skillsPage = render(Skills, { props: { store } }).body;
+    expect(skillsPage).toContain('解析功能尚未提供');
+    expect(skillsPage).not.toContain('docs/');
+    expect(skillsPage).toContain('v1.2.0'); // 已解析修订照常显示
   });
 
   it('SSH Inventory 渲染别名与服务端渲染说明，安装入口默认禁用（需显式确认）', () => {
     const store = seededStore();
+    // SSR 不跑 $effect，预览区为空属预期；页面自身渲染别名表、导出/安装入口与边界说明。
     const { body } = render(SshInventory, { props: { store } });
-    // KM-28：include 内容改为服务端渲染（SSR 不跑 $effect，预览区为空属预期），
-    // 页面自身渲染别名表、导出/安装入口与 FR-12.6 边界说明。
-    expect(body).toContain('OpenSSH include 预览（服务端渲染）');
+    expect(body).toContain('OpenSSH include 预览');
     expect(body).toContain('ws-drift-demo'); // 别名表照常渲染
-    expect(body).toContain('Export（下载 .conf）');
-    expect(body).toContain('无证书吊销');
-    expect(body).toContain('FR-12.3'); // host-key 保持标准策略的边界说明
+    expect(body).toContain('导出（下载 .conf）');
+    expect(body).toContain('host-key 校验保持严格'); // 真实限制如实呈现
+    expect(body).toContain('可达'); // SSH 三态展示词（该机 SSHReachable=True）
     // 安装按钮在未勾选确认时必须是禁用的（绝不提供绕过确认的入口）。
-    const install = body.indexOf('安装/更新 include 文件（需显式确认）');
+    const install = body.indexOf('安装 include 文件');
     expect(install, '安装按钮存在').toBeGreaterThan(-1);
     expect(body.slice(install - 800, install)).toContain('disabled');
   });
 
   it.runIf(enabled)('连上真实控制面后，Machines 页面渲染真实机器名与三态', async () => {
     const store = new FleetStore({ baseUrl: base, token: process.env.FLEET_TOKEN ?? '' } as never);
-    const client = new FleetStore();
-    void client;
     const machines = await fetch(`${base}/api/v1/machines`).then((r) => r.json());
     store.machines = machines.items ?? [];
     const { body } = render(Machines, { props: { store } });
@@ -265,6 +304,6 @@ describe('页面渲染（状态呈现证据）', () => {
       expect(body).toContain(machine.metadata.name);
       console.log(`${machine.metadata.name}: ${JSON.stringify(machineRow(machine, new Date()).drift.label)}`);
     }
-    expect(body).toContain('Drift');
+    expect(body).toContain('漂移');
   });
 });
