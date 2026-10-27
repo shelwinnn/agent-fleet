@@ -70,7 +70,16 @@ func (s *lifecycleStore) PutDesired(ctx context.Context, machine string, update 
 			return err
 		}
 		if !ch {
-			out, changed = current, false
+			if current == nil {
+				// 空更新落在从未纳管的机器上：不落库，但返回非 nil 的"零代"文档
+				// 表示当前无任何生命周期管理（调用方不必对 changed=false 做nil 分支）。
+				out = &domain.LifecycleDesiredRecord{Machine: machine, Revision: 0,
+					Desired: domain.LifecycleDesired{SchemaVersion: domain.LifecycleDesiredSchemaVersion,
+						Entries: map[string]domain.LifecycleEntry{}}}
+			} else {
+				out = current
+			}
+			changed = false
 			return nil
 		}
 		entriesJSON, err := json.Marshal(merged)
@@ -164,11 +173,11 @@ func (s *lifecycleStore) CreateOperation(ctx context.Context, op *domain.Lifecyc
 	if op.Status.Phase == "" {
 		op.Status.Phase = domain.OperationPhasePending
 	}
-	if op.Status.Results == nil {
-		op.Status.Results = make([]domain.LifecycleTargetResult, len(op.Spec.Targets))
-		for i := range op.Spec.Targets {
-			op.Status.Results[i] = domain.LifecycleTargetResult{Target: op.Spec.Targets[i], State: domain.TargetPending}
-		}
+	// 创建态一律从 pending 起步：调用方携带的任何预置结果/证据都被丢弃——
+	// 状态与证据只能经 TransitionTarget 白名单进入，不存在"生而成功"的目标。
+	op.Status.Results = make([]domain.LifecycleTargetResult, len(op.Spec.Targets))
+	for i := range op.Spec.Targets {
+		op.Status.Results[i] = domain.LifecycleTargetResult{Target: op.Spec.Targets[i], State: domain.TargetPending}
 	}
 	meta := &op.Metadata
 	if meta.Name == "" {
@@ -221,7 +230,7 @@ func (s *lifecycleStore) CreateOperation(ctx context.Context, op *domain.Lifecyc
 		now := time.Now().UTC()
 		meta.CreationTimestamp = now
 		stamp := now.Format(time.RFC3339Nano)
-		confirmedAt := any(nil)
+		var confirmedAt any
 		if op.Status.ConfirmedAt != nil {
 			confirmedAt = op.Status.ConfirmedAt.Format(time.RFC3339Nano)
 		}
@@ -304,14 +313,15 @@ const lifecycleTargetSelect = `SELECT target_key, machine_id, env, username, age
 	os, arch, capability_state, capability_reason, state, reason, message, evidence, updated_at
 	FROM lifecycle_operation_targets`
 
-// rowsQuerier 由 *sql.DB 与 *sql.Tx 共同满足（snapshot.go 的 rowQuerier 是
-// QueryRowContext 版，语义不同故另起其名）：目标装载在事务内外都可用。
-type rowsQuerier interface {
+// rowSetQuerier 由 *sql.DB 与 *sql.Tx 共同满足（snapshot.go 的 rowQuerier 是
+// QueryRowContext 版，返回单行，语义不同故另起其名）：目标集装载在事务内外
+// 都可用。
+type rowSetQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // opTargetsLoader 返回从 q 加载某操作全部目标结果的闭包。
-func opTargetsLoader(ctx context.Context, q rowsQuerier) func(opID string) ([]domain.LifecycleTargetResult, error) {
+func opTargetsLoader(ctx context.Context, q rowSetQuerier) func(opID string) ([]domain.LifecycleTargetResult, error) {
 	return func(opID string) ([]domain.LifecycleTargetResult, error) {
 		rows, err := q.QueryContext(ctx, lifecycleTargetSelect+` WHERE op_id = ? ORDER BY target_key`, opID)
 		if err != nil {
@@ -427,19 +437,25 @@ func (s *lifecycleStore) GetOperation(ctx context.Context, id string) (*domain.L
 }
 
 func (s *lifecycleStore) GetOperationByIdempotencyKey(ctx context.Context, key string) (*domain.LifecycleOperation, error) {
-	row := s.db.QueryRowContext(ctx, lifecycleOpSelect+` WHERE idempotency_key = ?`, key)
-	op, err := scanLifecycleOp(row.Scan, nil)
-	if err != nil {
-		return nil, err
-	}
-	return s.GetOperation(ctx, op.Metadata.Name)
+	return scanLifecycleOp(s.db.QueryRowContext(ctx, lifecycleOpSelect+` WHERE idempotency_key = ?`, key).Scan,
+		opTargetsLoader(ctx, s.db))
 }
 
 func (s *lifecycleStore) ListOperationsByMachine(ctx context.Context, machine string) ([]*domain.LifecycleOperation, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT op_id FROM lifecycle_operation_targets
+	return s.listByOpIDs(ctx, `SELECT DISTINCT op_id FROM lifecycle_operation_targets
 		WHERE machine_id = ?`, machine)
+}
+
+func (s *lifecycleStore) ListRetryChildren(ctx context.Context, id string) ([]*domain.LifecycleOperation, error) {
+	return s.listByOpIDs(ctx, `SELECT id FROM lifecycle_operations WHERE retry_of = ? ORDER BY created_at, id`, id)
+}
+
+// listByOpIDs 先收集操作 id（游标关闭后再逐个取全量），与既有仓储的列表
+// 形状一致：行遍历期间不发起嵌套查询。
+func (s *lifecycleStore) listByOpIDs(ctx context.Context, idQuery string, args ...any) ([]*domain.LifecycleOperation, error) {
+	rows, err := s.db.QueryContext(ctx, idQuery, args...)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: list lifecycle ops by machine: %w", err)
+		return nil, fmt.Errorf("sqlite: list lifecycle ops: %w", err)
 	}
 	var ids []string
 	for rows.Next() {
@@ -451,7 +467,8 @@ func (s *lifecycleStore) ListOperationsByMachine(ctx context.Context, machine st
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sqlite: list lifecycle ops by machine: %w", err)
+		rows.Close()
+		return nil, fmt.Errorf("sqlite: list lifecycle ops: %w", err)
 	}
 	rows.Close()
 
@@ -470,27 +487,6 @@ func (s *lifecycleStore) ListOperationsByMachine(ctx context.Context, machine st
 		return out[i].Metadata.Name < out[j].Metadata.Name
 	})
 	return out, nil
-}
-
-func (s *lifecycleStore) ListRetryChildren(ctx context.Context, id string) ([]*domain.LifecycleOperation, error) {
-	rows, err := s.db.QueryContext(ctx, lifecycleOpSelect+` WHERE retry_of = ? ORDER BY created_at, id`, id)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: list lifecycle retries: %w", err)
-	}
-	defer rows.Close()
-	var out []*domain.LifecycleOperation
-	for rows.Next() {
-		op, err := scanLifecycleOp(rows.Scan, nil)
-		if err != nil {
-			return nil, err
-		}
-		full, err := s.GetOperation(ctx, op.Metadata.Name)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, full)
-	}
-	return out, rows.Err()
 }
 
 // TransitionTarget 在单事务内做逐目标白名单迁移，重算操作相位并维护起止时间。
@@ -594,8 +590,24 @@ func (s *lifecycleStore) TransitionTarget(ctx context.Context, opID, targetKey, 
 }
 
 // SetNeedsReconfirmation 置位/清除重试需重新确认标记（重发现影响变化时置位）。
+// 事件携带落库后的真实版本（KM-25 核查必改 M1：版本从未在库里出现过的事件
+// 会被前端判重丢弃）。
 func (s *lifecycleStore) SetNeedsReconfirmation(ctx context.Context, opID string, needs bool, reason string) error {
 	return withBusyRetry(ctx, "set_lifecycle_reconfirm:"+opID, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("sqlite: begin set lifecycle reconfirm: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var rv int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT resource_version FROM lifecycle_operations WHERE id = ?`, opID).Scan(&rv); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: lifecycle operation", domain.ErrNotFound)
+			}
+			return fmt.Errorf("sqlite: lock lifecycle operation %s: %w", opID, err)
+		}
 		flag := 0
 		if needs {
 			flag = 1
@@ -603,37 +615,50 @@ func (s *lifecycleStore) SetNeedsReconfirmation(ctx context.Context, opID string
 		if !needs {
 			reason = ""
 		}
-		res, err := s.db.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`UPDATE lifecycle_operations SET needs_reconfirm = ?, reconfirm_reason = ?,
-			    resource_version = resource_version + 1, updated_at = ?
+			    resource_version = ?, updated_at = ?
 			 WHERE id = ?`,
-			flag, reason, nowStamp(), opID)
-		if err != nil {
+			flag, reason, rv+1, nowStamp(), opID); err != nil {
 			return fmt.Errorf("sqlite: set lifecycle reconfirm: %w", err)
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return fmt.Errorf("%w: lifecycle operation", domain.ErrNotFound)
+		if err := tx.Commit(); err != nil {
+			return err
 		}
-		s.changes.emit(resourceLifecycleOperations, opID, -1)
+		s.changes.emit(resourceLifecycleOperations, opID, rv+1)
 		return nil
 	})
 }
 
 // MarkConfirmed 记录操作者确认时刻并清除需重新确认标记（重新确认即放行）。
+// 事件版本纪律同 SetNeedsReconfirmation。
 func (s *lifecycleStore) MarkConfirmed(ctx context.Context, opID string, at time.Time) error {
 	return withBusyRetry(ctx, "confirm_lifecycle_op:"+opID, func() error {
-		res, err := s.db.ExecContext(ctx,
-			`UPDATE lifecycle_operations SET confirmed_at = ?, needs_reconfirm = 0, reconfirm_reason = '',
-			    resource_version = resource_version + 1, updated_at = ?
-			 WHERE id = ?`,
-			at.UTC().Format(time.RFC3339Nano), nowStamp(), opID)
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
+			return fmt.Errorf("sqlite: begin confirm lifecycle op: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var rv int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT resource_version FROM lifecycle_operations WHERE id = ?`, opID).Scan(&rv); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: lifecycle operation", domain.ErrNotFound)
+			}
+			return fmt.Errorf("sqlite: lock lifecycle operation %s: %w", opID, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE lifecycle_operations SET confirmed_at = ?, needs_reconfirm = 0, reconfirm_reason = '',
+			    resource_version = ?, updated_at = ?
+			 WHERE id = ?`,
+			at.UTC().Format(time.RFC3339Nano), rv+1, nowStamp(), opID); err != nil {
 			return fmt.Errorf("sqlite: confirm lifecycle operation: %w", err)
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return fmt.Errorf("%w: lifecycle operation", domain.ErrNotFound)
+		if err := tx.Commit(); err != nil {
+			return err
 		}
-		s.changes.emit(resourceLifecycleOperations, opID, -1)
+		s.changes.emit(resourceLifecycleOperations, opID, rv+1)
 		return nil
 	})
 }

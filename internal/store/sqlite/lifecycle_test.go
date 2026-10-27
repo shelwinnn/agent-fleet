@@ -435,6 +435,15 @@ func TestLifecycleCapabilitySnapshotPersisted(t *testing.T) {
 	if _, _, err := store.CreateOperation(ctx, op); !errors.Is(err, domain.ErrUnsupportedCombo) {
 		t.Fatalf("blocked combo must be rejected at creation, got %v", err)
 	}
+	// 跨平台阻塞不能靠省略 os/arch 绕过（评审修复：binary 方法通配判定）。
+	sneaky := codexTarget("m1", "alice")
+	sneaky.Method = "binary"
+	sneaky.OS = ""
+	sneaky.Arch = ""
+	op = installOp("cap-1b", "0.44.0", sneaky)
+	if _, _, err := store.CreateOperation(ctx, op); !errors.Is(err, domain.ErrUnsupportedCombo) {
+		t.Fatalf("blocked method without os/arch must still be rejected, got %v", err)
+	}
 	// 未验证组合：创建放行，判定快照入列。
 	stored, _, err := store.CreateOperation(ctx, installOp("cap-2", "0.44.0", codexTarget("m1", "alice")))
 	if err != nil {
@@ -447,5 +456,59 @@ func TestLifecycleCapabilitySnapshotPersisted(t *testing.T) {
 	tr := got.TargetByKey(codexTarget("m1", "alice").Key())
 	if tr == nil || tr.Target.CapabilityState != domain.CapabilityUnverified || tr.Target.CapabilityReason == "" {
 		t.Fatalf("capability snapshot must persist: %+v", tr)
+	}
+}
+
+// —— 创建态一律从 pending 起步（评审修复：调用方不能预置结果绕过状态机）——
+
+func TestLifecycleCreateForcesPendingResults(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	store := NewLifecycleStore(db)
+	tg := codexTarget("m1", "alice")
+
+	op := installOp("force-pending", "0.44.0", tg)
+	// 调用方恶意预置"成功"结果与证据：创建时必须被丢弃。
+	op.Status.Results = []domain.LifecycleTargetResult{{
+		Target: tg, State: domain.TargetSucceeded, Reason: domain.ReasonVerifiedPresent,
+		Evidence: &domain.LifecycleEvidence{ObservedVersion: "0.44.0"},
+	}}
+	stored, _, err := store.CreateOperation(ctx, op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetOperation(ctx, stored.Metadata.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Results[0].State != domain.TargetPending ||
+		got.Status.Results[0].Reason != "" || got.Status.Results[0].Evidence != nil {
+		t.Fatalf("creation must force pending results, got %+v", got.Status.Results[0])
+	}
+	if got.Status.Phase != domain.OperationPhasePending {
+		t.Fatalf("creation phase must be Pending, got %s", got.Status.Phase)
+	}
+}
+
+// —— 空更新落在从未纳管的机器上：非 nil "零代"文档（评审修复）——
+
+func TestLifecycleDesiredEmptyUpdateOnVirginMachine(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	store := NewLifecycleStore(db)
+
+	rec, changed, err := store.PutDesired(ctx, "virgin", domain.LifecycleDesired{SchemaVersion: domain.LifecycleDesiredSchemaVersion})
+	if err != nil {
+		t.Fatalf("empty update on virgin machine: %v", err)
+	}
+	if changed || rec == nil {
+		t.Fatalf("want (record, false, nil), got changed=%v rec=%v", changed, rec)
+	}
+	if rec.Revision != 0 || rec.Desired.Entries == nil || len(rec.Desired.Entries) != 0 {
+		t.Fatalf("zero-generation document expected, got rev=%d entries=%v", rec.Revision, rec.Desired.Entries)
+	}
+	// 库中确无任何代：CurrentDesired 仍是 ErrNotFound（"未纳管"可查询）。
+	if _, err := store.CurrentDesired(ctx, "virgin"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("virgin machine must stay ErrNotFound, got %v", err)
 	}
 }

@@ -475,6 +475,10 @@ func ValidateLifecycleRetry(retry, original *LifecycleOperation) error {
 	return nil
 }
 
+// OperationPhaseCompleted 是生命周期操作的全目标落定相位（区别于配置流水线
+// 的机器级相位：生命周期操作的目标粒度状态才是权威）。
+const OperationPhaseCompleted = "Completed"
+
 // RecomputeOpPhase 按目标结果推导操作相位。
 func RecomputeOpPhase(results []LifecycleTargetResult) string {
 	if len(results) == 0 {
@@ -498,10 +502,6 @@ func RecomputeOpPhase(results []LifecycleTargetResult) string {
 		return OperationPhasePending
 	}
 }
-
-// OperationPhaseCompleted 是生命周期操作的全目标落定相位（区别于配置流水线
-// 的机器级相位：生命周期操作的目标粒度状态才是权威）。
-const OperationPhaseCompleted = "Completed"
 
 // LifecycleCapability 是一条 OS × 架构 × 安装方式的能力记录（KM-46 §7 能力
 // 矩阵的模型化）。State=supported 必须有真机证据；未验证不得标支持。
@@ -573,9 +573,14 @@ func LookupLifecycleCapability(os, arch, method string) LifecycleCapability {
 
 // CheckTargetCapability 在创建操作时判定目标组合：明确阻塞的组合拒绝创建
 // （合法取值边界）；未验证组合允许创建但把判定快照进目标记录，执行前由
-// T4 引擎按其验收标准再次拒绝。目标缺少 OS/Arch 时不阻塞（无法判定即未验证）。
+// T4 引擎按其验收标准再次拒绝。平台未知时仍按方法通配判定——跨平台阻塞
+// （如 binary 通道的上游缺陷）不能靠省略 os/arch 绕过；仅平台特定的阻塞
+// 组合在平台未知时无法判定，留待执行层拒绝。
 func CheckTargetCapability(t LifecycleTarget) error {
 	if t.OS == "" || t.Arch == "" {
+		if wc := LookupLifecycleCapability("*", "*", t.Method); wc.State == CapabilityBlocked {
+			return fmt.Errorf("%w: %s: %s", ErrUnsupportedCombo, t.Method, wc.Reason)
+		}
 		return nil
 	}
 	lc := LookupLifecycleCapability(t.OS, t.Arch, t.Method)
@@ -586,9 +591,14 @@ func CheckTargetCapability(t LifecycleTarget) error {
 }
 
 // SnapshotCapability 把能力判定快照进目标副本（创建时由服务端调用，
-// 让操作记录携带"当时的矩阵判定"）。
+// 让操作记录携带"当时的矩阵判定"；平台未知时快照方法通配判定）。
 func SnapshotCapability(t LifecycleTarget) LifecycleTarget {
 	if t.OS == "" || t.Arch == "" {
+		wc := LookupLifecycleCapability("*", "*", t.Method)
+		if wc.State == CapabilityBlocked {
+			t.CapabilityState = wc.State
+			t.CapabilityReason = wc.Reason
+		}
 		return t
 	}
 	lc := LookupLifecycleCapability(t.OS, t.Arch, t.Method)

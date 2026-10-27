@@ -121,16 +121,24 @@ func TestLifecycleReasonsDocumented(t *testing.T) {
 	schema, ok := doc.Components.Schemas["LifecycleTargetResult"]
 	if !ok {
 		t.Fatal("LifecycleTargetResult schema missing")
-		desc, _ := schema["properties"].(map[string]any)["reason"].(map[string]any)["description"].(string)
-		for _, reason := range []string{
-			domain.ReasonVerifiedPresent, domain.ReasonVerifiedAbsent,
-			domain.ReasonVersionMismatch, domain.ReasonDiscoveryFailed, domain.ReasonOpFailed, domain.ReasonUnsupportedCombo,
-			domain.ReasonTargetOffline, domain.ReasonDispatchFailed,
-			domain.ReasonResultLost, domain.ReasonNodeDisconnected, domain.ReasonTimeoutNoResult,
-		} {
-			if !strings.Contains(desc, reason) {
-				t.Errorf("reason %q not documented in LifecycleTargetResult.reason", reason)
-			}
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("LifecycleTargetResult has no properties")
+	}
+	reasonSchema, ok := props["reason"].(map[string]any)
+	if !ok {
+		t.Fatal("LifecycleTargetResult.reason property missing")
+	}
+	desc, _ := reasonSchema["description"].(string)
+	for _, reason := range []string{
+		domain.ReasonVerifiedPresent, domain.ReasonVerifiedAbsent,
+		domain.ReasonVersionMismatch, domain.ReasonDiscoveryFailed, domain.ReasonOpFailed, domain.ReasonUnsupportedCombo,
+		domain.ReasonTargetOffline, domain.ReasonDispatchFailed,
+		domain.ReasonResultLost, domain.ReasonNodeDisconnected, domain.ReasonTimeoutNoResult,
+	} {
+		if !strings.Contains(desc, reason) {
+			t.Errorf("reason %q not documented in LifecycleTargetResult.reason", reason)
 		}
 	}
 }
