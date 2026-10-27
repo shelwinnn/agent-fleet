@@ -18,6 +18,12 @@
 # 以及 §23.3 的 skills/{id}/resolve、skills/{id}/revisions 与 §8.1 的 deployments
 # pause/resume（后续切片），当前未注册：命中 catch-all 返回 404 NotFound。
 # 本文件不为其编造契约。
+# KM-47 新增生命周期契约：显式三态意图文档（GET/PUT
+# /api/v1/machines/{name}/lifecycle/desired）、幂等操作创建与查询、仅失败目标
+# 重试（retryOf 追溯链）、能力矩阵查询（/api/v1/lifecycle/*）。节点通道的对应
+# 消息在 api/proto/fleet/v1/lifecycle.proto（ExecuteLifecycleOperation /
+# LifecycleOperationResult）；两侧枚举与原因码的一致性由 api/openapi 的
+# contract_test 锁定。本切片交付契约与模型；REST 处理器与执行编排归 T4/T5 切片。
 # gRPC 契约以 api/proto/fleet/v1 为准。
 # 声明版本为 3.1.0（KM-21 核查发现 #1：本文件使用了 3.1 才有的
 # components.pathItems；3.0.3 声明与内容不符会卡严格校验器）。
@@ -39,6 +45,7 @@ security:
 tags:
   - name: system
   - name: machines
+  - name: lifecycle
   - name: profiles
   - name: skills
   - name: providers
@@ -704,6 +711,146 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
 
   # ===== SSE（KM-25；FR-14.1/FR-14.2，事件格式见 §23.6）=====
+  /api/v1/machines/{name}/lifecycle/desired:
+    get:
+      tags: [lifecycle]
+      summary: 查看机器的显式生命周期意图（KM-47）
+      description: |
+        返回当前生效的意图文档（present / absent / unmanaged 三态，逐 agent 显式）。
+        404 表示从未纳管——"未纳管"是可查询的显式状态，不是 absent，
+        省略绝不构成隐式卸载（spec：不得通过省略快照隐式卸载）。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      responses:
+        "200":
+          description: 当前意图文档（最高 revision 代）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleDesiredDocument"
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [lifecycle]
+      summary: 更新机器的显式生命周期意图（KM-47）
+      description: |
+        合并语义：body 中提及的 agent 显式替换其意图；未提及的 agent 原样保留。
+        没有任何请求路径能把条目删除或降级为 absent——解除纳管只能显式声明
+        unmanaged（停止管理保留程序，与卸载严格区分）。意图内容无变化时不新增
+        代（changed=false）。present 必须携带精确固定版本与安装来源；absent 必须
+        携带已识别来源（来源未知时拒绝卸载）；非法 intent（含空值）整体拒绝。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LifecycleDesiredUpdate"
+      responses:
+        "200":
+          description: 合并后的意图文档（changed=false 表示内容无变化未新增代）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleDesiredDocument"
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/lifecycle/operations:
+    post:
+      tags: [lifecycle]
+      summary: 以幂等键创建生命周期操作（KM-47）
+      description: |
+        Install / Upgrade / Uninstall / CheckUpdate 的统一创建入口。幂等语义：
+        同一 idempotencyKey 重复提交复用同一操作（响应 duplicate=true，不产生
+        重复变更）；同键不同内容返回 409 IdempotencyConflict。Install/Upgrade
+        必须携带创建时固定的精确版本（拒绝 latest/range，创建后不变）；Uninstall
+        不带版本且每个目标必须已识别来源；CheckUpdate 只读上游。目标的
+        OS/架构 × 来源组合被能力矩阵判为 blocked 时创建即拒绝（422）；unverified
+        组合允许创建但记录判定快照，执行前由执行引擎拒绝。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LifecycleOperationCreateRequest"
+      responses:
+        "201":
+          description: 已创建（新操作，含逐目标 pending 状态）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleOperation"
+        "200":
+          description: 幂等复用（同键同内容返回既有操作，duplicate=true）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleOperation"
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/v1/lifecycle/operations/{opId}:
+    get:
+      tags: [lifecycle]
+      summary: 查询生命周期操作（逐目标状态与证据）
+      parameters:
+        - name: opId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 操作记录（逐目标状态、原因与证据，不含秘密）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleOperation"
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/lifecycle/operations/{opId}/retry:
+    post:
+      tags: [lifecycle]
+      summary: 对确定失败的目标创建重试操作（KM-47）
+      description: |
+        仅 failed 状态的目标可重试；重试是同一意图——类型与固定版本必须与原
+        操作一致（改意图必须新建操作）。返回的新操作经 retryOf 关联原操作，
+        保留追溯链；执行前必须重新发现目标实际状态（rediscovery），发现影响
+        变化时置 needsReconfirmation，操作者重新确认后才能继续。同一已批准
+        意图的重试不重复确认（spec）。
+      parameters:
+        - name: opId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LifecycleRetryRequest"
+      responses:
+        "201":
+          description: 重试操作已创建（retryOf 关联原操作）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleOperation"
+        "409": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/lifecycle/capabilities:
+    get:
+      tags: [lifecycle]
+      summary: 查询生命周期能力矩阵（KM-46 §7 的模型化）
+      description: |
+        返回 OS × 架构 × 安装方式组合的能力状态。supported 必须有真机证据
+        （T8 之前为空集）；unverified 如实展示不标支持；blocked 组合在创建
+        操作时即被拒绝。前端据此提供"支持或未验证状态"展示，不为 blocked /
+        unverified 组合提供误导性操作入口。
+      responses:
+        "200":
+          description: 能力矩阵条目列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleCapabilityList"
   /api/v1/events:
     get:
       tags: [events]
@@ -711,7 +858,8 @@ paths:
       description: |
         `Accept: text/event-stream` 的长连接。每条事件为
         `event: <resource-type>` + `data: {"id","revision"}`：
-        资源类型取 machines/profiles/skills/providers/deployments/operations，
+        资源类型取 machines/profiles/skills/providers/deployments/operations
+        （KM-47 起：lifecycle-desired 按 machine 发事件、lifecycle-operations 按操作 id 发事件），
         `id` 为资源名（operations 为操作 id，等于 metadata.name），
         `revision` 为写入后的 metadata.resourceVersion（**不变量**：事件版本必须等于
         提交后落库的 resourceVersion，KM-25 核查必改 M1）。
@@ -1152,3 +1300,248 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AgentProfile"
+    LifecycleIntent:
+      type: string
+      description: 显式三态意图（KM-47）。没有"未指定"值：文档中未出现的 agent 不携带任何意图，尤其不得解释为 absent。
+      enum: [present, absent, unmanaged]
+      x-enum-descriptions:
+        present: 应存在（version 必须是精确固定版本）
+        absent: 应消失（必须携带已识别安装来源；执行为按来源卸载）
+        unmanaged: 停止管理（保留程序，仅解除纳管；与卸载严格区分）
+    LifecycleEntry:
+      type: object
+      required: [intent]
+      properties:
+        intent:
+          $ref: "#/components/schemas/LifecycleIntent"
+        version:
+          type: string
+          description: 仅 present 允许；创建时固定的精确版本（x.y.z[-pre][+build]，拒绝 latest/range）
+        method:
+          type: string
+          description: 安装方式/来源（能力矩阵合法取值）；present/absent 必填
+        package:
+          type: string
+          description: 安装包名（如 "@openai/codex"）；present/absent 必填
+    LifecycleDesiredUpdate:
+      type: object
+      description: PUT 请求体。合并语义：提及的 agent 显式替换；未提及的原样保留（省略 ≠ 卸载）。
+      properties:
+        entries:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/LifecycleEntry"
+    LifecycleDesiredDocument:
+      type: object
+      required: [schemaVersion, entries, revision, digest]
+      properties:
+        schemaVersion:
+          type: string
+          enum: [lifecycle-v1]
+        entries:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/LifecycleEntry"
+        machine:
+          type: string
+        revision:
+          type: integer
+          format: int64
+          description: 不可变代次（身份）；内容无变化不新增代
+        digest:
+          type: string
+          description: 内容指纹（"sha256:<hex>"）
+        createdAt:
+          type: string
+          format: date-time
+    LifecycleOperationType:
+      type: string
+      enum: [Install, Upgrade, Uninstall, CheckUpdate]
+      x-enum-descriptions:
+        Install: 安装固定版本
+        Upgrade: 升级到固定版本（不委托上游 Update，版本固定不变）
+        Uninstall: 按已识别来源卸载（来源未知时拒绝）
+        CheckUpdate: 只读上游版本发现，不变更目标环境
+    LifecycleTarget:
+      type: object
+      description: 最小目标身份：主机、OS 环境、受管用户、明确安装实例。Windows 原生与 WSL 以 env 区分。
+      required: [machine, user, agent, method, package]
+      properties:
+        machine:
+          type: string
+        env:
+          type: string
+          description: 空 = native；如 "wsl:ubuntu"
+        user:
+          type: string
+        agent:
+          type: string
+        method:
+          type: string
+        package:
+          type: string
+        os:
+          type: string
+          description: 创建时从机器台账快照（不参与身份）
+        arch:
+          type: string
+        capabilityState:
+          type: string
+          enum: [supported, unverified, blocked]
+          description: 创建时能力矩阵判定快照（未验证不标支持）
+        capabilityReason:
+          type: string
+    LifecycleEvidence:
+      type: object
+      description: 逐目标证据（不含秘密）。observedVersion 是操作后重新发现并独立核验的实测版本；上游退出码不单独采信。
+      properties:
+        observedVersion:
+          type: string
+          description: 卸载成功时为空且实例确已消失
+        executablePath:
+          type: string
+        method:
+          type: string
+        inventorySeq:
+          type: integer
+          format: int64
+        message:
+          type: string
+          maxLength: 2000
+        recordedAt:
+          type: string
+          format: date-time
+    LifecycleTargetState:
+      type: string
+      description: 逐目标状态机。not_executed 与 unknown 无出边：上线不自动执行旧意图；未知不计成功、不自动重试。
+      enum: [pending, running, succeeded, failed, not_executed, unknown]
+    LifecycleTargetResult:
+      type: object
+      required: [state]
+      properties:
+        target:
+          $ref: "#/components/schemas/LifecycleTarget"
+        state:
+          $ref: "#/components/schemas/LifecycleTargetState"
+        reason:
+          type: string
+          description: |
+            状态-原因配对（白名单）：succeeded: verified-present|verified-absent；
+            failed: version-mismatch|discovery-failed|op-failed|unsupported-combo；
+            not_executed: target-offline|dispatch-failed；
+            unknown: result-lost|node-disconnected|timeout-no-result。
+        message:
+          type: string
+          maxLength: 2000
+        evidence:
+          $ref: "#/components/schemas/LifecycleEvidence"
+    LifecycleOperation:
+      type: object
+      description: 生命周期持久操作（幂等键 + 固定版本 + 逐目标状态机 + 重试追溯链）。记录不含秘密。
+      required: [metadata, spec, status]
+      properties:
+        metadata:
+          $ref: "#/components/schemas/ObjectMeta"
+        spec:
+          type: object
+          required: [type, idempotencyKey, targets]
+          properties:
+            type:
+              $ref: "#/components/schemas/LifecycleOperationType"
+            idempotencyKey:
+              type: string
+              maxLength: 128
+            version:
+              type: string
+              description: Install/Upgrade 创建时固定的精确版本；其余类型为空
+            targets:
+              type: array
+              items:
+                $ref: "#/components/schemas/LifecycleTarget"
+            createdBy:
+              type: string
+        status:
+          type: object
+          properties:
+            phase:
+              type: string
+              enum: [Pending, Running, Completed]
+              description: 由逐目标状态推导；逐目标状态才是权威
+            results:
+              type: array
+              items:
+                $ref: "#/components/schemas/LifecycleTargetResult"
+            confirmedAt:
+              type: string
+              format: date-time
+              description: 操作者确认时刻；未确认不得派发
+            needsReconfirmation:
+              type: boolean
+              description: 重试前重发现影响变化时置位；重新确认前不得派发
+            reconfirmReason:
+              type: string
+            startedAt:
+              type: string
+              format: date-time
+            completedAt:
+              type: string
+              format: date-time
+        retryOf:
+          type: string
+          description: 重试关联的原操作 id（追溯链）；空表示首次创建
+    LifecycleOperationCreateRequest:
+      type: object
+      required: [type, idempotencyKey, targets]
+      properties:
+        type:
+          $ref: "#/components/schemas/LifecycleOperationType"
+        idempotencyKey:
+          type: string
+          maxLength: 128
+          description: 调用方生成（建议 UUID）；重复提交复用同一操作
+        version:
+          type: string
+          description: Install/Upgrade 必填（精确版本）；其余类型禁止
+        targets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/LifecycleTarget"
+    LifecycleRetryRequest:
+      type: object
+      description: 仅列出原操作中确定失败（failed）的目标；类型与版本继承原操作，不可更改。
+      required: [targets]
+      properties:
+        targets:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/LifecycleTarget"
+    LifecycleCapability:
+      type: object
+      description: OS × 架构 × 安装方式的能力记录（KM-46 §7）。supported 必须有真机证据（T8 之前为空集）。
+      required: [os, arch, method, state]
+      properties:
+        os:
+          type: string
+        arch:
+          type: string
+        method:
+          type: string
+        state:
+          type: string
+          enum: [supported, unverified, blocked]
+        evidenceLevel:
+          type: string
+          enum: [none, isolated, real_machine]
+          description: none=无证据；isolated=隔离环境已验证（真机待验收）；real_machine=真机证据
+        reason:
+          type: string
+    LifecycleCapabilityList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LifecycleCapability"
