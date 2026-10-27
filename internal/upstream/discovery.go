@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,6 +28,9 @@ const (
 	ReasonQueryFailed FailureReason = "query_failed"
 	// ReasonTimeout：查询超时（达到单次超时或重试耗尽）。
 	ReasonTimeout FailureReason = "timeout"
+	// ReasonCanceled：检查被调用方取消（如操作者关页、HTTP 请求中止）。
+	// 与 timeout 分开——「没人等它了」不是「查得太慢」。
+	ReasonCanceled FailureReason = "canceled"
 	// ReasonSourceUnavailable：查询所需的包管理器不在本机 PATH（npm/brew 缺失）。
 	ReasonSourceUnavailable FailureReason = "source_unavailable"
 	// ReasonParseFailed：来源返回了不可解释的版本串——显式上报，不静默降级。
@@ -40,9 +44,8 @@ const (
 // Failure 是一次失败/不可用的记录。Detail 保留上游错误原文（不含敏感值——
 // npm view / brew info 的报错只含包名与退出码）。
 type Failure struct {
-	Reason   FailureReason `json:"reason"`
-	Detail   string        `json:"detail"`
-	Attempts int           `json:"attempts"`
+	Reason FailureReason `json:"reason"`
+	Detail string        `json:"detail"`
 }
 
 // Querier 是上游版本查询的接缝。生产实现是 CommandQuerier（与上游 provider
@@ -119,7 +122,8 @@ type SourceResult struct {
 	QueriedAt *time.Time `json:"queriedAt,omitempty"`
 	// Attempts 是实际发起的查询次数（Status==unsupported 时为 0）。
 	Attempts int `json:"attempts"`
-	// Failure 在 failed/unsupported 时非空。
+	// Failure 在 failed/unsupported 时非空。尝试次数看本结果的 Attempts
+	//（不重复存在 Failure 里，避免两处记录漂移）。
 	Failure *Failure `json:"failure,omitempty"`
 	// LastSuccess 仅在 failed 时可能出现：最近一次成功缓存及其取得时间。
 	// 为空表示该来源从未成功查询过——前端应显示「未知」，不得显示「最新」。
@@ -139,17 +143,28 @@ type Report struct {
 	Sources   []SourceResult `json:"sources"`
 }
 
+// ErrUnknownAgent 标记未知 agent（HTTP 层映射 404；其余错误不得吞成 404）。
+var ErrUnknownAgent = errors.New("upstream: unknown agent")
+
 // Check 对指定 agent 的全部已声明来源各做一次上游查询（操作者点一次
-// 「检查更新」）。未知 agent 返回错误（HTTP 404 由调用方映射）。
+// 「检查更新」）。未知 agent 返回 ErrUnknownAgent。各来源并发查询：
+// 总耗时上限收敛到单来源的最坏预算（QueryTimeout×MaxAttempts+退避），
+// 而不是逐源串行相加；报告按声明顺序组装，与并发完成先后无关。
 func (s *Service) Check(ctx context.Context, agentID string) (Report, error) {
 	defs := SourcesFor(agentID)
 	if len(defs) == 0 {
-		return Report{}, fmt.Errorf("upstream: unknown agent %q", agentID)
+		return Report{}, fmt.Errorf("%w: %q", ErrUnknownAgent, agentID)
 	}
-	report := Report{AgentID: agentID, CheckedAt: s.cfg.Now(), Sources: make([]SourceResult, 0, len(defs))}
-	for _, def := range defs {
-		report.Sources = append(report.Sources, s.checkSource(ctx, def))
+	report := Report{AgentID: agentID, CheckedAt: s.cfg.Now(), Sources: make([]SourceResult, len(defs))}
+	var wg sync.WaitGroup
+	wg.Add(len(defs))
+	for i, def := range defs {
+		go func(i int, def SourceDef) {
+			defer wg.Done()
+			report.Sources[i] = s.checkSource(ctx, def)
+		}(i, def)
 	}
+	wg.Wait()
 	return report, nil
 }
 
@@ -164,11 +179,7 @@ func (s *Service) checkSource(ctx context.Context, def SourceDef) SourceResult {
 	// 如实报告为 unsupported——不从来源清单上抹掉，也不伪装成查询失败。
 	if def.Query != QuerySupported {
 		res.Status = StatusUnsupported
-		res.Failure = &Failure{
-			Reason:   ReasonMethodUnsupported,
-			Detail:   def.QueryUnsupportedReason(),
-			Attempts: 0,
-		}
+		res.Failure = &Failure{Reason: ReasonMethodUnsupported, Detail: def.QueryUnsupportedReason()}
 		return res
 	}
 	// 能力门 2：非默认渠道。上游 GetLatestVersion 没有渠道参数，查不了
@@ -190,6 +201,7 @@ func (s *Service) checkSource(ctx context.Context, def SourceDef) SourceResult {
 			break
 		}
 		attempts = attempt
+		res.Attempts = attempt
 		qctx, cancel := context.WithTimeout(ctx, s.cfg.QueryTimeout)
 		raw, err := s.q.LatestVersion(qctx, def)
 		cancel()
@@ -199,7 +211,8 @@ func (s *Service) checkSource(ctx context.Context, def SourceDef) SourceResult {
 		lastErr = err
 		reason, retryable := classifyError(err)
 		if !retryable {
-			return s.recordFailure(def, res, Failure{Reason: reason, Detail: err.Error(), Attempts: attempts})
+			// 尝试次数记录在本结果的 Attempts。
+			return s.recordFailure(def, res, Failure{Reason: reason, Detail: err.Error()})
 		}
 		// 有限重试：仅在父 context 仍有预算时等待后重试。
 		if attempt < s.cfg.MaxAttempts {
@@ -209,13 +222,13 @@ func (s *Service) checkSource(ctx context.Context, def SourceDef) SourceResult {
 				timer.Stop()
 				lastErr = ctx.Err()
 				reason, _ = classifyError(lastErr)
-				return s.recordFailure(def, res, Failure{Reason: reason, Detail: lastErr.Error(), Attempts: attempts})
+				return s.recordFailure(def, res, Failure{Reason: reason, Detail: lastErr.Error()})
 			case <-timer.C:
 			}
 		}
 	}
 	return s.recordFailure(def, res, Failure{
-		Reason: classifyReason(lastErr), Detail: lastErr.Error(), Attempts: attempts,
+		Reason: classifyReason(lastErr), Detail: lastErr.Error(),
 	})
 }
 
@@ -225,9 +238,8 @@ func (s *Service) checkSource(ctx context.Context, def SourceDef) SourceResult {
 func (s *Service) recordSuccess(def SourceDef, raw string, res SourceResult, attempts int) SourceResult {
 	if strings.TrimSpace(raw) == "" {
 		return s.recordFailure(def, res, Failure{
-			Reason:   ReasonParseFailed,
-			Detail:   fmt.Sprintf("%s %s: upstream returned an empty version string", def.Method, def.Package),
-			Attempts: attempts,
+			Reason: ReasonParseFailed,
+			Detail: fmt.Sprintf("%s %s: upstream returned an empty version string", def.Method, def.Package),
 		})
 	}
 	v := ParseVersion(raw)
@@ -236,7 +248,6 @@ func (s *Service) recordSuccess(def SourceDef, raw string, res SourceResult, att
 			Reason: ReasonParseFailed,
 			Detail: fmt.Sprintf("%s %s: upstream version %q is not interpretable (no version structure)",
 				def.Method, def.Package, raw),
-			Attempts: attempts,
 		})
 	}
 	now := s.cfg.Now()
@@ -254,7 +265,6 @@ func (s *Service) recordSuccess(def SourceDef, raw string, res SourceResult, att
 func (s *Service) recordFailure(def SourceDef, res SourceResult, f Failure) SourceResult {
 	res.Status = StatusFailed
 	res.Failure = &f
-	res.Attempts = f.Attempts
 	if c, ok := s.lookup(def); ok {
 		res.LastSuccess = &CachedVersion{Version: c.version, QueriedAt: c.queriedAt}
 	}

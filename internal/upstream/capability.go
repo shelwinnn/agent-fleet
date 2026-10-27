@@ -22,9 +22,10 @@ const (
 	VerifiedIsolated Verification = "verified_isolated"
 	// Unverified：编译可行或理论可行，但无运行证据——不宣称支持。
 	Unverified Verification = "unverified"
-	// BlockedPendingHost：上游实现有源码级缺陷，待真机确认后另行决策
-	// （windows/amd64 + npm 的 .exe 硬编码问题）。
-	BlockedPendingHost Verification = "blocked_pending_windows"
+	// BlockedPendingWindows：上游实现有源码级缺陷，待 Windows 真机确认后
+	// 另行决策（windows/amd64 + npm 的 .exe 硬编码问题）。常量名与取值一致
+	//（取值即对外 JSON 契约，沿用 T1 报告用语）。
+	BlockedPendingWindows Verification = "blocked_pending_windows"
 	// BlockedUpstream：上游缺陷导致该来源完全不可用（binary 空 Command）。
 	BlockedUpstream Verification = "blocked_upstream"
 )
@@ -102,7 +103,7 @@ func codexNpmPlatforms() []PlatformApplicability {
 			Evidence: "KM-46 §5: 交叉编译通过，行为零验证"},
 		{Platform: "darwin", Arch: "amd64", Status: Unverified,
 			Evidence: "KM-46 §5 能力矩阵无此组合"},
-		{Platform: "windows", Arch: "amd64", Status: BlockedPendingHost,
+		{Platform: "windows", Arch: "amd64", Status: BlockedPendingWindows,
 			Evidence: "KM-46 §5/§7: 上游平台层只认 .exe，待真机确认后另行决策"},
 	}
 }

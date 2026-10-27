@@ -5,13 +5,13 @@ package httpapi
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/shelwinnn/agent-fleet/internal/upstream"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
+	"github.com/shelwinnn/agent-fleet/internal/upstream"
 )
 
 type fakeUpstreamDiscovery struct {
@@ -47,7 +47,7 @@ func newFakeUpstreamDiscovery() *fakeUpstreamDiscovery {
 					Channel: "latest", Status: upstream.StatusFailed, Attempts: 2,
 					Failure: &upstream.Failure{
 						Reason: upstream.ReasonSourceUnavailable,
-						Detail: "brew is not available in PATH", Attempts: 1,
+						Detail: "brew is not available in PATH",
 					},
 				},
 			},
@@ -70,7 +70,7 @@ func TestUpstreamCheckWithoutWiring(t *testing.T) {
 func TestUpstreamCheckUnknownAgentIs404(t *testing.T) {
 	f := newAPIFixture(t)
 	fake := newFakeUpstreamDiscovery()
-	fake.err = errors.New(`upstream: unknown agent "claude"`)
+	fake.err = fmt.Errorf("upstream: unknown agent %q: %w", "claude", upstream.ErrUnknownAgent)
 	f.api.upstreamDiscovery = fake
 
 	status, body := f.do("POST", "/api/v1/agents/claude/upstream-versions/check", "")
@@ -120,6 +120,12 @@ func TestUpstreamCheckReturnsReport(t *testing.T) {
 	failure := brew["failure"].(map[string]any)
 	if failure["reason"] != "source_unavailable" {
 		t.Fatalf("failure = %v, want source_unavailable", failure)
+	}
+	if _, has := failure["attempts"]; has {
+		t.Fatalf("failure must not duplicate attempts（单一事实来源在 results 层）: %v", failure)
+	}
+	if brew["attempts"] != float64(2) {
+		t.Fatalf("brew attempts = %v, want 2", brew["attempts"])
 	}
 }
 

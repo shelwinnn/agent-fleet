@@ -47,13 +47,17 @@ func (q *CommandQuerier) LatestVersion(ctx context.Context, def SourceDef) (stri
 	}
 }
 
+// errNotInPath 标记「查询所需的包管理器不在本机 PATH」。分类走 errors.Is，
+// 不做文案匹配（文案是给人看的，不是给分类器看的契约）。
+var errNotInPath = errors.New("is not available in PATH")
+
 func (q *CommandQuerier) lookup(name string) error {
 	look := q.lookPath
 	if look == nil {
 		look = exec.LookPath
 	}
 	if _, err := look(name); err != nil {
-		return fmt.Errorf("%s is not available in PATH: %w", name, err)
+		return fmt.Errorf("%s %w: %w", name, errNotInPath, err)
 	}
 	return nil
 }
@@ -70,8 +74,10 @@ func (q *CommandQuerier) npmLatest(ctx context.Context, def SourceDef) (string, 
 	return strings.TrimSpace(string(out)), nil
 }
 
-// brewLatest 对齐上游 BrewProvider v1.5.0 的取值语义：cask 读
-// casks[].version，formula 读 formulae[].versions.stable。
+// brewLatest 只走 cask 路径（codex 在上游 catalog 中标记 cask=true，
+// 命令固定传 --cask，brew 只会回 casks 数组）。formula 语义（formulae[]
+// .versions.stable）在出现 formula 来源之前不实现——留着不可达分支只会
+// 制造「看起来支持」的假象。
 func (q *CommandQuerier) brewLatest(ctx context.Context, def SourceDef) (string, error) {
 	args := []string{"info", "--json=v2", "--cask", def.Package}
 	var (
@@ -91,11 +97,6 @@ func (q *CommandQuerier) brewLatest(ctx context.Context, def SourceDef) (string,
 		return "", fmt.Errorf("brew info %s: %w", def.Package, err)
 	}
 	var parsed struct {
-		Formulae []struct {
-			Versions struct {
-				Stable string `json:"stable"`
-			} `json:"versions"`
-		} `json:"formulae"`
 		Casks []struct {
 			Version string `json:"version"`
 		} `json:"casks"`
@@ -106,28 +107,25 @@ func (q *CommandQuerier) brewLatest(ctx context.Context, def SourceDef) (string,
 	if len(parsed.Casks) > 0 && parsed.Casks[0].Version != "" {
 		return strings.TrimSpace(parsed.Casks[0].Version), nil
 	}
-	if len(parsed.Formulae) > 0 && parsed.Formulae[0].Versions.Stable != "" {
-		return strings.TrimSpace(parsed.Formulae[0].Versions.Stable), nil
-	}
-	return "", fmt.Errorf("brew info %s: no version in response", def.Package)
+	return "", fmt.Errorf("brew info %s: no cask version in response", def.Package)
 }
 
-// classifyError 把查询错误分类并标注是否值得重试。错误来源有三处：
-// 本层 lookPath 包装（"is not available"）、exec 的类型化错误、以及上游
-// 无关的命令输出。错误没有更细的类型化契约，文案匹配只限本层自己包装的
-// 前缀——这比依赖上游错误文案（KM-46 的做法）更可控。
+// classifyError 把查询错误分类并标注是否值得重试。分类依据全部是本层自己
+// 的哨兵与 exec 的类型化错误——不做错误文案匹配（文案不是契约）。
 func classifyError(err error) (FailureReason, bool) {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return ReasonTimeout, true
 	case errors.Is(err, context.Canceled):
-		// 调用方放弃：按超时类上报，不再重试（外层循环因 ctx 退出）。
-		return ReasonTimeout, false
+		// 调用方放弃（操作者关页/请求中止）：不是「查得太慢」，单独成类。
+		return ReasonCanceled, false
+	case errors.Is(err, errNotInPath):
+		// npm/brew 不在本机 PATH：换环境才能解决，重试无意义——这本身就是
+		// 要展示给操作者的「适用性」事实。
+		return ReasonSourceUnavailable, false
 	}
 	var lookErr *exec.Error
 	if errors.As(err, &lookErr) {
-		// npm/brew 不在本机 PATH：换环境才能解决，重试无意义——这本身就是
-		// 要展示给操作者的「适用性」事实。
 		return ReasonSourceUnavailable, false
 	}
 	var exitErr *exec.ExitError
@@ -136,15 +134,10 @@ func classifyError(err error) (FailureReason, bool) {
 		// 有限重试。
 		return ReasonQueryFailed, true
 	}
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "is not available"):
-		return ReasonSourceUnavailable, false
-	case strings.Contains(msg, "no registry query"):
+	if strings.Contains(err.Error(), "no registry query") {
 		return ReasonMethodUnsupported, false
-	default:
-		return ReasonQueryFailed, true
 	}
+	return ReasonQueryFailed, true
 }
 
 func classifyReason(err error) FailureReason {

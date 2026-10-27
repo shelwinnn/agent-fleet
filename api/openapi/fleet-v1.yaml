@@ -1248,14 +1248,14 @@ components:
         scheme: { type: string, enum: [semver, source_rule, unparsed] }
     UpstreamFailure:
       type: object
-      required: [reason, detail, attempts]
+      description: 失败记录；实际尝试次数见 UpstreamSourceResult.attempts（单一事实来源）
+      required: [reason, detail]
       properties:
         reason:
           type: string
-          enum: [query_failed, timeout, source_unavailable, version_parse_failed,
-                 method_unsupported, channel_unsupported]
+          enum: [query_failed, timeout, canceled, source_unavailable,
+                 version_parse_failed, method_unsupported, channel_unsupported]
         detail: { type: string, description: 失败细节（不含敏感值）}
-        attempts: { type: integer }
     UpstreamCachedVersion:
       type: object
       required: [version, queriedAt]

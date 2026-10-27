@@ -9,10 +9,11 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
-	"github.com/shelwinnn/agent-fleet/internal/upstream"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
+	"github.com/shelwinnn/agent-fleet/internal/upstream"
 )
 
 // UpstreamDiscoveryAPI 是 httpapi 对上游版本发现服务的窄依赖。
@@ -30,10 +31,14 @@ func (s *Server) handleUpstreamVersionCheck(w http.ResponseWriter, r *http.Reque
 	}
 	report, err := s.upstreamDiscovery.Check(r.Context(), r.PathValue("agent"))
 	if err != nil {
-		// Check 只有未知 agent 一种错误；服务内部的查询失败都进
-		// Report（逐源 failed + 原因 + 缓存回退），不走 HTTP 错误体——
-		// 「没查到」是正常的业务结果，不是传输层错误。
-		writeError(w, http.StatusNotFound, domain.ReasonNotFound, err.Error(), nil)
+		// 服务内部的查询失败都进 Report（逐源 failed + 原因 + 缓存回退），
+		// 不走 HTTP 错误体——「没查到」是正常的业务结果，不是传输层错误。
+		// 未知 agent 走哨兵映射 404；其余错误一律 500，绝不静默吞成 404。
+		if errors.Is(err, upstream.ErrUnknownAgent) {
+			writeError(w, http.StatusNotFound, domain.ReasonNotFound, err.Error(), nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, domain.ReasonInternal, err.Error(), nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, report)

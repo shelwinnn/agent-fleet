@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shelwinnn/agent-fleet/internal/upstream"
 	"github.com/shelwinnn/agent-fleet/internal/bundle"
 	deployctl "github.com/shelwinnn/agent-fleet/internal/controller/deployment"
 	machine "github.com/shelwinnn/agent-fleet/internal/controller/machine"
@@ -28,6 +27,7 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/server/sse"
 	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
+	"github.com/shelwinnn/agent-fleet/internal/upstream"
 )
 
 func main() {

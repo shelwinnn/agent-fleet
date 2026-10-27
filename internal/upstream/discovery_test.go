@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"sync"
 	"testing"
@@ -268,8 +269,11 @@ func TestCheckRetryBudgetExhaustedReportsFailure(t *testing.T) {
 	if got.Status != StatusFailed {
 		t.Fatalf("status = %q, want failed", got.Status)
 	}
-	if got.Failure == nil || got.Failure.Reason != ReasonTimeout || got.Failure.Attempts != 2 {
-		t.Fatalf("failure = %+v, want timeout with 2 attempts", got.Failure)
+	if got.Failure == nil || got.Failure.Reason != ReasonTimeout {
+		t.Fatalf("failure = %+v, want timeout", got.Failure)
+	}
+	if got.Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2（尝试次数记在结果上）", got.Attempts)
 	}
 	if n := q.callsFor("npm"); n != 2 {
 		t.Errorf("npm queried %d times, want exactly 2（有限重试）", n)
@@ -277,7 +281,8 @@ func TestCheckRetryBudgetExhaustedReportsFailure(t *testing.T) {
 }
 
 func TestCheckSourceUnavailableNotRetried(t *testing.T) {
-	q := &fakeQuerier{resps: []fakeResp{{err: errors.New("npm is not available")}}}
+	// 与生产查询器同形的错误：lookup 以 errNotInPath 哨兵包装。
+	q := &fakeQuerier{resps: []fakeResp{{err: fmt.Errorf("npm %w: %w", errNotInPath, exec.ErrNotFound)}}}
 	s := newFakeService(t, q)
 
 	rep, err := s.Check(context.Background(), "codex")

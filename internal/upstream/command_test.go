@@ -85,8 +85,7 @@ func TestCommandQuerierBrewCaskAndFormula(t *testing.T) {
 		wantErr bool
 	}{
 		{"cask version", `{"casks":[{"version":"1.2.3_1"}]}`, "1.2.3_1", false},
-		{"formula fallback", `{"formulae":[{"versions":{"stable":"2024.11"}}]}`, "2024.11", false},
-		{"no version", `{"casks":[],"formulae":[]}`, "", true},
+		{"no cask version", `{"casks":[]}`, "", true},
 		{"malformed json", `not-json`, "", true},
 	}
 	for _, tc := range tests {
