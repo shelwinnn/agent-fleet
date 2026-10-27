@@ -119,7 +119,7 @@
                 <Table.Cell>
                   <div class="flex flex-wrap items-center gap-1">
                     <Button size="sm" variant="outline" disabled title={t('skills.resolve.title')}>
-                      Resolve
+                      {t('skills.resolve')}
                     </Button>
                     <Button
                       size="sm"

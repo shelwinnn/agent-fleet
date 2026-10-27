@@ -30,6 +30,8 @@ import Machines from '../src/routes/Machines.svelte';
 import MachineDetail from '../src/routes/MachineDetail.svelte';
 import Deployments from '../src/routes/Deployments.svelte';
 import SshInventory from '../src/routes/SshInventory.svelte';
+import Profiles from '../src/routes/Profiles.svelte';
+import Skills from '../src/routes/Skills.svelte';
 import type { Deployment, Machine, Operation } from '../src/lib/api/types.js';
 
 const NOW = new Date('2026-09-23T12:00:00Z');
@@ -338,6 +340,58 @@ describe('动态内容跟随所选语言', () => {
     expect(detailZh).toContain('联通与状态');
     for (const body of [detail, dep, ssh, detailZh]) {
       expect(body).not.toMatch(/\b(detail|deployments|sshinv|machines|common|error)\.[a-zA-Z]+/);
+    }
+  });
+
+  it('Profiles 与 Skills 整页 SSR：按钮与占位符等可见文案两语言都经目录取值', () => {
+    const profileFixture = {
+      metadata: { name: 'default-dev', creationTimestamp: '2026-09-23T08:00:00Z' },
+      spec: { agents: { codex: { enabled: true } }, skills: [{ name: 'superpowers', skill: 'skill-src' }] },
+    };
+    const skillFixture = {
+      metadata: { name: 'skill-src' },
+      spec: { source: 'github.com/example/skills', ref: 'v1.2.0' },
+      status: { resolvedRevision: 'v1.2.0', contentDigest: 'sha256:cccc' },
+    };
+    const profilesStore = {
+      loading: {},
+      errors: {},
+      machines: [],
+      profiles: [profileFixture],
+      machinesUsingProfile: () => [],
+    } as never;
+    const skillsStore = {
+      loading: {},
+      errors: {},
+      machines: [],
+      skills: [skillFixture],
+      machinesUsingSkill: () => [],
+    } as never;
+
+    setLocale('en');
+    const profilesEn = render(Profiles, { props: { store: profilesStore, name: 'default-dev' } }).body;
+    expect(profilesEn).toContain('Render preview');
+    expect(profilesEn).toContain('Target machine');
+    expect(profilesEn).toContain('placeholder="ws-1"'); // 语言中立示例标识
+    expect(profilesEn).not.toContain('machine name');
+    const skillsEn = render(Skills, { props: { store: skillsStore } }).body;
+    expect(skillsEn).toContain('Resolved revision');
+    expect(skillsEn).toContain('Resolve is not available yet');
+    expect(skillsEn).toMatch(/>\s*Resolve\s*</); // 按钮可见文本经目录取值
+
+    setLocale('zh-CN');
+    const profilesZh = render(Profiles, { props: { store: profilesStore, name: 'default-dev' } }).body;
+    expect(profilesZh).toContain('渲染预览');
+    expect(profilesZh).toContain('目标机器');
+    expect(profilesZh).toContain('placeholder="ws-1"');
+    expect(profilesZh).not.toContain('machine name');
+    const skillsZh = render(Skills, { props: { store: skillsStore } }).body;
+    expect(skillsZh).toContain('已解析修订');
+    expect(skillsZh).toContain('解析功能尚未提供');
+    expect(skillsZh).toMatch(/>\s*解析\s*</); // 按钮文本是「解析」，不再是英文 Resolve
+    expect(skillsZh).not.toContain('Resolve');
+    for (const body of [profilesEn, skillsEn, profilesZh, skillsZh]) {
+      expect(body).not.toMatch(/\b(profiles|skills)\.[a-zA-Z]+/);
     }
   });
 });

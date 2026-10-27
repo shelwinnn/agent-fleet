@@ -230,7 +230,7 @@
       <Alert.Title>{actionMessage.kind === 'error' ? actionOutcomeTitle(actionMessage.error, i18n.locale) : t(actionMessage.titleKey)}</Alert.Title>
       <Alert.Description>
         {#if actionMessage.kind === 'error'}
-          {t(actionMessage.prefixKey)}：{failureText(actionMessage.error, i18n.locale)}
+          {t(actionMessage.prefixKey)}{t('app.labelColon')}{failureText(actionMessage.error, i18n.locale)}
           {#if actionMessage.unresolved}
             <div class="mt-1">
               {t('common.unresolvedOpRef', {

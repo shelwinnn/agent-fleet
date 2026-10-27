@@ -64,7 +64,9 @@ export function hostKeyNotice(machine: Machine, locale: Locale = 'zh-CN'): SshNo
   const reason = cond.reason ?? '';
   const hostKeyRelated = /hostkey|host_key|knownhost|fingerprint/i.test(reason) || /host.?key/i.test(cond.message ?? '');
   if (!hostKeyRelated && cond.reason !== 'SSHUnreachable') return null;
-  const reasonText = reason ? `（reason=${reason}）` : '';
+  const open = locale === 'zh-CN' ? '（' : ' (';
+  const close = locale === 'zh-CN' ? '）' : ')';
+  const reasonText = reason ? `${open}reason=${reason}${close}` : '';
   return {
     level: 'danger',
     title: translate(locale, hostKeyRelated ? 'ssh.hostKey.title' : 'ssh.unreachable.title'),
@@ -158,10 +160,10 @@ export function actionOutcomeTitle(err: unknown, locale: Locale = 'zh-CN'): stri
   return translate(locale, describeActionFailure(err, locale).kind === 'rejected' ? 'common.actionRejected' : 'common.actionFailed');
 }
 
-/** `标题。详情` 的一行式组合（页面提示正文用）。 */
+/** `标题。详情` 的一行式组合（页面提示正文用）；标点随 locale。 */
 export function failureText(err: unknown, locale: Locale = 'zh-CN'): string {
   const f = describeActionFailure(err, locale);
-  return `${f.title}。${f.detail}`;
+  return locale === 'zh-CN' ? `${f.title}。${f.detail}` : `${f.title}. ${f.detail}`;
 }
 
 /** 列表/详情加载失败的完整提示：对象 + 原因 + 下一步。 */
