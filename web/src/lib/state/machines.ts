@@ -7,6 +7,7 @@
 import type { ConditionStatus, Machine } from '../api/types';
 import { allConditionSummaries, conditionView, driftInputFromMachine, driftView, type DriftView, type Tone } from './drift';
 import { formatRelativeTime } from './format';
+import { translate, type Locale } from '../i18n/messages.js';
 
 export interface MachineRow {
   name: string;
@@ -25,7 +26,7 @@ export interface MachineRow {
   unresolvedPhase?: string;
 }
 
-export function machineRow(machine: Machine, now: Date = new Date()): MachineRow {
+export function machineRow(machine: Machine, now: Date = new Date(), locale: Locale = 'zh-CN'): MachineRow {
   const status = machine.status ?? {};
   const conditions = status.conditions;
   const sshCond = conditionView(conditions, 'SSHReachable');
@@ -34,8 +35,9 @@ export function machineRow(machine: Machine, now: Date = new Date()): MachineRow
   const reconciledCond = conditionView(conditions, 'Reconciled');
   const degradedCond = conditionView(conditions, 'Degraded');
   const mode = (machine.spec?.managementMode as 'agentd' | 'ssh') ?? 'agentd';
+  const msg = (key: string, params?: Record<string, string | number>) => translate(locale, key, params);
 
-  const drift = driftView(driftInputFromMachine(machine), now);
+  const drift = driftView(driftInputFromMachine(machine), now, locale);
 
   const agentTone: Tone =
     agentCond?.status === 'True' ? 'ok' : agentCond?.status === 'False' ? 'danger' : 'warn';
@@ -52,11 +54,13 @@ export function machineRow(machine: Machine, now: Date = new Date()): MachineRow
         : 'muted';
 
   const attentionReasons: string[] = [];
-  if (drift.state === 'drifted') attentionReasons.push('已漂移');
-  if (drift.state === 'unknown') attentionReasons.push(`drift 未知：${drift.reasonCode ?? 'Unknown'}`);
+  if (drift.state === 'drifted') attentionReasons.push(msg('machine.attention.drifted'));
+  if (drift.state === 'unknown')
+    attentionReasons.push(msg('machine.attention.driftUnknown', { code: drift.reasonCode ?? 'Unknown' }));
+  // 条件表达式属操作标识，按 spec 原样保留（不本地化）。
   if (degradedCond?.status === 'True') attentionReasons.push('Degraded=True');
-  if (mode === 'agentd' && agentCond?.status !== 'True') attentionReasons.push('agentd 未在线');
-  if (inventoryCond?.status === 'Unknown') attentionReasons.push('inventory 未就绪');
+  if (mode === 'agentd' && agentCond?.status !== 'True') attentionReasons.push(msg('machine.attention.agentdOffline'));
+  if (inventoryCond?.status === 'Unknown') attentionReasons.push(msg('machine.attention.inventoryNotReady'));
 
   return {
     name: machine.metadata.name,
@@ -65,10 +69,10 @@ export function machineRow(machine: Machine, now: Date = new Date()): MachineRow
     agentd: {
       label:
         agentCond?.status === 'True'
-          ? `在线 ${status.agentdVersion ?? ''}`.trim()
+          ? msg('machine.agentd.online', { version: status.agentdVersion ?? '' })
           : agentCond?.status === 'False'
-            ? '离线'
-            : '未知',
+            ? msg('machine.agentd.offline')
+            : msg('machine.agentd.unknown'),
       tone: agentTone,
       version: status.agentdVersion,
       connected: agentCond?.status ?? 'Unknown',
@@ -78,16 +82,16 @@ export function machineRow(machine: Machine, now: Date = new Date()): MachineRow
     reconciled: {
       label:
         reconciledCond?.status === 'True'
-          ? '已收敛'
+          ? msg('machine.reconciled.ok')
           : reconciledCond?.status === 'False'
-            ? '未收敛'
-            : '未知',
+            ? msg('machine.reconciled.no')
+            : msg('machine.reconciled.unknown'),
       tone: reconciledCond?.status === 'True' ? 'ok' : reconciledCond?.status === 'False' ? 'warn' : 'warn',
       status: reconciledCond?.status ?? 'Unknown',
       reason: reconciledCond?.reason,
     },
     lastSeen: status.lastHeartbeatAt ?? status.lastInventoryAt,
-    lastSeenText: formatRelativeTime(status.lastHeartbeatAt ?? status.lastInventoryAt ?? '', now),
+    lastSeenText: formatRelativeTime(status.lastHeartbeatAt ?? status.lastInventoryAt ?? '', now, locale),
     degraded: degradedCond?.status === 'True',
     needsAttention: attentionReasons.length > 0,
     attentionReasons,
@@ -95,8 +99,8 @@ export function machineRow(machine: Machine, now: Date = new Date()): MachineRow
   };
 }
 
-export function machineRows(machines: Machine[], now: Date = new Date()): MachineRow[] {
-  return machines.map((m) => machineRow(m, now));
+export function machineRows(machines: Machine[], now: Date = new Date(), locale: Locale = 'zh-CN'): MachineRow[] {
+  return machines.map((m) => machineRow(m, now, locale));
 }
 
 /** Overview 顶部卡片（spec §24.1）。 */

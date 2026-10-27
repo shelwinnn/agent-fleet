@@ -18,3 +18,8 @@ pnpm integration  # 与真实控制面的联调检查（需控制面已运行；
 - `pnpm-workspace.yaml` 只声明 `allowBuilds`（pnpm 11+ 的依赖构建脚本白名单，此处为 esbuild）。
 - SSE 用 `fetch` 流式读取而非 `EventSource`：SSE 端点与其余 `/api/v1` 端点同一鉴权模型（§29.14），
   而 `EventSource` 不能设置 `Authorization` 头。
+- i18n 在 `src/lib/i18n/`：`messages.ts` 是 zh-CN（源）/ en 两份同键集消息目录（en 缺译在编译期报错），
+  `locale.svelte.ts` 是 runes 语言状态（首次默认 zh-CN，偏好持久化在 localStorage 的
+  `agent-fleet.locale`，切换时同步 `<html lang>`）。组件用 `t(key)` / `i18n.locale` 取值即响应式；
+  状态模块的视图函数（`machineRow`、`viewTarget`、`viewOperation` 等）接受 locale 尾参，默认 zh-CN。
+  迁移进度：应用外壳与 Overview 已接入；其余页面在后续 ticket 迁移。
