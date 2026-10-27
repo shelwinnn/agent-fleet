@@ -23,6 +23,10 @@ export default defineConfig({
     alias: {
       $lib: path.resolve('./src/lib'),
     },
+    // 让 svelte 的 "." 导出在 Vitest（node 侧）也解析到客户端运行时，
+    // i18n-dom.test.ts 才能用 mount() 做真实挂载的语言切换验证；
+    // svelte/server 是独立入口，SSR 渲染测试不受影响。
+    conditions: ['browser'],
   },
   server: { proxy },
   preview: { proxy },

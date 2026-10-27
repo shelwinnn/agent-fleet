@@ -24,6 +24,7 @@
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^24.13.3",
     "bits-ui": "^2.19.2",
+    "happy-dom": "^21.0.4",
     "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "tailwind-variants": "^3.3.1",

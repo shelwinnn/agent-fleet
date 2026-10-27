@@ -9,6 +9,7 @@
 import type { Condition, ConditionStatus, ConditionView, Machine, MachineStatus } from '../api/types';
 import type { Tone } from './tone.js';
 import { formatRelativeTime } from './format';
+import { translate, type Locale } from '../i18n/messages.js';
 
 export type DriftState = 'in-sync' | 'unknown' | 'drifted';
 
@@ -40,19 +41,24 @@ export interface DriftView {
   diffAvailable: boolean;
 }
 
-/** Unknown reason code → 展示文案（§6.2 三种情形必须 Unknown）。 */
-export const DRIFT_UNKNOWN_REASONS: Record<string, string> = {
-  NeverInventoried: '从未采集受管投影（该机尚未完成 inventory）',
-  StaleObservation: '观测已过期（超过新鲜度窗口）',
-  ObservationPredatesDesired: '期望代已变化，尚未按新代采集',
-  ProjectionVersionMismatch: '投影规范化版本不一致，不沿用旧判定（§7.1 契约 2）',
-};
+/** Unknown reason code → 展示文案（§6.2 三种情形必须 Unknown；已知码按 locale 取文案）。 */
+const KNOWN_UNKNOWN_REASONS = [
+  'NeverInventoried',
+  'StaleObservation',
+  'ObservationPredatesDesired',
+  'ProjectionVersionMismatch',
+] as const;
 
-export function driftReasonText(reason?: string, message?: string): string {
-  if (reason && DRIFT_UNKNOWN_REASONS[reason]) return DRIFT_UNKNOWN_REASONS[reason];
+export function driftReasonText(
+  reason?: string,
+  message?: string,
+  locale: Locale = 'zh-CN',
+): string {
+  if (reason && (KNOWN_UNKNOWN_REASONS as readonly string[]).includes(reason))
+    return translate(locale, `drift.reason.${reason}`);
   if (message) return message;
   if (reason) return reason;
-  return '原因未报告';
+  return translate(locale, 'drift.reason.unreported');
 }
 
 /** 从 Machine 资源抽取 drift 判定输入。 */
@@ -75,10 +81,11 @@ export function driftInputFromMachine(machine: Machine): DriftInput {
  * 前端不重算、只呈现；缺少条件记录时按 Unknown/NeverInventoried 处理
  * （与 GET /machines/{name}/drift 的 conditionView 一致）。
  */
-export function driftView(input: DriftInput, now: Date = new Date()): DriftView {
+export function driftView(input: DriftInput, now: Date = new Date(), locale: Locale = 'zh-CN'): DriftView {
   const drifted = input.drifted ?? { status: 'Unknown' as ConditionStatus, reason: 'NeverInventoried' };
   const status = drifted.status;
   const confirmedAt = driftConfirmedAt(input);
+  const msg = (key: string, params?: Record<string, string | number>) => translate(locale, key, params);
   const base = {
     desiredDigest: input.desiredProjectionDigest,
     observedDigest: input.observedProjectionDigest,
@@ -96,13 +103,13 @@ export function driftView(input: DriftInput, now: Date = new Date()): DriftView 
       ...base,
       state: 'drifted',
       tone: 'danger',
-      label: '已漂移',
+      label: msg('drift.label.drifted'),
       reasonCode: drifted.reason,
       detail:
         drifted.message ||
         (sameDigest
-          ? '受管投影摘要相同但判定为漂移，请查看后端评测结果'
-          : '受管投影摘要与期望不一致（逐字段 diff 未由 API 暴露，可通过 Reconcile 收敛）'),
+          ? msg('drift.detail.sameDigest')
+          : msg('drift.detail.digestMismatch')),
     };
   }
 
@@ -111,25 +118,28 @@ export function driftView(input: DriftInput, now: Date = new Date()): DriftView 
       ...base,
       state: 'in-sync',
       tone: 'ok',
-      label: '已确认一致',
-      detail: confirmedAt ? `上次确认于 ${formatRelativeTime(confirmedAt, now)}` : '上次确认时间未记录',
+      label: msg('drift.label.inSync'),
+      detail: confirmedAt
+        ? msg('drift.detail.lastConfirmedAt', { time: formatRelativeTime(confirmedAt, now, locale) })
+        : msg('drift.detail.lastConfirmedMissing'),
     };
   }
 
   // Unknown：必须给出原因，且不得渲染为"一致"。
-  const rows: string[] = [driftReasonText(drifted.reason, drifted.message)];
+  const rows: string[] = [driftReasonText(drifted.reason, drifted.message, locale)];
   if (input.managementMode === 'ssh') {
-    rows.push('SSH-only 机器在两次操作之间不做后台轮询，因此本态属预期（§6.2）');
+    rows.push(msg('drift.detail.sshModeExpected'));
   }
-  if (confirmedAt) rows.push(`上次确认于 ${formatRelativeTime(confirmedAt, now)}`);
-  if (input.lastInventoryAt) rows.push(`最近观测于 ${formatRelativeTime(input.lastInventoryAt, now)}`);
+  if (confirmedAt) rows.push(msg('drift.detail.lastConfirmedAt', { time: formatRelativeTime(confirmedAt, now, locale) }));
+  if (input.lastInventoryAt)
+    rows.push(msg('drift.detail.lastObservedAt', { time: formatRelativeTime(input.lastInventoryAt, now, locale) }));
   return {
     ...base,
     state: 'unknown',
     tone: 'warn',
-    label: '未知或过期',
+    label: msg('drift.label.unknown'),
     reasonCode: drifted.reason ?? 'NeverInventoried',
-    detail: rows.join('；'),
+    detail: rows.join(locale === 'zh-CN' ? '；' : '; '),
   };
 }
 

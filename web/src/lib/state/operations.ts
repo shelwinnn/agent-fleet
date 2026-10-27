@@ -11,6 +11,7 @@
  *  - Unknown 不是终态，不得自动夺锁（§5.6：StaleExecutionLock 交操作者处理）。
  */
 import type { Operation, OperationPhase, UnresolvedOperationRef } from '../api/types';
+import { translate, type Locale } from '../i18n/messages.js';
 
 export const UNRESOLVED_PHASES: OperationPhase[] = [
   'Pending',
@@ -28,17 +29,7 @@ export function isTerminalPhase(phase: OperationPhase): boolean {
   return phase === 'Succeeded' || phase === 'Failed';
 }
 
-export const PHASE_LABELS: Record<OperationPhase, string> = {
-  Pending: '待派发',
-  Running: '执行中',
-  AwaitingConfirmation: '等待确认',
-  CancelRequested: '已请求取消',
-  Succeeded: '成功',
-  Failed: '失败',
-  Unknown: '结果未知',
-};
-
-/** 相位语义提示（UI 必须说明"它会阻塞什么/如何处置"）。 */
+/** 相位语义提示（UI 必须说明"它会阻塞什么/如何处置"）。Machine Detail 专用，随其页面迁移再本地化。 */
 export const PHASE_NOTES: Record<OperationPhase, string> = {
   Pending: '已创建但尚未被节点取得执行权；控制面互斥已持有，新的变更类操作会被拒绝。',
   Running: '节点正在执行（13 阶段流水线）；此时取消需节点确认停止。',
@@ -90,19 +81,21 @@ export interface OperationView {
 }
 
 const TYPE_LABELS: Record<string, string> = {
-  Reconcile: '收敛',
-  Repair: '修复 agentd',
-  Bootstrap: '纳管',
-  Rollback: '回滚',
-  AutoPlan: '自动 plan',
+  Reconcile: 'ops.type.Reconcile',
+  Repair: 'ops.type.Repair',
+  Bootstrap: 'ops.type.Bootstrap',
+  Rollback: 'ops.type.Rollback',
+  AutoPlan: 'ops.type.AutoPlan',
 };
 
-export function viewOperation(op: Operation, now: Date = new Date()): OperationView {
+export function viewOperation(op: Operation, now: Date = new Date(), locale: Locale = 'zh-CN'): OperationView {
   const phase = op.status?.phase ?? 'Unknown';
   const modifier = op.status?.terminalModifier;
   const expires = op.status?.planExpiresAt ? Date.parse(op.status.planExpiresAt) : undefined;
   const remaining = expires === undefined ? undefined : expires - now.getTime();
   const isAuto = op.spec?.type === 'AutoPlan' || op.spec?.readOnly === true;
+  const opType = op.spec?.type;
+  const msg = (key: string, params?: Record<string, string | number>) => translate(locale, key, params);
 
   let tone: OperationView['tone'] = 'info';
   if (phase === 'Succeeded') tone = modifier ? 'warn' : 'ok';
@@ -113,11 +106,12 @@ export function viewOperation(op: Operation, now: Date = new Date()): OperationV
   return {
     id: op.metadata?.name ?? '',
     machine: op.spec?.machine ?? '',
-    type: op.spec?.type,
-    typeLabel: TYPE_LABELS[op.spec?.type] ?? op.spec?.type,
+    type: opType,
+    // 后端新出现的 type/phase 原样展示，绝不把消息 key 露到界面上。
+    typeLabel: opType && TYPE_LABELS[opType] ? msg(TYPE_LABELS[opType]) : (opType ?? ''),
     transport: op.spec?.transport,
     phase,
-    phaseLabel: PHASE_LABELS[phase] ?? phase,
+    phaseLabel: translatePhaseLabel(phase, locale),
     phaseNote: PHASE_NOTES[phase] ?? '',
     terminalModifier: modifier,
     modifierNote: modifier ? MODIFIER_NOTES[modifier] : undefined,
@@ -139,12 +133,18 @@ export function viewOperation(op: Operation, now: Date = new Date()): OperationV
   };
 }
 
-export function viewOperations(ops: Operation[], now: Date = new Date()): OperationView[] {
-  return ops.map((op) => viewOperation(op, now));
+function translatePhaseLabel(phase: OperationPhase, locale: Locale): string {
+  return (UNRESOLVED_PHASES.includes(phase) || phase === 'Succeeded' || phase === 'Failed')
+    ? translate(locale, `ops.phase.${phase}`)
+    : phase;
 }
 
-export function unresolvedOperations(ops: Operation[], now: Date = new Date()): OperationView[] {
-  return viewOperations(ops, now).filter((v) => v.isUnresolved);
+export function viewOperations(ops: Operation[], now: Date = new Date(), locale: Locale = 'zh-CN'): OperationView[] {
+  return ops.map((op) => viewOperation(op, now, locale));
+}
+
+export function unresolvedOperations(ops: Operation[], now: Date = new Date(), locale: Locale = 'zh-CN'): OperationView[] {
+  return viewOperations(ops, now, locale).filter((v) => v.isUnresolved);
 }
 
 /** 机器级互斥的持有者（优先用 status.unresolvedOperation，回退到操作列表）。 */

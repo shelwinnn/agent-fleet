@@ -6,27 +6,14 @@
  */
 import type { Deployment, DeploymentTarget, DeploymentTargetPhase } from '../api/types';
 import { formatRelativeTime } from './format';
+import { translate, type Locale } from '../i18n/messages.js';
 
 import type { Tone } from './tone.js';
 
 export type { Tone };
 
-export const TARGET_PHASE_LABELS: Record<DeploymentTargetPhase, string> = {
-  Pending: '待推进',
-  Running: '执行中',
-  Succeeded: '成功',
-  Failed: '失败',
-  Superseded: '已被取代',
-  Skipped: '已跳过',
-  Blocked: '被阻塞',
-};
-
-/** 目标 phase 的语义原因（后端 reason code 优先，未识别时原样显示）。 */
-export const TARGET_REASONS: Record<string, string> = {
-  SupersededByNewerGeneration:
-    '该机已在更新代：本次发布的目标代已过期，不再重放（FR-9.10/FR-10.6）。这不是失败。',
-  BlockedByNodeLock: '节点执行权忙（§5.6 规则 3）：排队等待，不计入失败也不推进批次。',
-};
+/** 已知语义原因码（其余原样保留原码展示，不翻译丢弃）。 */
+const KNOWN_TARGET_REASONS = ['SupersededByNewerGeneration', 'BlockedByNodeLock'] as const;
 
 export interface TargetView {
   machine: string;
@@ -45,7 +32,11 @@ export interface TargetView {
   blocksBatch: boolean;
 }
 
-export function viewTarget(target: DeploymentTarget, now: Date = new Date()): TargetView {
+export function viewTarget(
+  target: DeploymentTarget,
+  now: Date = new Date(),
+  locale: Locale = 'zh-CN',
+): TargetView {
   const phase = target.phase;
   const tone: Tone =
     phase === 'Succeeded'
@@ -55,23 +46,30 @@ export function viewTarget(target: DeploymentTarget, now: Date = new Date()): Ta
         : phase === 'Superseded' || phase === 'Skipped' || phase === 'Blocked'
           ? 'warn'
           : 'info';
+  const msg = (key: string, params?: Record<string, string | number>) => translate(locale, key, params);
+  const knownReason =
+    target.reason && (KNOWN_TARGET_REASONS as readonly string[]).includes(target.reason)
+      ? (target.reason as (typeof KNOWN_TARGET_REASONS)[number])
+      : undefined;
   return {
     machine: target.machine,
     phase,
-    phaseLabel: TARGET_PHASE_LABELS[phase] ?? phase,
+    phaseLabel: msg(`target.phase.${phase}`),
     tone,
     reason: target.reason,
     reasonText: target.reason
-      ? (TARGET_REASONS[target.reason] ?? `后端原因码：${target.reason}`)
+      ? knownReason
+        ? msg(`target.reason.${knownReason}`)
+        : msg('target.reason.unknown', { code: target.reason })
       : phase === 'Skipped'
-        ? '操作者显式跳过：留审计、不计入成功，且不改变节点实际状态（节点可能仍在写）。'
+        ? msg('target.skipped.noReason')
         : phase === 'Superseded'
-          ? '被更新代取代（未附原因码）'
+          ? msg('target.superseded.noReason')
           : undefined,
     operationId: target.operationId,
     effectiveGeneration: target.effectiveGeneration,
     updatedAt: target.updatedAt,
-    updatedAtText: target.updatedAt ? formatRelativeTime(target.updatedAt, now) : undefined,
+    updatedAtText: target.updatedAt ? formatRelativeTime(target.updatedAt, now, locale) : undefined,
     countsAsSuccess: phase === 'Succeeded',
     blocksBatch: phase === 'Blocked' || phase === 'Running' || phase === 'Pending',
   };
@@ -107,17 +105,15 @@ export function deploymentProgress(deployment: Deployment): DeploymentProgress {
   };
 }
 
-export function deploymentPhaseLabel(deployment: Deployment): string {
+const KNOWN_DEPLOY_PHASES = ['Pending', 'Canary', 'RollingOut', 'Paused', 'Succeeded', 'Failed'] as const;
+
+export function deploymentPhaseLabel(deployment: Deployment, locale: Locale = 'zh-CN'): string {
   const phase = deployment.status?.phase;
-  const labels: Record<string, string> = {
-    Pending: '待开始',
-    Canary: '金丝雀',
-    RollingOut: '滚动中',
-    Paused: '已暂停',
-    Succeeded: '成功',
-    Failed: '失败',
-  };
-  return phase ? (labels[phase] ?? phase) : '未开始';
+  if (!phase) return translate(locale, 'deploy.phase.none');
+  // 后端新出现的 phase 原样展示，绝不把消息 key 露到界面上。
+  return (KNOWN_DEPLOY_PHASES as readonly string[]).includes(phase)
+    ? translate(locale, `deploy.phase.${phase}`)
+    : phase;
 }
 
 /**
