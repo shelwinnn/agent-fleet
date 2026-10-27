@@ -15,6 +15,7 @@
 9. [批次二适配器：四家族接入前确认与切片规划](adapters-batch-2.md)：KM-32 交付记录（本片不改产品代码）——Claude / DeepSeek Harness / Grok / Hermes 的接入前确认 7 项与逐家族证据、受管字段与所有权边界、接入可行性结论（可接入 / 需用户裁决）、切片结构与建议顺序、未验证清单、契约缺口；**§8 为片 A（Grok 适配器，KM-33）的逐家族验收记录**。
 10. [Web UI：路由、状态呈现与契约缺口](web-ui.md)：KM-25 交付记录——`web/` 工程（Svelte + TypeScript + Vite + shadcn-svelte，FR-14.4）、SSE 事件枢纽（`GET /api/v1/events`，FR-14.1/14.2）、FR-14.5 四组状态呈现的落点、本片发现的后端契约缺口与未验证清单。
 11. [部署实机演练记录](deployment-drill.md)：KM-37 交付记录——loopback 全链路实机演练（控制面启动、enroll/mTLS、inventory、期望状态下发、适配器物化、drift 三态、删除即拒证）的真实命令与输出、行为语义说明、未验证清单与演练发现。
+12. [KM-46 agentmanager 接入核查报告](KM-46-agentmanager-接入核查报告.md)：KM-46（T1，Codex 生命周期阶段 1/5）交付记录——agentmanager v1.5.0 固定版本与依赖图、隔离环境（fake npm 替身 + 临时 HOME）编译与运行证据、OS × 架构 × 来源 × 安装方式能力矩阵与逐组合 go/no-go、窄适配层接口草案（供 T4 对齐）、阻塞与未验证清单。
 
 统计断言脚本：[`tools/verify-architecture-stats.py`](tools/verify-architecture-stats.py)（文档级，无外部依赖）：校验 FR 计数（95 条 / P0 94 / P1 1）、§2.8 每行 15 列合计与逐列相加、§18 与附录声明一致、以及"96/70/+26"无现行残留。运行方式：`python3 docs/tools/verify-architecture-stats.py docs/agent-fleet-architecture-v1.1.2.md`。
 
