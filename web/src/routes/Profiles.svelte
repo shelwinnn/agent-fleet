@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
-   * Profiles（spec §24.4）：可编辑的归一化期望状态 + JSON/YAML 预览 + 消费机器。
-   * 渲染预览（GET /profiles/{name}/render?machine=）暴露 DesiredStateInvalid，
-   * 例如 profile 里写未注册家族（zcode）时节点阶段 1 会显式失败——界面如实呈现，
-   * 不为 ZCode 做特例（KM-27 范围决策）。
+   * Profiles：可编辑的归一化期望状态 + JSON/YAML 预览 + 使用该配置档的机器。
+   * 渲染预览不会落库、不产生新版本；引用无法解析时（如未注册的 agent 家族）
+   * 服务端显式报错——界面如实呈现，不做特例。
+   *
+   * 全部文案经 i18n 取值，切换语言立即跟随。
    */
   import type { FleetStore } from '$lib/state/store.svelte.js';
   import { Card, CardContent, CardHeader, CardTitle } from '$lib/components/ui/card/index.js';
@@ -17,8 +18,9 @@
   import { formatRelativeTime, prettyJSON, prettyYAML, shortDigest } from '$lib/state/format.js';
   import { createClock } from '$lib/state/clock.svelte.js';
   import { navigate } from '$lib/state/router.svelte.js';
-  import { describeActionFailure } from '$lib/state/ssh.js';
+  import { failureText, loadErrorText } from '$lib/state/ssh.js';
   import type { RenderPreview } from '$lib/api/types.js';
+  import { t, i18n, formatNumber } from '$lib/i18n/index.js';
 
   interface Props {
     store: FleetStore;
@@ -27,15 +29,21 @@
   let { store, name }: Props = $props();
 
   const clock = createClock(30_000);
+  const loc = $derived(i18n.locale);
   const selected = $derived(store.profiles.find((p) => p.metadata.name === name) ?? null);
   const consumers = $derived(selected ? store.machinesUsingProfile(selected.metadata.name) : []);
+  const loadError = $derived(
+    store.errors.profiles !== undefined
+      ? `${t('profiles.error.load')}${loadErrorText(store.errors.profiles, loc)} ${t('error.loadRetryHint')}`
+      : undefined,
+  );
 
   let renderMachine = $state('');
   let render = $state<RenderPreview | null>(null);
-  let renderError = $state<string | null>(null);
+  let renderError = $state<unknown>(null);
   let renderLoading = $state(false);
   let editText = $state('');
-  let editError = $state<string | null>(null);
+  let editError = $state<{ json?: string; failure?: unknown } | null>(null);
   let saving = $state(false);
 
   $effect(() => {
@@ -44,6 +52,7 @@
       editText = prettyJSON(selected.spec ?? {});
       render = null;
       renderError = null;
+      editError = null;
       renderMachine = consumers[0]?.metadata.name ?? store.machines[0]?.metadata.name ?? '';
     }
   });
@@ -56,7 +65,7 @@
       render = await store.client.renderProfile(selected.metadata.name, renderMachine);
     } catch (err) {
       render = null;
-      renderError = `${describeActionFailure(err).title}：${describeActionFailure(err).detail}`;
+      renderError = err;
     } finally {
       renderLoading = false;
     }
@@ -74,7 +83,7 @@
       });
       await store.afterMutation('profiles', 'machines');
     } catch (err) {
-      editError = err instanceof SyntaxError ? `JSON 解析失败：${err.message}` : describeActionFailure(err).detail;
+      editError = err instanceof SyntaxError ? { json: err.message } : { failure: err };
     } finally {
       saving = false;
     }
@@ -82,13 +91,13 @@
 
   async function remove() {
     if (!selected) return;
-    if (!confirm(`删除 profile ${selected.metadata.name}？引用它的机器将渲染失败（DesiredStateInvalid）。`)) return;
+    if (!confirm(t('profiles.delete.confirm', { name: selected.metadata.name }))) return;
     try {
       await store.client.deleteProfile(selected.metadata.name);
       navigate('/profiles');
       await store.afterMutation('profiles', 'machines');
     } catch (err) {
-      editError = describeActionFailure(err).detail;
+      editError = { failure: err };
     }
   }
 </script>
@@ -96,21 +105,17 @@
 <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
   <Card>
     <CardHeader>
-      <CardTitle class="text-sm">Profiles（{store.profiles.length}）</CardTitle>
-      <p class="text-xs text-muted-foreground">选择一项查看预览、消费机器与渲染结果。</p>
+      <CardTitle class="text-sm">{t('profiles.count', { n: formatNumber(store.profiles.length, loc) })}</CardTitle>
+      <p class="text-xs text-muted-foreground">{t('profiles.subtitle')}</p>
     </CardHeader>
     <CardContent>
-      <AsyncState
-        loading={store.loading.profiles}
-        error={store.errors.profiles}
-        empty={store.profiles.length === 0 ? '还没有 profile。' : undefined}
-      />
+      <AsyncState loading={store.loading.profiles} error={loadError} empty={store.profiles.length === 0 ? t('profiles.empty') : undefined} />
       {#if store.profiles.length > 0}
         <Table.Root>
           <Table.Header>
             <Table.Row>
-              <Table.Head>Name</Table.Head><Table.Head>agents</Table.Head><Table.Head>skills</Table.Head>
-              <Table.Head>消费机器</Table.Head><Table.Head>更新</Table.Head>
+              <Table.Head>{t('profiles.col.name')}</Table.Head><Table.Head>agents</Table.Head><Table.Head>skills</Table.Head>
+              <Table.Head>{t('profiles.col.consumers')}</Table.Head><Table.Head>{t('profiles.col.updated')}</Table.Head>
             </Table.Row>
           </Table.Header>
           <Table.Body>
@@ -121,11 +126,11 @@
                     {profile.metadata.name}
                   </button>
                 </Table.Cell>
-                <Table.Cell class="text-xs">{Object.keys(profile.spec?.agents ?? {}).join('、') || '—'}</Table.Cell>
-                <Table.Cell class="text-xs">{(profile.spec?.skills ?? []).length}</Table.Cell>
-                <Table.Cell class="text-xs">{store.machinesUsingProfile(profile.metadata.name).length}</Table.Cell>
+                <Table.Cell class="text-xs">{Object.keys(profile.spec?.agents ?? {}).join(t('app.listSeparator')) || '—'}</Table.Cell>
+                <Table.Cell class="text-xs">{formatNumber((profile.spec?.skills ?? []).length, loc)}</Table.Cell>
+                <Table.Cell class="text-xs">{formatNumber(store.machinesUsingProfile(profile.metadata.name).length, loc)}</Table.Cell>
                 <Table.Cell class="text-xs text-muted-foreground">
-                  {formatRelativeTime(profile.metadata.creationTimestamp ?? '', clock.now)}
+                  {formatRelativeTime(profile.metadata.creationTimestamp ?? '', clock.now, loc)}
                 </Table.Cell>
               </Table.Row>
             {/each}
@@ -139,17 +144,15 @@
     <div class="grid gap-5">
       <Card>
         <CardHeader>
-          <CardTitle class="text-sm">{selected.metadata.name} · 期望状态</CardTitle>
-          <p class="text-xs text-muted-foreground">
-            spec 可编辑（PUT /api/v1/profiles/{name}）；status 由控制器维护，更新时不接受改写。
-          </p>
+          <CardTitle class="text-sm">{t('profiles.detail.title', { name: selected.metadata.name })}</CardTitle>
+          <p class="text-xs text-muted-foreground">{t('profiles.spec.note')}</p>
         </CardHeader>
         <CardContent class="grid gap-3">
           <Tabs.Root value="json">
             <Tabs.List>
               <Tabs.Trigger value="json">JSON</Tabs.Trigger>
               <Tabs.Trigger value="yaml">YAML</Tabs.Trigger>
-              <Tabs.Trigger value="edit">编辑 spec</Tabs.Trigger>
+              <Tabs.Trigger value="edit">{t('profiles.tab.edit')}</Tabs.Trigger>
             </Tabs.List>
             <Tabs.Content value="json">
               <pre class="max-h-80 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">{prettyJSON(selected.spec ?? {})}</pre>
@@ -159,28 +162,31 @@
             </Tabs.Content>
             <Tabs.Content value="edit">
               <div class="grid gap-2">
-                <Label for="spec-json" class="text-xs">spec（JSON）</Label>
+                <Label for="spec-json" class="text-xs">spec (JSON)</Label>
                 <textarea
                   id="spec-json"
                   class="h-64 w-full rounded-md border bg-background p-2 font-mono text-xs"
                   bind:value={editText}
+                  aria-label="spec (JSON)"
                 ></textarea>
                 {#if editError}
                   <Alert.Root variant="destructive">
-                    <Alert.Title>保存失败</Alert.Title>
-                    <Alert.Description>{editError}</Alert.Description>
+                    <Alert.Title>{t('profiles.saveFailed')}</Alert.Title>
+                    <Alert.Description>
+                      {#if editError.json}{t('profiles.jsonInvalid', { message: editError.json })}{:else if editError.failure}{failureText(editError.failure, i18n.locale)}{/if}
+                    </Alert.Description>
                   </Alert.Root>
                 {/if}
                 <div class="flex gap-2">
-                  <Button size="sm" onclick={save} disabled={saving}>{saving ? '保存中…' : '保存 spec'}</Button>
-                  <Button size="sm" variant="ghost" onclick={remove}>删除 profile</Button>
+                  <Button size="sm" onclick={save} disabled={saving}>{saving ? t('profiles.saving') : t('profiles.save')}</Button>
+                  <Button size="sm" variant="ghost" onclick={remove}>{t('profiles.delete')}</Button>
                 </div>
               </div>
             </Tabs.Content>
           </Tabs.Root>
 
           <div class="text-xs">
-            <span class="text-muted-foreground">消费该 profile 的机器：</span>
+            <span class="text-muted-foreground">{t('profiles.consumers')}: </span>
             {#if consumers.length === 0}
               —
             {:else}
@@ -194,36 +200,34 @@
 
       <Card>
         <CardHeader>
-          <CardTitle class="text-sm">渲染预览（FR-7.4：不落库、不增代）</CardTitle>
+          <CardTitle class="text-sm">{t('profiles.render.title')}</CardTitle>
+          <p class="text-xs text-muted-foreground">{t('profiles.render.note')}</p>
         </CardHeader>
         <CardContent class="grid gap-3">
           <div class="flex flex-wrap items-end gap-2">
             <div class="grid gap-1">
-              <Label for="render-machine" class="text-xs">目标机器</Label>
+              <Label for="render-machine" class="text-xs">{t('profiles.render.machine')}</Label>
               <Input id="render-machine" class="w-56" bind:value={renderMachine} placeholder="machine name" />
             </div>
             <Button size="sm" variant="outline" onclick={runRender} disabled={renderLoading || !renderMachine}>
-              {renderLoading ? '渲染中…' : '渲染'}
+              {renderLoading ? t('profiles.rendering') : t('profiles.render.button')}
             </Button>
           </div>
           {#if renderError}
             <Alert.Root variant="destructive">
-              <Alert.Title>渲染失败（DesiredStateInvalid）</Alert.Title>
-              <Alert.Description>{renderError}</Alert.Description>
+              <Alert.Title>{t('profiles.render.failed')}</Alert.Title>
+              <Alert.Description>{failureText(renderError, i18n.locale)}</Alert.Description>
             </Alert.Root>
           {/if}
           {#if render}
             <div class="grid gap-1 text-xs">
-              <div>digest：<span class="font-mono">{shortDigest(render.digest, 12)}</span></div>
-              <div>canonicalizationVersion：<span class="font-mono">{render.canonicalizationVersion}</span></div>
-              <div>schemaVersion：<span class="font-mono">{render.desired?.schemaVersion ?? '—'}</span></div>
+              <div>digest: <span class="font-mono">{shortDigest(render.digest, 12)}</span></div>
+              <div>canonicalizationVersion: <span class="font-mono">{render.canonicalizationVersion}</span></div>
+              <div>schemaVersion: <span class="font-mono">{render.desired?.schemaVersion ?? '—'}</span></div>
             </div>
             <pre class="max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 text-xs">{prettyJSON(render.desired ?? {})}</pre>
           {:else if !renderError}
-            <p class="text-xs text-muted-foreground">
-              选择目标机器后点"渲染"：种子中的浮动引用（未解析 Skill、未知 Provider）会在此显式失败，
-              而不是被静默忽略。
-            </p>
+            <p class="text-xs text-muted-foreground">{t('profiles.render.idle')}</p>
           {/if}
         </CardContent>
       </Card>
@@ -231,7 +235,7 @@
   {:else}
     <Card>
       <CardContent class="pt-6 text-sm text-muted-foreground">
-        从左侧选择一个 profile 查看 JSON/YAML 预览、消费机器与渲染结果。
+        {t('profiles.selectPrompt')}
       </CardContent>
     </Card>
   {/if}

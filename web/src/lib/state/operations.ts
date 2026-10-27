@@ -29,23 +29,26 @@ export function isTerminalPhase(phase: OperationPhase): boolean {
   return phase === 'Succeeded' || phase === 'Failed';
 }
 
-/** 相位语义提示（UI 必须说明"它会阻塞什么/如何处置"）。Machine Detail 专用，随其页面迁移再本地化。 */
-export const PHASE_NOTES: Record<OperationPhase, string> = {
-  Pending: '已创建但尚未被节点取得执行权；控制面互斥已持有，新的变更类操作会被拒绝。',
-  Running: '节点正在执行（13 阶段流水线）；此时取消需节点确认停止。',
-  AwaitingConfirmation: '计划已产出、等待操作者确认；节点不持有执行权，但控制面互斥仍持有（§9.3）。',
-  CancelRequested: '已投递取消请求，等待节点确认停止；节点不可达时保持本相位，服务端不单方面置 Cancelled。',
-  Succeeded: '终态。',
-  Failed: '终态；失败原因与门禁证据见证据列。',
-  Unknown:
-    '节点结果未知（控制面重启或节点掉线）。它不是终态：仍占用机器级互斥，且不得由系统自动夺锁，需节点重报最终结果，或由操作者显式取消/跳过（路径 C）。',
-};
+/** 相位说明（UI 必须说明"它会阻塞什么/如何处置"）。Machine Detail 提示用。 */
+export function phaseNote(phase: OperationPhase, locale: Locale = 'zh-CN'): string {
+  return (UNRESOLVED_PHASES.includes(phase) || phase === 'Succeeded' || phase === 'Failed')
+    ? translate(locale, `ops.note.${phase}`)
+    : '';
+}
 
-export const MODIFIER_NOTES: Record<string, string> = {
-  Superseded: '迟到成功：执行完成时该机期望代已前进，本次结果不再代表当前代（FR-9.10）。不满足"操作成功"门禁。',
-  Cancelled: '节点确认停止后的取消终态。',
-  Skipped: '操作者显式跳过：立即释放控制面互斥，但节点可能仍在写——跳过不表示节点已停止，且不计入成功。',
-};
+/** 终态修饰的说明（Superseded / Cancelled / Skipped）。 */
+export function modifierNote(modifier: string, locale: Locale = 'zh-CN'): string | undefined {
+  return modifier === 'Superseded' || modifier === 'Cancelled' || modifier === 'Skipped'
+    ? translate(locale, `ops.modifier.${modifier}`)
+    : undefined;
+}
+
+/** 终态修饰的展示名（已知修饰取本地化文案，未知修饰原样保留）。 */
+export function modifierLabel(modifier: string, locale: Locale = 'zh-CN'): string {
+  return modifier === 'Superseded' || modifier === 'Cancelled' || modifier === 'Skipped'
+    ? translate(locale, `ops.modifierLabel.${modifier}`)
+    : modifier;
+}
 
 export type OperationSource = 'manual' | 'automatic';
 
@@ -59,6 +62,7 @@ export interface OperationView {
   phaseLabel: string;
   phaseNote: string;
   terminalModifier?: string;
+  modifierLabel?: string;
   modifierNote?: string;
   /** 自动来源（AutoPlan，readOnly）与手动来源必须可区分（§7.8 第 3 条）。 */
   source: OperationSource;
@@ -111,10 +115,11 @@ export function viewOperation(op: Operation, now: Date = new Date(), locale: Loc
     typeLabel: opType && TYPE_LABELS[opType] ? msg(TYPE_LABELS[opType]) : (opType ?? ''),
     transport: op.spec?.transport,
     phase,
-    phaseLabel: translatePhaseLabel(phase, locale),
-    phaseNote: PHASE_NOTES[phase] ?? '',
+    phaseLabel: operationPhaseLabel(phase, locale),
+    phaseNote: phaseNote(phase, locale),
     terminalModifier: modifier,
-    modifierNote: modifier ? MODIFIER_NOTES[modifier] : undefined,
+    modifierLabel: modifier ? modifierLabel(modifier, locale) : undefined,
+    modifierNote: modifier ? modifierNote(modifier, locale) : undefined,
     source: isAuto ? 'automatic' : 'manual',
     readOnly: op.spec?.readOnly === true,
     isUnresolved: isUnresolvedPhase(phase),
@@ -133,7 +138,8 @@ export function viewOperation(op: Operation, now: Date = new Date(), locale: Loc
   };
 }
 
-function translatePhaseLabel(phase: OperationPhase, locale: Locale): string {
+/** 相位展示名：已知相位按 locale 取文案，后端新出现的相位原样展示（不露消息 key）。 */
+export function operationPhaseLabel(phase: OperationPhase, locale: Locale = 'zh-CN'): string {
   return (UNRESOLVED_PHASES.includes(phase) || phase === 'Succeeded' || phase === 'Failed')
     ? translate(locale, `ops.phase.${phase}`)
     : phase;
@@ -168,49 +174,53 @@ export interface BlockedAction {
 }
 
 /**
- * 未决期间哪些动作被阻塞（FR-1.10/§9.3 第 1 条）以及三个例外端点。
+ * 未决期间哪些动作被阻塞以及三个例外端点。
  * 返回固定清单，供 Machine Detail 直接渲染——不做"按相位猜测"的隐式逻辑。
  */
 export function actionAvailability(
   ops: Operation[],
   now: Date = new Date(),
+  locale: Locale = 'zh-CN',
 ): { blockedBy: { id: string; phase: OperationPhase } | null; actions: BlockedAction[] } {
   const unresolved = unresolvedOperations(ops, now);
   const holder = unresolved[0];
   const busy = Boolean(holder);
   const awaiting = holder?.phase === 'AwaitingConfirmation';
+  const msg = (key: string, params?: Record<string, string | number>) => translate(locale, key, params);
   return {
     blockedBy: holder ? { id: holder.id, phase: holder.phase } : null,
     actions: [
       {
         action: 'reconcile',
-        label: 'Reconcile（含回滚到历史代）',
+        label: msg('ops.action.reconcile'),
         blocked: busy,
-        exception: awaiting ? '携带 confirmPlanDigest 的确认请求可用（同一操作行的状态迁移）' : undefined,
+        exception: awaiting ? msg('ops.exception.reconcileWhileAwaiting') : undefined,
       },
       {
         action: 'rollback',
-        label: 'Rollback（机器级回滚）',
+        label: msg('ops.action.rollback'),
         blocked: busy,
       },
-      { action: 'deployment', label: 'Deployment 派发到该机', blocked: busy, exception: busy ? '该目标保持阻塞，不计入失败也不推进批次（FR-10.7）' : undefined },
-      { action: 'auto-apply', label: '自动 apply', blocked: busy, exception: busy ? '存在未决操作的机器不参与自动 apply（§7.8 第 4 条）' : undefined },
-      { action: 'cancel', label: '取消该操作', blocked: !busy, exception: busy ? '互斥例外端点之一（§4.3 第 6 条）' : undefined },
-      { action: 'skip', label: '跳过该操作（须填原因）', blocked: !busy, exception: busy ? '互斥例外端点之一；留审计、不计入成功' : undefined },
+      { action: 'deployment', label: msg('ops.action.deployment'), blocked: busy, exception: busy ? msg('ops.exception.deploymentWhileBusy') : undefined },
+      { action: 'auto-apply', label: msg('ops.action.autoApply'), blocked: busy, exception: busy ? msg('ops.exception.autoApplyWhileBusy') : undefined },
+      { action: 'cancel', label: msg('ops.action.cancel'), blocked: !busy, exception: busy ? msg('ops.exception.cancelWhileBusy') : undefined },
+      { action: 'skip', label: msg('ops.action.skip'), blocked: !busy, exception: busy ? msg('ops.exception.skipWhileBusy') : undefined },
       {
         action: 'confirm',
-        label: '确认计划',
+        label: msg('ops.action.confirm'),
         blocked: !awaiting,
-        exception: awaiting ? '互斥例外端点之一；确认不等于计划仍有效（apply 会重算并比对基线）' : undefined,
+        exception: awaiting ? msg('ops.exception.confirmWhileAwaiting') : undefined,
       },
     ],
   };
 }
 
-/** 跳过的后果说明（§9.6 路径 C；UI 必须显式标出，不允许静默跳过）。 */
-export const SKIP_CONSEQUENCES =
-  '跳过会立即释放控制面互斥，但**不表示节点已停止**：节点可能仍在写，目标实际状态不变，且本次不计入成功。操作者、时间、目标与原因会写入审计。';
+/** 跳过的后果说明（UI 必须显式标出，不允许静默跳过）。 */
+export function skipConsequences(locale: Locale = 'zh-CN'): string {
+  return translate(locale, 'ops.skipConsequences');
+}
 
-/** 取消的后果说明（§9.3 第 5 条）。 */
-export const CANCEL_CONSEQUENCES =
-  '取消需节点确认停止（节点可达时）才离开未决集合；节点不可达时保持"已请求取消"，服务端不会单方面宣告已取消。AwaitingConfirmation 的计划取消直接终态（节点无可中断流水线）。';
+/** 取消的后果说明。 */
+export function cancelConsequences(locale: Locale = 'zh-CN'): string {
+  return translate(locale, 'ops.cancelConsequences');
+}

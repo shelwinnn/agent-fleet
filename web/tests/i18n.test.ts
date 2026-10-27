@@ -1,6 +1,7 @@
 /**
- * i18n 基础能力（KM-43）：首次语言、切换即时性、动态内容跟随、
- * 本地化格式化规则与缺失翻译的回退策略。
+ * i18n 基础能力（KM-43）与全页面迁移（KM-44）：首次语言、切换即时性、动态内容
+ * 跟随、本地化格式化规则与缺失翻译的回退策略；外加 KM-44 新增面的双语言证据
+ * （条件标签、策略/回滚文案、等待确认提示、整页 en 渲染）。
  *
  * 本文件是纯 node 环境（消息目录、翻译解析、状态视图、格式化函数）；
  * 需要真实 DOM 的挂载切换与 localStorage 持久化见 i18n-dom.test.ts。
@@ -20,9 +21,15 @@ import {
 } from '../src/lib/i18n/index.js';
 import { formatDuration, formatRelativeTime, formatTime } from '../src/lib/state/format.js';
 import { machineRow } from '../src/lib/state/machines.js';
-import { deploymentPhaseLabel, viewTarget } from '../src/lib/state/deployments.js';
+import { deploymentPhaseLabel, rollbackLabel, strategyLabel, viewTarget } from '../src/lib/state/deployments.js';
 import { viewOperation } from '../src/lib/state/operations.js';
+import { allConditionSummaries } from '../src/lib/state/drift.js';
+import { awaitingConfirmations } from '../src/lib/state/ssh.js';
 import Overview from '../src/routes/Overview.svelte';
+import Machines from '../src/routes/Machines.svelte';
+import MachineDetail from '../src/routes/MachineDetail.svelte';
+import Deployments from '../src/routes/Deployments.svelte';
+import SshInventory from '../src/routes/SshInventory.svelte';
 import type { Deployment, Machine, Operation } from '../src/lib/api/types.js';
 
 const NOW = new Date('2026-09-23T12:00:00Z');
@@ -188,7 +195,149 @@ describe('动态内容跟随所选语言', () => {
     expect(zh).toContain('手动');
     // 两语言都不允许出现消息 key 泄漏（形如 ns.name 的裸 key）
     for (const body of [en, zh]) {
-      expect(body).not.toMatch(/\b(app|nav|overview|machine|drift|target|deploy|ops|time)\.[a-zA-Z]+/);
+      expect(body).not.toMatch(
+        /\b(app|nav|overview|machine|machines|drift|target|deploy|deployments|ops|time|common|error|condition|detail|profiles|skills|ssh|sshinv)\.[a-zA-Z]+/,
+      );
+    }
+  });
+
+  it('Machines 整页 SSR：en 下表头、按钮与空态全部为英文；zh 下为中文', () => {
+    const emptyStore = {
+      loading: {},
+      errors: {},
+      machines: [],
+      deployments: [],
+      profiles: [],
+      skills: [],
+    } as never;
+
+    setLocale('en');
+    const en = render(Machines, { props: { store: emptyStore } }).body;
+    expect(en).toContain('Machines');
+    expect(en).toContain('Add machine');
+    expect(en).toContain('No machines yet');
+    expect(en).toContain('Bootstrap / repair agentd');
+    expect(en).not.toContain('还没有');
+
+    setLocale('zh-CN');
+    const zh = render(Machines, { props: { store: emptyStore } }).body;
+    expect(zh).toContain('机器');
+    expect(zh).toContain('添加机器');
+    expect(zh).toContain('还没有机器');
+    expect(zh).toContain('纳管 / 修复 agentd');
+    // 两语言都不允许裸 key 泄漏。
+    for (const body of [en, zh]) {
+      expect(body).not.toMatch(/\b(app|nav|machines|common|error)\.[a-zA-Z]+/);
+    }
+  });
+
+  it('六条件的展示名随 locale；缺失的条件说明同样本地化', () => {
+    const conditions = [
+      { type: 'SSHReachable' as const, status: 'True' as const, lastTransitionTime: '2026-09-23T11:00:00Z' },
+      { type: 'AgentConnected' as const, status: 'False' as const, lastTransitionTime: '2026-09-23T11:00:00Z' },
+    ];
+    const zh = allConditionSummaries(conditions);
+    expect(zh.map((c) => c.label)).toEqual(['SSH 可达: True', 'agentd 在线: False', 'inventory 就绪: Unknown', '漂移: Unknown', '收敛: Unknown', '降级: Unknown']);
+    expect(zh[2].message).toBe('该条件尚未记录');
+
+    const en = allConditionSummaries(conditions, 'en');
+    expect(en[0].label).toBe('SSH reachable: True');
+    expect(en[1].label).toBe('agentd connected: False');
+    expect(en[2].message).toBe('This condition has not been recorded');
+  });
+
+  it('发布策略与回滚说明随 locale', () => {
+    const dep: Deployment = {
+      metadata: { name: 'rollout-2' },
+      spec: { rollbackOf: 14, targetGeneration: 12, strategy: { canary: 1, batchSize: 2, pauseOnFailure: true } },
+    };
+    expect(strategyLabel(dep)).toBe('金丝雀 1 台 · 批大小 2 · 失败即暂停');
+    expect(strategyLabel(dep, 'en')).toBe('canary 1 · batch size 2 · pause on failure');
+    expect(rollbackLabel(dep)).toContain('回滚自 gen14 至 gen12 的内容');
+    expect(rollbackLabel(dep, 'en')).toContain('Rolls back content from gen14 to gen12');
+    expect(rollbackLabel({ metadata: { name: 'x' } }, 'en')).toBeNull();
+  });
+
+  it('等待确认提示随 locale：剩余时长与基线提示都在当前语言', () => {
+    const op: Operation = {
+      metadata: { name: 'op-1', creationTimestamp: '2026-09-23T11:00:00Z' },
+      spec: { machine: 'ws-1', type: 'Reconcile', planDigest: 'sha256:plan' },
+      status: { phase: 'AwaitingConfirmation', planExpiresAt: '2026-09-23T12:10:00Z' },
+    };
+    const zh = awaitingConfirmations([op], NOW);
+    expect(zh[0].remainingText).toBe('10 分 0 秒');
+    expect(zh[0].baselineNotice).toContain('确认只表示');
+
+    const en = awaitingConfirmations([op], NOW, 'en');
+    expect(en[0].remainingText).toBe('10 min 0 sec');
+    expect(en[0].baselineNotice).toContain('Confirming only approves this exact plan');
+  });
+
+  it('Machine Detail / Deployments / SSH Inventory 整页 SSR：en 下区块、表头与说明全部为英文', () => {
+    const driftedMachine: Machine = {
+      metadata: { name: 'ws-1', creationTimestamp: '2026-09-23T08:00:00Z' },
+      spec: { managementMode: 'ssh' },
+      status: {
+        conditions: [
+          { type: 'Drifted', status: 'True', lastTransitionTime: '2026-09-23T09:00:00Z' },
+          { type: 'Reconciled', status: 'True', lastTransitionTime: '2026-09-23T09:00:00Z' },
+        ],
+        os: 'linux',
+        arch: 'amd64',
+        desiredGeneration: 2,
+        observedGeneration: 2,
+      },
+    } as Machine;
+    const store = {
+      loading: {},
+      errors: {},
+      machines: [driftedMachine],
+      deployments: [deploymentFixture],
+      profiles: [],
+      skills: [],
+      providers: [],
+      details: {
+        'ws-1': {
+          machine: driftedMachine,
+          drift: {
+            machine: 'ws-1',
+            drifted: { status: 'True' },
+            reconciled: { status: 'True' },
+            desiredProjectionDigest: 'sha256:aaaa',
+            observedProjectionDigest: 'sha256:bbbb',
+          },
+          operations: [],
+          loading: false,
+        },
+      },
+    } as never;
+
+    setLocale('en');
+    const detail = render(MachineDetail, { props: { store, name: 'ws-1' } }).body;
+    expect(detail).toContain('Connectivity ');
+    expect(detail).toContain('Operation history ');
+    expect(detail).toContain('Drifted');
+    expect(detail).toContain('Field-level diff is not available');
+    expect(detail).toContain('Roll back to content generation (positive integer)');
+    expect(detail).not.toContain('联通与状态');
+
+    const dep = render(Deployments, { props: { store, name: 'rollout-42' } }).body;
+    expect(dep).toContain('Per-machine results');
+    expect(dep).toContain('Target machines');
+    expect(dep).toContain('Rolling out');
+
+    const ssh = render(SshInventory, { props: { store } }).body;
+    expect(ssh).toContain('Machine aliases');
+    expect(ssh).toContain('OpenSSH include preview');
+    expect(ssh).toContain('Export (download .conf)');
+    expect(ssh).not.toContain('机器别名');
+
+    setLocale('zh-CN');
+    // 回到中文后同一页面立即回到中文（响应式语言状态）。
+    const detailZh = render(MachineDetail, { props: { store, name: 'ws-1' } }).body;
+    expect(detailZh).toContain('联通与状态');
+    for (const body of [detail, dep, ssh, detailZh]) {
+      expect(body).not.toMatch(/\b(detail|deployments|sshinv|machines|common|error)\.[a-zA-Z]+/);
     }
   });
 });

@@ -83,6 +83,9 @@ export function parseSSERecord(record: string): ResourceEvent | null {
  * 订阅 `/api/v1/events`。断开后按指数退避自动重连；重连成功时通过
  * `onState('open')` 通知调用方做一次全量重取（事件流无 Last-Event-ID 重放，
  * §23.6 契约细节见 api/openapi/fleet-v1.yaml）。
+ *
+ * `onState` 的 detail 是语言中立的原因码（`http:<status>` / `content-type:<type>` /
+ * `server-closed` / ''），由 UI 层按当前语言渲染；本模块不产出面向用户的文案。
  */
 export function subscribeEvents(handlers: SubscribeHandlers, opts: SSEOptions = {}): Subscription {
   const baseUrl = (opts.baseUrl ?? '').replace(/\/$/, '');
@@ -102,7 +105,7 @@ export function subscribeEvents(handlers: SubscribeHandlers, opts: SSEOptions = 
     attempt += 1;
     const backoff = Math.min(maxBackoff, 500 * 2 ** (attempt - 1));
     const jitter = backoff * (0.5 + random() * 0.5);
-    setState('reconnecting', `${why}；${Math.round(jitter)}ms 后重连`);
+    setState('reconnecting', why);
     timer = setTimeout(() => void connect(), jitter);
   };
 
@@ -119,12 +122,12 @@ export function subscribeEvents(handlers: SubscribeHandlers, opts: SSEOptions = 
         signal: controller.signal,
       });
       if (!resp.ok || !resp.body) {
-        scheduleReconnect(`HTTP ${resp.status}`);
+        scheduleReconnect(`http:${resp.status}`);
         return;
       }
       const contentType = resp.headers.get('Content-Type') ?? '';
       if (!contentType.includes('text/event-stream')) {
-        scheduleReconnect(`意外的 Content-Type: ${contentType}`);
+        scheduleReconnect(`content-type:${contentType}`);
         return;
       }
       attempt = 0;
@@ -143,10 +146,11 @@ export function subscribeEvents(handlers: SubscribeHandlers, opts: SSEOptions = 
           if (ev) handlers.onEvent(ev);
         }
       }
-      if (!closed) scheduleReconnect('服务端关闭了事件流');
+      if (!closed) scheduleReconnect('server-closed');
     } catch (err) {
       if (closed) return;
-      scheduleReconnect(err instanceof Error ? err.message : String(err));
+      // 网络层异常不透出原始 message（多为英文异常文本）；UI 层按未知网络原因呈现。
+      scheduleReconnect('');
     }
   };
 

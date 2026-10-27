@@ -21,6 +21,7 @@
   import { viewOperations } from '$lib/state/operations.js';
   import { formatRelativeTime, shortDigest } from '$lib/state/format.js';
   import { t, i18n, formatNumber } from '$lib/i18n/index.js';
+  import { loadErrorText } from '$lib/state/ssh.js';
   import { createClock } from '$lib/state/clock.svelte.js';
   import { navigate } from '$lib/state/router.svelte.js';
 
@@ -39,6 +40,16 @@
   const rows = $derived(machineRows(store.machines, clock.now, loc));
   const stats = $derived(overviewStats(store.machines, store.deployments));
   const attention = $derived(rows.filter((r) => r.needsAttention));
+  const machinesLoadError = $derived(
+    store.errors.machines !== undefined
+      ? `${t('machines.error.load')}${loadErrorText(store.errors.machines, loc)} ${t('error.loadRetryHint')}`
+      : undefined,
+  );
+  const deploymentsLoadError = $derived(
+    store.errors.deployments !== undefined
+      ? `${t('deployments.error.load')}${loadErrorText(store.errors.deployments, loc)} ${t('error.loadRetryHint')}`
+      : undefined,
+  );
   const recentDeployments = $derived(
     [...store.deployments]
       .sort((a, b) =>
@@ -64,7 +75,7 @@
     {
       title: t('overview.card.activeDeployments'),
       value: stats.activeDeployments,
-      hint: 'Pending/Canary/RollingOut/Paused',
+      hint: [t('deploy.phase.Pending'), t('deploy.phase.Canary'), t('deploy.phase.RollingOut'), t('deploy.phase.Paused')].join('/'),
     },
   ]);
 </script>
@@ -94,7 +105,7 @@
     <CardContent>
       <AsyncState
         loading={store.loading.machines}
-        error={store.errors.machines}
+        error={machinesLoadError}
         empty={attention.length === 0 ? t('overview.attention.empty') : undefined}
       />
       {#if attention.length > 0}
@@ -147,7 +158,7 @@
     <CardContent>
       <AsyncState
         loading={store.loading.deployments}
-        error={store.errors.deployments}
+        error={deploymentsLoadError}
         empty={recentDeployments.length === 0 ? t('overview.deployments.empty') : undefined}
       />
       {#if recentDeployments.length > 0}
@@ -239,7 +250,7 @@
                 </Table.Cell>
                 <Table.Cell><StateBadge tone={op.tone} label={op.phaseLabel} /></Table.Cell>
                 <Table.Cell class="text-xs">
-                  {op.terminalModifier ?? '—'}
+                  {op.modifierLabel ?? '—'}
                 </Table.Cell>
                 <Table.Cell class="text-xs text-muted-foreground">
                   {formatRelativeTime(op.finishedAt ?? op.createdAt ?? '', clock.now, loc)}

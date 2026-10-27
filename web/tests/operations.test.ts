@@ -1,11 +1,14 @@
 /**
- * 未决操作与阻塞语义（FR-1.10、§4.3、§9.3 第 5 条）。
+ * 未决操作与阻塞语义（三态呈现、未决集合、动作可用性与后果说明）。
  */
 import { describe, expect, it } from 'vitest';
 import {
   actionAvailability,
   isUnresolvedPhase,
-  SKIP_CONSEQUENCES,
+  modifierNote,
+  operationPhaseLabel,
+  phaseNote,
+  skipConsequences,
   unresolvedOperations,
   unresolvedRef,
   viewOperation,
@@ -34,11 +37,14 @@ describe('操作相位呈现', () => {
     expect(isUnresolvedPhase('Failed')).toBe(false);
   });
 
-  it('带修饰的成功不计入成功（Skipped/Superseded）', () => {
+  it('带修饰的成功不计入成功（Skipped/Superseded），修饰说明可本地化', () => {
     const skipped = viewOperation(op('Succeeded', { status: { phase: 'Succeeded', terminalModifier: 'Skipped' } }), NOW);
     expect(skipped.countsAsSuccess).toBe(false);
     expect(skipped.tone).toBe('warn');
-    expect(skipped.modifierNote).toContain('节点可能仍在写');
+    // 跳过的说明必须讲清风险：机器可能仍在写入、不计入成功。
+    expect(skipped.modifierNote).toContain('可能仍在写入');
+    expect(skipped.modifierNote).toContain('不计入成功');
+    expect(modifierNote('Skipped', 'en')).toContain('may still be writing');
 
     const plain = viewOperation(op('Succeeded'), NOW);
     expect(plain.countsAsSuccess).toBe(true);
@@ -109,8 +115,33 @@ describe('未决操作与阻塞', () => {
     expect(unresolvedOperations(ops, NOW).map((o) => o.id)).toEqual(['op-2']);
   });
 
-  it('跳过后果必须写明"不表示节点已停止"', () => {
-    expect(SKIP_CONSEQUENCES).toContain('不表示节点已停止');
-    expect(SKIP_CONSEQUENCES).toContain('不计入成功');
+  it('跳过后果必须写明"不代表机器已停止"且不假装成功（两语言）', () => {
+    const zh = skipConsequences();
+    expect(zh).toContain('不代表机器已停止');
+    expect(zh).toContain('不计入成功');
+    expect(zh).toContain('审计');
+    const en = skipConsequences('en');
+    expect(en).toContain('does not mean the machine has stopped');
+    expect(en).toContain('does not count as success');
+  });
+
+  it('相位与修饰的说明随语言：未知相位要讲清锁仍被占用与可采取的行动', () => {
+    const zhUnknown = phaseNote('Unknown');
+    expect(zhUnknown).toContain('未知');
+    expect(zhUnknown).toContain('机器锁');
+    expect(phaseNote('Unknown', 'en')).toContain('lock is still held');
+    // 后端新出现的相位没有说明，也不得编造。
+    expect(phaseNote('BrandNewPhase' as OperationPhase)).toBe('');
+    expect(operationPhaseLabel('BrandNewPhase' as OperationPhase)).toBe('BrandNewPhase');
+  });
+
+  it('动作清单的标签与例外说明随语言（zh 默认 / en）', () => {
+    const busy = actionAvailability([op('Unknown')], NOW);
+    const reconcile = busy.actions.find((a) => a.action === 'reconcile')!;
+    expect(reconcile.label).toBe('发起收敛');
+    expect(busy.actions.find((a) => a.action === 'deployment')!.exception).toContain('不计入失败');
+    const enBusy = actionAvailability([op('AwaitingConfirmation')], NOW, 'en');
+    expect(enBusy.actions.find((a) => a.action === 'reconcile')!.label).toBe('Reconcile');
+    expect(enBusy.actions.find((a) => a.action === 'confirm')!.exception).toContain('re-checked at execution');
   });
 });
