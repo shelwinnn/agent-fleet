@@ -1,6 +1,7 @@
 // Package testenv 构建 KM-46 隔离验证环境：临时 HOME、受控 npm 注册表替身、
-// fake npm 可执行与两个互不干扰的全局前缀。仅供 lifecycle 的单元测试与
-// cmd/agentmanager-verify 验证程序使用，不得在生产路径引用。
+// fake npm 可执行与两个互不干扰的全局前缀。仅供 lifecycle 的单元测试、
+// cmd/agentmanager-verify 验证程序与 internal/upstream（KM-48 受控版本源
+// 测试）使用，不得在生产路径引用。
 //
 // 替身语义只覆盖上游 agentmanager 实际调用的 npm 子命令（install/update/
 // uninstall/list/view），并支持注入 list/view/install 失败；包内 package.json
