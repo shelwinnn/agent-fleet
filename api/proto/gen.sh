@@ -11,7 +11,7 @@
 # 可用的环境执行本脚本会经 --go-grpc_out 再生成并覆盖该文件，以插件输出为准。
 set -euo pipefail
 
-cd "$(dirname "$0")/.." # api/proto
+cd "$(dirname "$0")" # api/proto（脚本与 fleet/v1/ 同级）
 
 PROTO_FILES=(fleet/v1/*.proto)
 

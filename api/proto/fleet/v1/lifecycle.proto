@@ -1,0 +1,109 @@
+// lifecycle.proto — 生命周期操作契约（KM-47；依据
+// docs/superpowers/specs/2026-10-27-codex-lifecycle-spec.md）。
+// T4 执行引擎（节点侧）与 T5 前端（经 OpenAPI 同构字段）共同以本契约为准。
+// 生成代码入库；再生成方式见 api/proto/gen.sh。
+//
+// 语义红线（与 internal/domain/lifecycle.go 的域模型一一对应，字段取值以域模型
+// 常量为权威）：
+//   - 生命周期操作仅变更程序本体；本契约不存在任何触碰 Codex 用户数据的字段
+//     或路径。
+//   - Install/Upgrade 的 version 是创建操作时固定的精确版本（x.y.z，至多带一个 -prerelease 或构建元数据后缀）；
+//     执行期间上游出现新版本不改变本次目标。Uninstall/CheckUpdate 不得携带版本。
+//   - 逐目标状态机：pending|running|succeeded|failed|not_executed|unknown。
+//     not_executed（提交前离线）与 unknown（结果丢失）没有出边：目标上线后
+//     不自动执行旧意图；未知不计成功、不自动重试，只能经新操作离开。
+//   - 仅确定失败（failed）的目标可重试；重试操作经 retry_of 关联原操作，
+//     且类型与固定版本必须与原操作一致（改意图必须新建操作）。
+//   - 幂等：服务端按 idempotency_key get-or-create；重复提交复用同一操作。
+//   - 能力矩阵（KM-46 §7）：capability_state 快照进目标；blocked 组合在创建时
+//     拒绝，unverified 组合执行前由引擎拒绝，未验证不标支持。
+syntax = "proto3";
+
+package fleet.v1;
+
+option go_package = "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1;fleetv1";
+
+// LifecycleTarget 是生命周期操作的最小目标身份：主机、OS 环境、受管用户、
+// 明确安装实例。同一主机的 Windows 原生与 WSL 以不同 env 区分（env 空 = native）。
+// method+package 是安装来源身份：卸载必须按已识别来源执行，来源未知在创建时
+// 即被拒绝。
+message LifecycleTarget {
+  string machine_id = 1;
+  string env = 2;     // 空 = native；"wsl:<distro>" 等，归一化后非空
+  string user = 3;
+  string agent = 4;   // 如 "codex"
+  string method = 5;  // 安装方式/来源（能力矩阵合法取值：npm|brew|…，binary 已阻塞）
+  string package = 6; // 如 "@openai/codex"
+  // 创建时从机器台账取得并快照的平台事实（不参与身份），供能力判定与审计。
+  string os = 7;
+  string arch = 8;
+  // 创建时能力矩阵判定快照：supported | unverified | blocked（unverified 缺省）。
+  string capability_state = 9;
+  string capability_reason = 10;
+}
+
+// LifecycleEvidence 是逐目标证据（不含秘密：message 限长脱敏）。
+// observed_version 是操作后重新发现并独立核验的实测版本——上游命令退出码与
+// 返回值都不单独采信；卸载成功时 observed_version 为空且实例确已消失。
+message LifecycleEvidence {
+  string observed_version = 1;
+  string executable_path = 2;
+  string method = 3;
+  int64 inventory_seq = 4;
+  string message = 5;      // 限长脱敏（≤2000 字符）
+  int64 recorded_at_unix = 6;
+}
+
+// LifecycleTargetResult 是一个目标的持久化状态（spec：至少四态各带原因）。
+// reason 取值（域模型白名单）：
+//   succeeded: verified-present | verified-absent
+//   failed:    version-mismatch | discovery-failed | op-failed | unsupported-combo
+//   not_executed: target-offline | dispatch-failed
+//   unknown:   result-lost | node-disconnected | timeout-no-result
+//   pending/running 不带 reason。
+message LifecycleTargetResult {
+  LifecycleTarget target = 1;
+  string state = 2;   // pending|running|succeeded|failed|not_executed|unknown
+  string reason = 3;
+  string message = 4; // 限长脱敏
+  LifecycleEvidence evidence = 5;
+}
+
+// LifecycleOperationSpec 是操作的不可变规格（幂等键 + 固定版本 + 目标集）。
+message LifecycleOperationSpec {
+  string op_id = 1;
+  // 操作类型：Install | Upgrade | Uninstall | CheckUpdate（CheckUpdate 只读上游）。
+  string type = 2;
+  // 幂等键（1-128 字符，调用方生成，建议 UUID）：重复提交复用同一操作；
+  // 同键不同内容被服务端判为冲突。
+  string idempotency_key = 3;
+  // Install/Upgrade：创建时固定的精确版本；其余类型必须为空。
+  string version = 4;
+  repeated LifecycleTarget targets = 5;
+  string created_by = 6;
+}
+
+// ExecuteLifecycleOperation 是控制面 → 节点的生命周期执行指令（ServerToAgent
+// oneof 新增分支）。操作是确认后的意图：confirmed_at 为空的操作不得派发。
+message ExecuteLifecycleOperation {
+  LifecycleOperationSpec spec = 1;
+  // 重试操作必须为 true：节点必须先重新发现目标实际状态再执行；发现影响
+  // 变化（实际状态与固定版本意图前提不一致）时上报 needs_reconfirmation，
+  // 由操作者重新确认后才可继续。
+  bool rediscovery_required = 2;
+  // 单操作超时上限（unix 秒；沿 context 传播，上限 10 分钟——窄适配层纪律）。
+  int64 deadline_unix = 3;
+}
+
+// LifecycleOperationResult 是节点 → 控制面的逐目标结果上报（AgentToServer
+// oneof 新增分支）。服务端按 op_id + idempotency_key 幂等接收；未知不计成功。
+message LifecycleOperationResult {
+  string op_id = 1;
+  string idempotency_key = 2;
+  repeated LifecycleTargetResult results = 3;
+  // 重试前重发现发现影响变化时置位；控制面标记需重新确认，操作者重新确认
+  // 前该操作不得继续派发。
+  bool needs_reconfirmation = 4;
+  string reconfirm_reason = 5;
+  int64 finished_at_unix = 6;
+}
