@@ -18,6 +18,10 @@
 # 以及 §23.3 的 skills/{id}/resolve、skills/{id}/revisions 与 §8.1 的 deployments
 # pause/resume（后续切片），当前未注册：命中 catch-all 返回 404 NotFound。
 # 本文件不为其编造契约。
+# 【KM-48 新增（T3 上游版本发现）】POST /api/v1/agents/{agent}/upstream-versions/check
+# 与 schemas 前缀 Upstream*。对齐状态：T2（KM-47）正并行落地生命周期 proto/OpenAPI
+# 契约；本端点先挂本文件，T2 契约落地评审时由 T2 收编或更名（实现只依赖
+# internal/upstream 的窄接口，迁移不动实现）。
 # KM-47 新增生命周期契约：显式三态意图文档（GET/PUT
 # /api/v1/machines/{name}/lifecycle/desired）、幂等操作创建与查询、仅失败目标
 # 重试（retryOf 追溯链）、能力矩阵查询（/api/v1/lifecycle/*）。节点通道的对应
@@ -50,6 +54,7 @@ tags:
   - name: skills
   - name: providers
   - name: deployments
+  - name: agents
   - name: events
 paths:
   /healthz:
@@ -710,6 +715,31 @@ paths:
           description: 已删除
         "404": { $ref: "#/components/responses/Error" }
 
+  # ===== 上游版本发现（KM-48，T3；独立于 drift）=====
+  # 「检查更新」一次点击：逐安装来源返回上游可用版本及其适用性。
+  # 只有 status=ok 携带版本；failed 带 reason + 最近一次成功缓存（unknown ≠ latest）；
+  # unsupported 是能力声明（来源存在但上游不可查，如实展示而非隐藏）。
+  /api/v1/agents/{agent}/upstream-versions/check:
+    parameters:
+      - $ref: "#/components/parameters/AgentName"
+    post:
+      tags: [agents]
+      summary: 检查上游可用版本（逐来源，含失败记录与缓存回退）
+      description: |
+        对该 agent 的全部已声明安装来源（codex：npm / brew / binary）各做一次
+        上游注册表查询。查询只读上游，不变更任何目标环境；外部查询带超时与
+        有限重试。响应里的 lastSuccess 仅在查询失败时出现，携带的是最近一次
+        成功缓存及其取得时间——前端据此把「未知」与「最新」区分开。
+      responses:
+        "200":
+          description: 逐来源检查报告（查询失败也是报告的一部分，不映射 HTTP 错误）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamVersionReport"
+        "404": { $ref: "#/components/responses/Error" }
+        "501": { $ref: "#/components/responses/Error" }
+
   # ===== SSE（KM-25；FR-14.1/FR-14.2，事件格式见 §23.6）=====
   /api/v1/machines/{name}/lifecycle/desired:
     get:
@@ -903,6 +933,14 @@ components:
         环境变量）；回环监听且未配置时不校验。浏览器端 EventSource 不能带头，
         UI 对 `GET /api/v1/events` 使用 fetch 流式读取以携带该头。
   parameters:
+    AgentName:
+      name: agent
+      in: path
+      required: true
+      description: Fleet 侧 agent 标识（当前仅 codex）
+      schema:
+        type: string
+        enum: [codex]
     ResourceName:
       name: name
       in: path
@@ -1300,6 +1338,90 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AgentProfile"
+    # ===== 上游版本发现（KM-48，T3）=====
+    # 与 internal/upstream 的 Report/SourceResult/Version 一一对应；
+    # 字段语义以该包注释为准（能力声明源自 docs/KM-46-agentmanager-接入核查报告.md §5）。
+    UpstreamVersionReport:
+      type: object
+      required: [agent, checkedAt, sources]
+      properties:
+        agent: { type: string }
+        checkedAt: { type: string, format: date-time }
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpstreamSourceResult"
+    UpstreamSourceResult:
+      type: object
+      description: 一个安装来源的一次检查记录。只有 status=ok 携带 version/queriedAt。
+      required: [agentId, method, channel, platforms, status, attempts]
+      properties:
+        agentId: { type: string }
+        method: { type: string, description: 安装方式（npm/brew/binary）}
+        package: { type: string, description: 该来源的包名（binary 无包名时缺省）}
+        channel: { type: string, description: 版本渠道；上游只查默认 latest }
+        platforms:
+          type: array
+          description: 适用平台与证据（T1 能力矩阵；未验证不标支持）
+          items:
+            $ref: "#/components/schemas/UpstreamPlatformApplicability"
+        status: { type: string, enum: [ok, failed, unsupported] }
+        version:
+          allOf:
+            - $ref: "#/components/schemas/UpstreamVersion"
+          description: 仅 status=ok 时出现；raw 为来源原样返回值
+        queriedAt:
+          type: string
+          format: date-time
+          description: 本次成功查询的完成时间；仅 status=ok 时出现
+        attempts: { type: integer, description: 实际发起的查询次数；unsupported 为 0 }
+        failure:
+          allOf:
+            - $ref: "#/components/schemas/UpstreamFailure"
+          description: failed/unsupported 时出现
+        lastSuccess:
+          allOf:
+            - $ref: "#/components/schemas/UpstreamCachedVersion"
+          description: |
+            仅 failed 时可能出现：最近一次成功缓存及其取得时间。缺省表示该来源
+            从未成功查询过——前端必须显示「未知」，不得显示「最新」。
+    UpstreamVersion:
+      type: object
+      description: |
+        上游版本及其解释方式。不假定 SemVer：scheme 显式标注解释方式，
+        调用方不得自行猜测或静默降级；source_rule 按来源规则可比较。
+      required: [raw, scheme]
+      properties:
+        raw: { type: string }
+        scheme: { type: string, enum: [semver, source_rule, unparsed] }
+    UpstreamFailure:
+      type: object
+      description: 失败记录；实际尝试次数见 UpstreamSourceResult.attempts（单一事实来源）
+      required: [reason, detail]
+      properties:
+        reason:
+          type: string
+          enum: [query_failed, timeout, canceled, source_unavailable,
+                 version_parse_failed, method_unsupported, channel_unsupported]
+        detail: { type: string, description: 失败细节（不含敏感值）}
+    UpstreamCachedVersion:
+      type: object
+      required: [version, queriedAt]
+      properties:
+        version:
+          $ref: "#/components/schemas/UpstreamVersion"
+        queriedAt: { type: string, format: date-time }
+    UpstreamPlatformApplicability:
+      type: object
+      description: 某来源在一个 OS×架构组合上的适用性与证据
+      required: [platform, arch, status, evidence]
+      properties:
+        platform: { type: string, description: darwin/linux/windows }
+        arch: { type: string, description: amd64/arm64 }
+        status:
+          type: string
+          enum: [verified_isolated, unverified, blocked_pending_windows, blocked_upstream]
+        evidence: { type: string, description: 判定依据摘要（报告章节或证据编号）}
     LifecycleIntent:
       type: string
       description: 显式三态意图（KM-47）。没有"未指定"值：文档中未出现的 agent 不携带任何意图，尤其不得解释为 absent。

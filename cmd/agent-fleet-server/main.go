@@ -27,6 +27,7 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/server/sse"
 	"github.com/shelwinnn/agent-fleet/internal/sshtransport"
 	"github.com/shelwinnn/agent-fleet/internal/store/sqlite"
+	"github.com/shelwinnn/agent-fleet/internal/upstream"
 )
 
 func main() {
@@ -234,6 +235,9 @@ func run() error {
 		SPADir:            *spaDir,
 		Events:            events.Handler(),
 		DeploymentTargets: targetStore.List,
+		// 上游版本发现（KM-48）：只读上游注册表（npm view / brew info），
+		// 不触碰目标环境；查询失败在报告内逐源上报，不影响服务启动。
+		UpstreamDiscovery: upstream.New(upstream.Config{}, upstream.NewCommandQuerier()),
 		EnrollTokens:      &tokenIssuer{tokens: tokens, ttl: *tokenTTL},
 		OnMachineDelete: func(ctx context.Context, name string) error {
 			return ctrl.OnMachineDeleted(ctx, name)

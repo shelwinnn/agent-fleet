@@ -48,6 +48,9 @@ type Config struct {
 	// 非 nil 时，GET /api/v1/deployments 与 /{name} 会把结果并入 status.targets
 	// （§6.1 已规定的字段；FR-14.5 第 3 组的数据来源）。
 	DeploymentTargets func(ctx context.Context, deployment string) ([]domain.DeploymentTargetStatus, error)
+	// UpstreamDiscovery 是上游版本发现服务（KM-48：POST
+	// /api/v1/agents/{agent}/upstream-versions/check）。nil 时该端点返回 501。
+	UpstreamDiscovery UpstreamDiscoveryAPI
 }
 
 type Server struct {
@@ -65,6 +68,8 @@ type Server struct {
 	deploys       DeploymentAPI
 	schemaVersion string
 	ping          func(ctx context.Context) error
+	// upstreamDiscovery 是上游版本发现服务（KM-48）；nil 时端点返回 501。
+	upstreamDiscovery UpstreamDiscoveryAPI
 }
 
 // New 装配服务器。ping 供 /readyz 探测存储可用性。
@@ -83,6 +88,7 @@ func New(cfg Config, machines domain.MachineRepository, profiles domain.ProfileR
 		skills: skills, providers: providers, deployments: deploys,
 		operations: operations, reconcile: reconcile, deploys: deploymentCtl,
 		schemaVersion: schemaVersion, ping: ping,
+		upstreamDiscovery: cfg.UpstreamDiscovery,
 	}
 }
 
@@ -168,6 +174,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/v1/deployments/{name}", s.auth(deployments.item()))
 	mux.Handle("POST /api/v1/deployments/{name}/rollback", s.auth(http.HandlerFunc(s.handleDeploymentRollback)))
 	mux.Handle("POST /api/v1/deployments/{name}/targets/{machine}/skip", s.auth(http.HandlerFunc(s.handleSkipDeploymentTarget)))
+
+	// 上游版本发现（KM-48，T3）：操作者点一次「检查更新」，逐安装来源返回
+	// 上游可用版本及其适用性；查询失败带原因与最近成功缓存（未知 ≠ 最新）。
+	mux.Handle("POST /api/v1/agents/{agent}/upstream-versions/check", s.auth(http.HandlerFunc(s.handleUpstreamVersionCheck)))
 
 	// catch-all：/api 与探针命名空间未匹配时走 §6.4 错误体（KM-21 核查发现 #3：
 	// 不再回落 net/http 纯文本 "404 page not found"）；其余路径交给静态 SPA
