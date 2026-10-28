@@ -5,6 +5,7 @@ syntax = "proto3";
 package fleet.v1;
 
 import "fleet/v1/state.proto";
+import "fleet/v1/lifecycle.proto"; // KM-47：生命周期操作消息（ExecuteLifecycleOperation 等）
 
 option go_package = "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1;fleetv1";
 
@@ -36,6 +37,8 @@ message AgentToServer {
     OperationProgress operation_progress = 5;
     OperationResult operation_result = 6;
     LogEvent log_event = 7;
+    // KM-47：生命周期操作的逐目标结果上报（语义见 lifecycle.proto）。
+    LifecycleOperationResult lifecycle_operation_result = 8;
   }
 }
 
@@ -49,6 +52,8 @@ message ServerToAgent {
     CancelOperation cancel_operation = 4;
     OperationResultAck operation_result_ack = 5;
     RequestInventory request_inventory = 6;
+    // KM-47：生命周期操作执行指令（确认后的固定版本意图；语义见 lifecycle.proto）。
+    ExecuteLifecycleOperation execute_lifecycle_operation = 7;
   }
 }
 

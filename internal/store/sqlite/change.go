@@ -48,4 +48,7 @@ const (
 	resourceMachines    = "machines"
 	resourceOperations  = "operations"
 	resourceDeployments = "deployments"
+	// KM-47 生命周期模型：意图文档按机器发布（id = machine），操作按操作 id 发布。
+	resourceLifecycleDesired    = "lifecycle-desired"
+	resourceLifecycleOperations = "lifecycle-operations"
 )
