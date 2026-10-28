@@ -66,6 +66,7 @@ const zhCN = {
   'app.backToOverview': '返回总览',
   'app.language': '切换语言',
   'app.listSeparator': '；',
+  'app.labelColon': '：',
 
   // ---- 导航 ----
   'nav.overview': '总览',
@@ -523,6 +524,7 @@ const zhCN = {
   'skills.col.machines': '机器',
   'skills.col.actions': '操作',
   'skills.unresolved': '未解析',
+  'skills.resolve': '解析',
   'skills.resolve.title': '解析功能尚未提供。',
   'skills.metadata': '元数据',
   'skills.specRaw': 'spec（原样）',
@@ -615,6 +617,7 @@ const en: Record<MessageKey, Message> = {
   'app.backToOverview': 'Back to Overview',
   'app.language': 'Switch language',
   'app.listSeparator': '; ',
+  'app.labelColon': ': ',
 
   // ---- Navigation ----
   'nav.overview': 'Overview',
@@ -1112,6 +1115,7 @@ const en: Record<MessageKey, Message> = {
   'skills.col.machines': 'Machines',
   'skills.col.actions': 'Actions',
   'skills.unresolved': 'Unresolved',
+  'skills.resolve': 'Resolve',
   'skills.resolve.title': 'Resolve is not available yet.',
   'skills.metadata': 'Metadata',
   'skills.specRaw': 'spec (as stored)',

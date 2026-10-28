@@ -416,9 +416,9 @@
           {/if}
         </div>
         <div class="grid gap-1 font-mono">
-          <div>desiredProjectionDigest ：{shortDigest(machine.status?.desiredProjectionDigest)}</div>
-          <div>observedProjectionDigest：{shortDigest(machine.status?.observedProjectionDigest)}</div>
-          <div>canonicalizationVersion ：{machine.status?.canonicalizationVersion ?? '—'}</div>
+          <div>desiredProjectionDigest: {shortDigest(machine.status?.desiredProjectionDigest)}</div>
+          <div>observedProjectionDigest: {shortDigest(machine.status?.observedProjectionDigest)}</div>
+          <div>canonicalizationVersion: {machine.status?.canonicalizationVersion ?? '—'}</div>
           <div>{t('detail.desiredRenderDigest')}: {render?.digest ? shortDigest(render.digest) : '—'}</div>
         </div>
         <p class="text-muted-foreground">{t('detail.genBasis')}</p>
@@ -566,7 +566,7 @@
                 {t('detail.awaiting.title', { remaining: item.remainingText, id: item.operation.id })}
               </Alert.Title>
               <Alert.Description>
-                <div>planDigest：<code class="font-mono text-xs">{shortDigest(item.planDigest, 10)}</code></div>
+                <div>planDigest: <code class="font-mono text-xs">{shortDigest(item.planDigest, 10)}</code></div>
                 <div class="mt-1">{item.baselineNotice}</div>
                 <div class="mt-1">{planTimeoutNotice(i18n.locale)}</div>
                 <div class="mt-2 flex gap-2">

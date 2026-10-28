@@ -207,7 +207,7 @@
           <div class="flex flex-wrap items-end gap-2">
             <div class="grid gap-1">
               <Label for="render-machine" class="text-xs">{t('profiles.render.machine')}</Label>
-              <Input id="render-machine" class="w-56" bind:value={renderMachine} placeholder="machine name" />
+              <Input id="render-machine" class="w-56" bind:value={renderMachine} placeholder="ws-1" />
             </div>
             <Button size="sm" variant="outline" onclick={runRender} disabled={renderLoading || !renderMachine}>
               {renderLoading ? t('profiles.rendering') : t('profiles.render.button')}

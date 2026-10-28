@@ -253,7 +253,7 @@
       <Alert.Title>{actionMessage.kind === 'error' ? actionOutcomeTitle(actionMessage.error, i18n.locale) : t(actionMessage.titleKey)}</Alert.Title>
       <Alert.Description>
         {#if actionMessage.kind === 'error'}
-          {t(actionMessage.prefixKey)}：{failureText(actionMessage.error, i18n.locale)}
+          {t(actionMessage.prefixKey)}{t('app.labelColon')}{failureText(actionMessage.error, i18n.locale)}
         {:else}
           {t(actionMessage.key, actionMessage.params)}
         {/if}
