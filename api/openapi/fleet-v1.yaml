@@ -787,15 +787,16 @@ paths:
   /api/v1/lifecycle/operations:
     post:
       tags: [lifecycle]
-      summary: 以幂等键创建生命周期操作（KM-47）
+      summary: 以幂等键创建生命周期操作（KM-47；KM-49 落地编排）
       description: |
         Install / Upgrade / Uninstall / CheckUpdate 的统一创建入口。幂等语义：
-        同一 idempotencyKey 重复提交复用同一操作（响应 duplicate=true，不产生
-        重复变更）；同键不同内容返回 409 IdempotencyConflict。Install/Upgrade
+        同一 idempotencyKey 重复提交复用同一操作（响应 200 + duplicate=true，
+        不产生重复变更）；同键不同内容返回 409 IdempotencyConflict。Install/Upgrade
         必须携带创建时固定的精确版本（拒绝 latest/range，创建后不变）；Uninstall
         不带版本且每个目标必须已识别来源；CheckUpdate 只读上游。目标的
-        OS/架构 × 来源组合被能力矩阵判为 blocked 时创建即拒绝（422）；unverified
-        组合允许创建但记录判定快照，执行前由执行引擎拒绝。
+        OS/架构 × 来源组合被能力矩阵判为 blocked 时创建即拒绝（422 CapabilityBlocked）；
+        unverified 组合允许创建但记录判定快照，执行前由执行引擎拒绝。
+        响应体为 LifecycleOperation 并附顶层 duplicate 布尔字段。
       requestBody:
         required: true
         content:
@@ -804,7 +805,7 @@ paths:
               $ref: "#/components/schemas/LifecycleOperationCreateRequest"
       responses:
         "201":
-          description: 已创建（新操作，含逐目标 pending 状态）
+          description: 已创建（新操作，含逐目标 pending 状态；duplicate=false）
           content:
             application/json:
               schema:
@@ -830,6 +831,29 @@ paths:
       responses:
         "200":
           description: 操作记录（逐目标状态、原因与证据，不含秘密）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleOperation"
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/lifecycle/operations/{opId}/confirm:
+    post:
+      tags: [lifecycle]
+      summary: 确认生命周期操作（KM-49 补全执行编排所需的确认入口）
+      description: |
+        记录操作者确认时刻；未确认（confirmedAt 为空）的操作不派发。
+        影响变化（needsReconfirmation）置位后必须重新确认才能继续——重新确认
+        清除标记并更新确认时刻。同一已批准操作的重试不重复确认（重试创建时
+        继承原确认）。返回确认后的操作。KM-47 契约的补全端点：模型有
+        confirmedAt 字段与执行闸门，本端点是其唯一写入入口（T5 预览确认）。
+      parameters:
+        - name: opId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 已确认（返回确认后的操作记录）
           content:
             application/json:
               schema:
@@ -1611,6 +1635,11 @@ components:
         retryOf:
           type: string
           description: 重试关联的原操作 id（追溯链）；空表示首次创建
+        duplicate:
+          type: boolean
+          description: |
+            POST /lifecycle/operations 响应的伴随字段（KM-49）：true = 同幂等键
+            复用既有操作（HTTP 200）；false/缺省 = 新建（HTTP 201）。GET 响应恒缺省。
     LifecycleOperationCreateRequest:
       type: object
       required: [type, idempotencyKey, targets]

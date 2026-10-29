@@ -9,6 +9,7 @@ import (
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/lifecycle"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/claude"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/dsh"
@@ -108,10 +109,20 @@ func runDaemon(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
 
+	// 生命周期执行宿主（KM-49）：窄适配引擎（npm 通道）+ 生产能力准入
+	//（RegistryPolicy：未验证/阻塞组合执行前拒绝）+ 单 worker 串行 + outbox。
+	lifecycleNode := lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
+		Engines: map[string]lifecycle.Engine{"npm": lifecycle.NewNpmEngine(nil)},
+		Log:     log,
+	})
+	lifecycleExec := newLifecycleExecutor(cfg.MachineID, cfg.DataDir, lifecycleNode, log)
+	lifecycleMsgs := make(chan *fleetv1.LifecycleOperationResult, 32)
+	go lifecycleExec.RunWorker(ctx, lifecycleMsgs)
+
 	log.Info("agentd daemon starting", "server", cfg.Server, "machine_id", cfg.MachineID,
 		"version", agentdVersion, "home", home)
 	for {
-		if err := runStream(ctx, cfg, conn, collector, exec, workerMsgs, log); err != nil {
+		if err := runStream(ctx, cfg, conn, collector, exec, workerMsgs, lifecycleExec, lifecycleMsgs, log); err != nil {
 			log.Warn("connect stream ended; reconnecting", "err", err)
 		}
 		select {
@@ -131,6 +142,7 @@ func reconnectDelay() time.Duration {
 // runStream 建立一次 Connect 流并服务到断开。
 func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 	collector *inventory.Collector, exec *executor, workerMsgs <-chan workerMsg,
+	lifecycleExec *lifecycleExecutor, lifecycleMsgs <-chan *fleetv1.LifecycleOperationResult,
 	log *slog.Logger) error {
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -160,7 +172,16 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 	}
 
 	// 3) outbox 重发（FR-13.7：紧随 Hello + 全量观测之后，未确认终态按序重发；
-	// 服务端按 operationId 幂等去重，Ack 后淘汰）。
+	// 服务端按 operationId 幂等去重，Ack 后淘汰）。生命周期结果同一纪律
+	//（KM-49：服务端终态无出边，重复上报幂等跳过）。
+	for _, lr := range lifecycleExec.PendingResults() {
+		if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_LifecycleOperationResult{
+			LifecycleOperationResult: lr,
+		}}); err != nil {
+			return err
+		}
+		log.Info("lifecycle outbox result resent", "op_id", lr.GetOpId())
+	}
 	for _, pr := range exec.PendingResults() {
 		res := pr.Result
 		if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
@@ -192,6 +213,7 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 		ack           string
 		execute       *fleetv1.ExecuteOperation
 		cancel        string
+		lifecycle     *fleetv1.ExecuteLifecycleOperation
 	}
 	serverEvents := make(chan serverEvent, 8)
 	recvErr := make(chan error, 1)
@@ -228,6 +250,13 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 				case <-streamCtx.Done():
 					return
 				}
+			case *fleetv1.ServerToAgent_ExecuteLifecycleOperation:
+				log.Info("lifecycle operation received", "op_id", payload.ExecuteLifecycleOperation.GetSpec().GetOpId())
+				select {
+				case serverEvents <- serverEvent{lifecycle: payload.ExecuteLifecycleOperation}:
+				case <-streamCtx.Done():
+					return
+				}
 			case *fleetv1.ServerToAgent_CancelOperation:
 				log.Info("cancel operation received", "operation_id", payload.CancelOperation.GetOperationId())
 				select {
@@ -259,14 +288,27 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 				}
 			}
 			if ev.ack != "" {
-				// Ack 是 outbox 唯一淘汰依据（§8.2/FR-13.7）。
-				exec.Forget(ev.ack)
+				// Ack 是 outbox 唯一淘汰依据（§8.2/FR-13.7）。生命周期 outbox
+				// 键空间与配置 outbox 互斥，按命中路由（KM-49）。
+				if !lifecycleExec.Forget(ev.ack) {
+					exec.Forget(ev.ack)
+				}
 			}
 			if ev.execute != nil {
 				// FR-13.8 重复派发幂等：执行中/已入队忽略（outbox 命中则重发终态）。
 				if replayed := exec.Enqueue(ev.execute); replayed != nil {
 					if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_OperationResult{
 						OperationResult: resultToProto(ev.execute.GetOperationId(), replayed),
+					}}); err != nil {
+						return err
+					}
+				}
+			}
+			if ev.lifecycle != nil {
+				// KM-49 重复派发幂等：同 opId 执行中/已入队忽略；已终结重发终态。
+				if replayed := lifecycleExec.Enqueue(ev.lifecycle); replayed != nil {
+					if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_LifecycleOperationResult{
+						LifecycleOperationResult: replayed,
 					}}); err != nil {
 						return err
 					}
@@ -299,6 +341,13 @@ func runStream(ctx context.Context, cfg *Config, conn *grpc.ClientConn,
 				if err := stream.Send(out); err != nil {
 					return err
 				}
+			}
+		case lr := <-lifecycleMsgs:
+			// 生命周期 worker 上行（逐目标终态），同样只在主循环发送（单写者）。
+			if err := stream.Send(&fleetv1.AgentToServer{Payload: &fleetv1.AgentToServer_LifecycleOperationResult{
+				LifecycleOperationResult: lr,
+			}}); err != nil {
+				return err
 			}
 		case <-heartbeat.C:
 			hbSeq++

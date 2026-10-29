@@ -18,6 +18,7 @@ import (
 
 	"github.com/shelwinnn/agent-fleet/internal/bundle"
 	deployctl "github.com/shelwinnn/agent-fleet/internal/controller/deployment"
+	lifecyclectl "github.com/shelwinnn/agent-fleet/internal/controller/lifecycle"
 	machine "github.com/shelwinnn/agent-fleet/internal/controller/machine"
 	reconcilectl "github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
 	"github.com/shelwinnn/agent-fleet/internal/controller/sshops"
@@ -136,6 +137,7 @@ func run() error {
 	providerStore := sqlite.NewProviderStore(db)
 	deploymentStore := sqlite.NewDeploymentStore(db)
 	targetStore := sqlite.NewDeploymentTargetStore(db)
+	lifecycleStore := sqlite.NewLifecycleStore(db)
 
 	ctrl := machine.NewController(machineStore, statusStore, observedStore, certStore, log)
 	go machine.RunOfflineScanner(ctx, ctrl, *offlineScanEvery, *offlineAfter, log)
@@ -166,6 +168,16 @@ func run() error {
 	// 上行结果回灌入口（ResultSink）。
 	recCtrl.SetDispatcher(agentSrv)
 	agentSrv.SetResultSink(recCtrl)
+
+	// 生命周期执行编排（KM-49）：同一节点通道的第三条接线——下行派发、
+	// 上行逐目标结果回灌、周期编排循环（派发/CheckUpdate/超时扫描）。
+	// 上游发现服务与 REST 端点共享同一实例（CheckUpdate 只读上游）。
+	discovery := upstream.New(upstream.Config{}, upstream.NewCommandQuerier())
+	lifecycleCtrl := lifecyclectl.New(lifecycleStore, machineStore, observedStore,
+		lifecyclectl.Config{UpstreamQuery: discovery}, log)
+	lifecycleCtrl.SetDispatcher(agentSrv)
+	agentSrv.SetLifecycleSink(lifecycleCtrl)
+	go lifecycleCtrl.RunLoop(ctx, *deployScanEvery)
 
 	// SSH-only 通道（§4.5/§7.4/§9.3）：受限执行器 + 操作编排 + OpenSSH include 导出。
 	sshTransport := sshtransport.New(sshtransport.Config{
@@ -237,7 +249,7 @@ func run() error {
 		DeploymentTargets: targetStore.List,
 		// 上游版本发现（KM-48）：只读上游注册表（npm view / brew info），
 		// 不触碰目标环境；查询失败在报告内逐源上报，不影响服务启动。
-		UpstreamDiscovery: upstream.New(upstream.Config{}, upstream.NewCommandQuerier()),
+		UpstreamDiscovery: discovery,
 		EnrollTokens:      &tokenIssuer{tokens: tokens, ttl: *tokenTTL},
 		OnMachineDelete: func(ctx context.Context, name string) error {
 			return ctrl.OnMachineDeleted(ctx, name)
@@ -248,6 +260,7 @@ func run() error {
 
 	api.SetSSH(sshOrch)
 	api.SetInclude(sshOrch)
+	api.SetLifecycle(lifecycleCtrl)
 
 	srv := &http.Server{
 		Addr:              *addr,

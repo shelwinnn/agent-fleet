@@ -39,6 +39,7 @@ func TestLifecycleContractPathsRegistered(t *testing.T) {
 		"/api/v1/machines/{name}/lifecycle/desired",
 		"/api/v1/lifecycle/operations",
 		"/api/v1/lifecycle/operations/{opId}",
+		"/api/v1/lifecycle/operations/{opId}/confirm",
 		"/api/v1/lifecycle/operations/{opId}/retry",
 		"/api/v1/lifecycle/capabilities",
 	} {

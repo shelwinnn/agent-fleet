@@ -63,6 +63,7 @@ type Server struct {
 	deployments   domain.DeploymentRepository
 	operations    domain.OperationRepository
 	reconcile     ReconcileAPI
+	lifecycle     LifecycleAPI
 	ssh           SSHMachineAPI
 	include       IncludeAPI
 	deploys       DeploymentAPI
@@ -178,6 +179,17 @@ func (s *Server) Handler() http.Handler {
 	// 上游版本发现（KM-48，T3）：操作者点一次「检查更新」，逐安装来源返回
 	// 上游可用版本及其适用性；查询失败带原因与最近成功缓存（未知 ≠ 最新）。
 	mux.Handle("POST /api/v1/agents/{agent}/upstream-versions/check", s.auth(http.HandlerFunc(s.handleUpstreamVersionCheck)))
+
+	// 生命周期维护闭环（KM-47 契约 / KM-49 编排）：幂等操作创建与查询、确认
+	// （未确认不得派发；影响变化后重新确认）、仅失败目标重试、显式三态意图、
+	// 能力矩阵。nil 控制器时端点返回 501。
+	mux.Handle("POST /api/v1/lifecycle/operations", s.auth(http.HandlerFunc(s.handleLifecycleCreateOperation)))
+	mux.Handle("GET /api/v1/lifecycle/operations/{opId}", s.auth(http.HandlerFunc(s.handleLifecycleGetOperation)))
+	mux.Handle("POST /api/v1/lifecycle/operations/{opId}/confirm", s.auth(http.HandlerFunc(s.handleLifecycleConfirmOperation)))
+	mux.Handle("POST /api/v1/lifecycle/operations/{opId}/retry", s.auth(http.HandlerFunc(s.handleLifecycleRetryOperation)))
+	mux.Handle("GET /api/v1/machines/{name}/lifecycle/desired", s.auth(http.HandlerFunc(s.handleLifecycleGetDesired)))
+	mux.Handle("PUT /api/v1/machines/{name}/lifecycle/desired", s.auth(http.HandlerFunc(s.handleLifecyclePutDesired)))
+	mux.Handle("GET /api/v1/lifecycle/capabilities", s.auth(http.HandlerFunc(s.handleLifecycleCapabilities)))
 
 	// catch-all：/api 与探针命名空间未匹配时走 §6.4 错误体（KM-21 核查发现 #3：
 	// 不再回落 net/http 纯文本 "404 page not found"）；其余路径交给静态 SPA
