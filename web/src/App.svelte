@@ -22,10 +22,13 @@
   import Skills from './routes/Skills.svelte';
   import Deployments from './routes/Deployments.svelte';
   import SshInventory from './routes/SshInventory.svelte';
+  import Lifecycle from './routes/Lifecycle.svelte';
+  import { RestLifecycleGateway } from '$lib/state/lifecycleGateway.js';
 
   const NAV: { path: string; labelKey: MessageKey }[] = [
     { path: '/', labelKey: 'nav.overview' },
     { path: '/machines', labelKey: 'nav.machines' },
+    { path: '/lifecycle', labelKey: 'nav.lifecycle' },
     { path: '/profiles', labelKey: 'nav.profiles' },
     { path: '/skills', labelKey: 'nav.skills' },
     { path: '/deployments', labelKey: 'nav.deployments' },
@@ -195,6 +198,12 @@
         <MachineDetail {store} name={decodeURIComponent(router.segments[1])} />
       {:else if router.segments[0] === 'machines'}
         <Machines {store} />
+      {:else if router.segments[0] === 'lifecycle'}
+        <Lifecycle
+          machines={store.machines}
+          gateway={new RestLifecycleGateway(store.client)}
+          onLifecycleEvent={(cb) => store.onLifecycleEvent(cb)}
+        />
       {:else if router.segments[0] === 'profiles'}
         <Profiles {store} name={router.segments[1] ? decodeURIComponent(router.segments[1]) : null} />
       {:else if router.segments[0] === 'skills'}
