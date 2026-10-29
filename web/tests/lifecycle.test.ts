@@ -29,7 +29,7 @@ import {
   targetReasonLabel,
   targetResultViews,
   upstreamFailureLabel,
-  upstreamRowViews,
+  upstreamRowView,
   formatOpTitle,
   CODEX_AGENT,
   buildTarget,
@@ -175,7 +175,7 @@ describe('逐目标四态与下一步', () => {
 
 describe('上游版本发现：未知 ≠ 最新', () => {
   it('ok 行携带来源/渠道/版本/查询时间', () => {
-    const row = upstreamRowViews(mockUpstreamReport().sources[0], zh);
+    const row = upstreamRowView(mockUpstreamReport().sources[0], zh);
     expect(row.kind).toBe('ok');
     if (row.kind === 'ok') {
       expect(row.method).toBe('npm');
@@ -186,7 +186,7 @@ describe('上游版本发现：未知 ≠ 最新', () => {
   });
 
   it('失败 + 有缓存：展示缓存与时间，并注明仅供参考', () => {
-    const row = upstreamRowViews(mockUpstreamReport().sources[1], zh);
+    const row = upstreamRowView(mockUpstreamReport().sources[1], zh);
     expect(row.kind).toBe('failed');
     if (row.kind === 'failed') {
       expect(row.reasonText).toContain('超时');
@@ -198,7 +198,7 @@ describe('上游版本发现：未知 ≠ 最新', () => {
   });
 
   it('失败 + 无缓存：显式"可用版本未知"，绝不显示为最新（两语言）', () => {
-    const row = upstreamRowViews(mockUpstreamReport().sources[2], zh);
+    const row = upstreamRowView(mockUpstreamReport().sources[2], zh);
     expect(row.kind).toBe('failed');
     if (row.kind === 'failed') {
       expect(row.unknown).toBe(true);

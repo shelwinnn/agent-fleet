@@ -19,9 +19,11 @@
     checkedAt?: string;
     error?: unknown;
     disabled?: boolean;
+    /** 相对时间基准（页面时钟）。 */
+    now?: Date;
     oncheck: () => void;
   }
-  let { state, rows, checkedAt, error, disabled = false, oncheck }: Props = $props();
+  let { state, rows, checkedAt, error, disabled = false, now = new Date(), oncheck }: Props = $props();
 
   const loc = $derived(i18n.locale);
   const loadError = $derived(
@@ -36,7 +38,7 @@
     <CardAction class="flex items-center gap-2">
       {#if checkedAt}
         <span class="text-xs text-muted-foreground">
-          {t('lc.upstream.checkedAt', { time: formatRelativeTime(checkedAt, new Date(), loc) })}
+          {t('lc.upstream.checkedAt', { time: formatRelativeTime(checkedAt, now, loc) })}
         </span>
       {/if}
       <Button size="sm" variant="outline" onclick={oncheck} disabled={disabled || state === 'loading'}>
@@ -59,7 +61,7 @@
             <Badge variant="outline" class="text-xs">{t('lc.upstream.channel')}: {row.channel}</Badge>
             {#if row.kind === 'ok'}
               <span class="ml-auto text-xs text-muted-foreground">
-                {t('lc.upstream.queriedAt', { time: formatRelativeTime(row.queriedAt, new Date(), loc) })}
+                {t('lc.upstream.queriedAt', { time: formatRelativeTime(row.queriedAt, now, loc) })}
               </span>
             {/if}
           </div>
@@ -89,7 +91,7 @@
               {#if row.cacheVersion}
                 <p class="text-xs text-muted-foreground">
                   {t('lc.upstream.failedWithCache', {
-                    time: formatRelativeTime(row.cacheQueriedAt ?? '', new Date(), loc),
+                    time: formatRelativeTime(row.cacheQueriedAt ?? '', now, loc),
                     version: row.cacheVersion,
                   })}
                 </p>

@@ -21,8 +21,12 @@
     /** 实际安装情况（实例发现；present=false 表示尚未安装）。 */
     installed: { present: boolean; version?: string; versionError?: string };
     observedAt?: string;
+    /** 是否已选定环境与用户：未选时不判定偏差，只给中性提示（不拿空选择冒充"尚未安装"）。 */
+    targetSelected?: boolean;
+    /** 相对时间基准（页面时钟），与页面其他时间一致刷新。 */
+    now?: Date;
   }
-  let { doc, loading = false, error, installed, observedAt }: Props = $props();
+  let { doc, loading = false, error, installed, observedAt, targetSelected = true, now = new Date() }: Props = $props();
 
   const loc = $derived(i18n.locale);
   const entry: LifecycleEntry | undefined = $derived(desiredEntryFor(doc));
@@ -54,18 +58,22 @@
       {#if intentDetail}
         <p class="text-xs text-muted-foreground">{intentDetail}</p>
       {/if}
-      <div class="flex flex-wrap items-center gap-2">
-        <StateBadge
-          tone={deviation.level === 'ok' ? 'ok' : deviation.level === 'deviate' ? 'warn' : 'muted'}
-          label={deviation.level === 'ok' ? t('lc.deviation.level.ok') : deviation.level === 'deviate' ? t('lc.deviation.level.deviate') : '—'}
-        />
-        <span>{deviation.text}</span>
-      </div>
-      {#if deviation.detail}
-        <p class="text-xs text-muted-foreground">{deviation.detail}</p>
+      {#if targetSelected}
+        <div class="flex flex-wrap items-center gap-2">
+          <StateBadge
+            tone={deviation.level === 'ok' ? 'ok' : deviation.level === 'deviate' ? 'warn' : 'muted'}
+            label={deviation.level === 'ok' ? t('lc.deviation.level.ok') : deviation.level === 'deviate' ? t('lc.deviation.level.deviate') : '—'}
+          />
+          <span>{deviation.text}</span>
+        </div>
+        {#if deviation.detail}
+          <p class="text-xs text-muted-foreground">{deviation.detail}</p>
+        {/if}
+      {:else}
+        <p class="text-xs text-muted-foreground">{t('lc.deviation.pickTarget')}</p>
       {/if}
       {#if observedAt}
-        <p class="text-xs text-muted-foreground">{t('lc.instance.observedAt', { time: formatRelativeTime(observedAt, new Date(), loc) })}</p>
+        <p class="text-xs text-muted-foreground">{t('lc.instance.observedAt', { time: formatRelativeTime(observedAt, now, loc) })}</p>
       {/if}
     {/if}
   </CardContent>

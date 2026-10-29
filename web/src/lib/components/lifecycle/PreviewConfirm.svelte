@@ -12,7 +12,7 @@
   import { Label } from '$lib/components/ui/label/index.js';
   import * as Alert from '$lib/components/ui/alert/index.js';
   import CapabilityBadge from './CapabilityBadge.svelte';
-  import { envLabel, targetLabel } from '$lib/state/lifecycle.js';
+  import { envLabel, opTypeOf, targetLabel } from '$lib/state/lifecycle.js';
   import { t, i18n } from '$lib/i18n/index.js';
 
   interface Props {
@@ -62,7 +62,7 @@
   const title = $derived(
     kind === 'install' ? t('lc.preview.title.install') : kind === 'upgrade' ? t('lc.preview.title.upgrade') : t('lc.preview.title.uninstall'),
   );
-  const actionName = $derived(t(`lc.optype.${kind === 'install' ? 'Install' : kind === 'upgrade' ? 'Upgrade' : 'Uninstall'}`));
+  const actionName = $derived(t(`lc.optype.${opTypeOf(kind)}`));
   const whatText = $derived(
     version
       ? t('lc.preview.createOp', { type: actionName, version, method, pkg })

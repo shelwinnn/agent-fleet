@@ -21,7 +21,7 @@ import type {
   UpstreamVersionReport,
 } from './types';
 import type { AgentInstanceInventory, LifecycleGateway } from '../state/lifecycleGateway';
-import { CODEX_PACKAGE, desiredAbsentUpdate, desiredPresentUpdate } from '../state/lifecycle';
+import { CODEX_PACKAGE, desiredAbsentUpdate, desiredPresentUpdate, targetIdentityKey } from '../state/lifecycle';
 
 function apiError(status: number, reason: string, message: string): ApiError {
   return new ApiError(status, { reason, message, timestamp: '2026-10-29T00:00:00Z' });
@@ -123,6 +123,8 @@ export class MockLifecycleBackend implements LifecycleGateway {
   retryNeedsReconfirmation = false;
   /** 置位后 retry 拒绝非 failed 目标（默认开启，可关闭以测异常）。 */
   enforceRetryValidation = true;
+  /** 置位后 createOperation 一律失败（模拟后端拒绝，验证 UI 不产生部分变更）。 */
+  createError: Error | null = null;
   private seq = 0;
 
   constructor() {
@@ -184,14 +186,16 @@ export class MockLifecycleBackend implements LifecycleGateway {
   }
 
   async createOperation(req: LifecycleOperationCreateRequest): Promise<{ operation: LifecycleOperation; reused: boolean }> {
+    if (this.createError) throw this.createError;
     const existing = [...this.operations.values()].find((o) => o.spec.idempotencyKey === req.idempotencyKey);
     if (existing) {
       const same = existing.spec.type === req.type && existing.spec.version === req.version
-        && JSON.stringify(existing.spec.targets.map(targetIdOf).sort()) === JSON.stringify(req.targets.map(targetIdOf).sort());
+        && JSON.stringify(existing.spec.targets.map(targetIdentityKey).sort())
+          === JSON.stringify(req.targets.map(targetIdentityKey).sort());
       if (!same) throw apiError(409, 'IdempotencyConflict', 'same key with different content');
       return { operation: JSON.parse(JSON.stringify(existing)) as LifecycleOperation, reused: true };
     }
-    if ((req.type === 'Install' || req.type === 'Upgrade') && !/^\d+\.\d+\.\d+/.test(req.version ?? '')) {
+    if ((req.type === 'Install' || req.type === 'Upgrade') && !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/.test(req.version ?? '')) {
       throw apiError(400, 'Invalid', 'Install/Upgrade require an exact version');
     }
     if (req.type === 'Uninstall' && req.targets.some((t) => !t.method || !t.package)) {
@@ -252,9 +256,9 @@ export class MockLifecycleBackend implements LifecycleGateway {
     if (!original) throw apiError(404, 'NotFound', `operation ${opId} not found`);
     if (this.enforceRetryValidation) {
       const failedIds = new Set(
-        (original.status.results ?? []).filter((r) => r.state === 'failed').map((r) => targetIdOf(r.target as LifecycleTarget)),
+        (original.status.results ?? []).filter((r) => r.state === 'failed').map((r) => targetIdentityKey(r.target as LifecycleTarget)),
       );
-      if (req.targets.some((t) => !failedIds.has(targetIdOf(t)))) {
+      if (req.targets.some((t) => !failedIds.has(targetIdentityKey(t)))) {
         throw apiError(409, 'RetryNotAllowed', 'only failed targets can be retried');
       }
     }
@@ -295,8 +299,4 @@ export class MockLifecycleBackend implements LifecycleGateway {
   seedAbsent(machine: string, method = 'npm'): void {
     void this.putDesired(machine, desiredAbsentUpdate(method, CODEX_PACKAGE));
   }
-}
-
-function targetIdOf(t: LifecycleTarget): string {
-  return `${t.machine}|${t.env || 'native'}|${t.user}|${t.agent}|${t.method}|${t.package}`;
 }

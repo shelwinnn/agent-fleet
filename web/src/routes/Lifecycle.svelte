@@ -29,7 +29,8 @@
     isOperationSettled,
     methodOfferings,
     newIdempotencyKey,
-    upstreamRowViews,
+    opTypeOf,
+    upstreamRowView,
   } from '$lib/state/lifecycle.js';
   import { machineRow } from '$lib/state/machines.js';
   import { failureText } from '$lib/state/ssh.js';
@@ -118,10 +119,11 @@
   });
 
   // 操作能力判定：安装看所选方式；升级/卸载看所选实例的方式。
+  const capFor = $derived((method: string) => capabilityFor(capabilities, os, arch, method));
   const activeMethod = $derived(
     previewKind === 'install' ? installMethod : (selectedInstance?.method ?? installMethod),
   );
-  const activeCapability = $derived(capabilityFor(capabilities, os, arch, activeMethod));
+  const activeCapability = $derived(capFor(activeMethod));
   const activeBlocked = $derived(activeCapability?.state === 'blocked');
   const versionInvalid = $derived(versionInput.trim() !== '' && !isExactVersion(versionInput));
   const upstreamFillVersion = $derived(
@@ -228,7 +230,7 @@
     upstreamError = undefined;
     try {
       const report = await gateway.checkUpstream(CODEX_AGENT);
-      upstreamRows = report.sources.map((s) => upstreamRowViews(s, i18n.locale));
+      upstreamRows = report.sources.map((src) => upstreamRowView(src, i18n.locale));
       upstreamCheckedAt = report.checkedAt;
       upstreamState = 'ok';
     } catch (err) {
@@ -271,13 +273,7 @@
   });
   const previewVersion = $derived(previewKind === 'install' || previewKind === 'upgrade' ? versionInput.trim() : '');
   const previewFingerprint = $derived(
-    previewKind
-      ? impactFingerprint(
-          previewKind === 'install' ? 'Install' : previewKind === 'upgrade' ? 'Upgrade' : 'Uninstall',
-          previewVersion || undefined,
-          previewTargets,
-        )
-      : '',
+    previewKind ? impactFingerprint(opTypeOf(previewKind), previewVersion || undefined, previewTargets) : '',
   );
 
   function openPreview(kind: 'install' | 'upgrade' | 'uninstall') {
@@ -288,8 +284,7 @@
 
   async function executePreview(includeDesired: boolean) {
     if (!previewKind || previewTargets.length === 0 || !machine) return;
-    const type: LifecycleOperationType =
-      previewKind === 'install' ? 'Install' : previewKind === 'upgrade' ? 'Upgrade' : 'Uninstall';
+    const type: LifecycleOperationType = opTypeOf(previewKind);
     const req = {
       type,
       idempotencyKey: newIdempotencyKey(),
@@ -308,10 +303,8 @@
     } catch (err) {
       opError = err;
     }
-    // 期望状态与操作是两次显式写入（预览里分开列明）；各自的成败如实上报。
-    let desiredOk = true;
-    let desiredUpdateError: unknown = null;
-    if (includeDesired) {
+    // 期望状态只在操作创建成功后写入：确认"执行"的前提是这次变更真的立住了。
+    if (op && includeDesired) {
       try {
         const update =
           type === 'Uninstall'
@@ -319,21 +312,14 @@
             : desiredPresentUpdate(previewVersion, req.targets[0].method, req.targets[0].package);
         desired = await gateway.putDesired(machine.metadata.name, update);
       } catch (err) {
-        desiredOk = false;
-        desiredUpdateError = err;
-      }
-    }
-    submitting = false;
-    if (op) {
-      if (!desiredOk) {
         feedback = {
           kind: 'error',
-          text: t('lc.preview.partialDesiredFailed', {
-            id: op.metadata.name,
-            reason: failureText(desiredUpdateError, loc),
-          }),
+          text: t('lc.preview.partialDesiredFailed', { id: op.metadata.name, reason: failureText(err, loc) }),
         };
-      } else {
+      }
+    }
+    if (op) {
+      if (feedback === null) {
         feedback = {
           kind: 'ok',
           text: reused ? t('lc.preview.reused', { id: op.metadata.name }) : t('lc.preview.created', { id: op.metadata.name }),
@@ -343,14 +329,7 @@
       versionInput = '';
       versionTouched = false;
     } else {
-      feedback = {
-        kind: 'error',
-        text: `${t('lc.preview.failed')}${failureText(opError, loc)}${
-          desiredOk && includeDesired ? ` ${t('lc.preview.desiredOkButOpFailed')}` : ''
-        }`,
-      };
-      // 期望状态可能已更新而操作未创建：重取意图，偏差视图如实反映。
-      void loadDesired(sel.machine);
+      feedback = { kind: 'error', text: `${t('lc.preview.failed')}${failureText(opError, loc)}` };
     }
   }
 
@@ -552,7 +531,7 @@
                     <label for="lc-inst-{key}" class="flex cursor-pointer flex-wrap items-center gap-2">
                       <span class="font-mono text-xs">{instanceTitle(inst, loc)}</span>
                       <span class="text-xs text-muted-foreground">{inst.executablePath ?? ''}</span>
-                      <CapabilityBadge capability={capabilityFor(capabilities, os, arch, inst.method)} />
+                      <CapabilityBadge capability={capFor(inst.method)} />
                     </label>
                   </div>
                 {/each}
@@ -577,6 +556,8 @@
       error={desiredError}
       installed={installedView}
       observedAt={inventory?.discoveredAt}
+      targetSelected={sel.user !== ''}
+      now={clock.now}
     />
   {/if}
 
@@ -587,6 +568,7 @@
     checkedAt={upstreamCheckedAt}
     error={upstreamError}
     disabled={!sel.machine}
+    now={clock.now}
     oncheck={checkUpstream}
   />
 
@@ -657,8 +639,8 @@
                 >
                   {t('lc.action.preview')}
                 </Button>
-                <CapabilityBadge capability={capabilityFor(capabilities, os, arch, installMethod)} />
-                {#if capabilityFor(capabilities, os, arch, installMethod)?.state === 'unverified'}
+                <CapabilityBadge capability={capFor(installMethod)} />
+                {#if capFor(installMethod)?.state === 'unverified'}
                   <span class="text-xs text-muted-foreground">{t('lc.cap.unverifiedHint')}</span>
                 {/if}
               </div>

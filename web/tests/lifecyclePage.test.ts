@@ -470,6 +470,38 @@ describe('偏差与上游分开展示', () => {
   });
 });
 
+describe('评审修复回归', () => {
+  it('只选主机未选环境/用户时，偏差区给中性提示，不拿空选择冒充"尚未安装"', async () => {
+    await mountPage();
+    setSelect('#lc-machine', 'win-prod');
+    await settle();
+    const text = body().textContent!;
+    expect(text).toContain('应存在：固定版本 0.55.0');
+    expect(text).toContain('先选择执行环境与用户');
+    expect(text).not.toContain('偏差：期望版本 0.55.0，但这个用户环境尚未安装');
+  });
+
+  it('创建操作失败时不写期望状态（不产生部分变更）', async () => {
+    const backend = new MockLifecycleBackend();
+    backend.createError = Object.assign(new Error('boom'), { status: 500 });
+    const h = await mountPage(backend);
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+    expect(body().textContent).toContain('创建操作失败');
+    const desired = await h.backend.getDesired('linux-build');
+    expect(desired).toBeNull(); // 期望状态未被触碰
+    expect(body().querySelector('[data-testid="lc-op"]')).toBeNull();
+  });
+});
+
 describe('语言切换', () => {
   it('切换英文后当前页面立即更新（含状态与原因）', async () => {
     await mountPage();

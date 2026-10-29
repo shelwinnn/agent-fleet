@@ -23,6 +23,7 @@
           : t('lc.cap.unknown'),
   );
   const tone = $derived(capabilityTone(capability?.state));
+  // 无障碍文本与可见标签同语言（前端文案规格：不得裸露 key / 混杂另一语言）。
   const title = $derived.by(() => {
     if (!capability) return t('lc.cap.unknown');
     const evidence = capability.evidenceLevel === 'isolated'
@@ -30,7 +31,7 @@
       : capability.evidenceLevel === 'real_machine'
         ? t('lc.cap.evidence.real_machine')
         : t('lc.cap.evidence.none');
-    return `${capability.state}${evidence}${capability.reason ? ` · ${capability.reason}` : ''}`;
+    return `${label}${evidence}${capability.reason ? ` · ${capability.reason}` : ''}`;
   });
 </script>
 

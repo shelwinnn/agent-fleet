@@ -293,6 +293,11 @@ export function needsReconfirmationView(op: LifecycleOperation, locale: Locale =
   };
 }
 
+/** 页面动作 → 契约操作类型（单一映射，页面与预览卡共用）。 */
+export function opTypeOf(kind: 'install' | 'upgrade' | 'uninstall'): LifecycleOperationType {
+  return kind === 'install' ? 'Install' : kind === 'upgrade' ? 'Upgrade' : 'Uninstall';
+}
+
 // ---------- 影响指纹与重新确认 ----------
 
 /**
@@ -360,7 +365,7 @@ export function upstreamFailureLabel(reason: string | undefined, locale: Locale 
     : (reason ?? translate(locale, 'lc.upstreamReason.none'));
 }
 
-export function upstreamRowViews(src: UpstreamSourceResult, locale: Locale = 'zh-CN'): UpstreamRowView {
+export function upstreamRowView(src: UpstreamSourceResult, locale: Locale = 'zh-CN'): UpstreamRowView {
   if (src.status === 'ok' && src.version) {
     return {
       kind: 'ok',
