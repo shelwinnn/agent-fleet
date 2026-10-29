@@ -133,3 +133,104 @@ func TestExecutorFixedVersionSurvivesUpstreamDrift(t *testing.T) {
 			r.State, r.Evidence.ObservedVersion, r.Message)
 	}
 }
+
+// TestExecutorFailureRecoveryDataProtection：验收项 4 的"失败恢复"证明——
+// 安装命令失败、卸载命令失败、以及"失败后重试成功"的恢复路径全程，
+// ~/.codex 替身必须逐字节不变（失败不许碰用户数据，恢复也不许碰）。
+func TestExecutorFailureRecoveryDataProtection(t *testing.T) {
+	e := newEnv(t)
+	for _, v := range []string{"0.44.0", "0.45.0"} {
+		if err := e.Publish("@openai/codex", v, "codex", "codex-cli "+v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.SeedCodexData(); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(e.Home, ".codex")
+	before, err := SnapshotDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	x := NewNodeExecutor(NodeExecutorConfig{
+		Engines: map[string]Engine{"npm": newEngine()},
+		Policy:  allowPolicy{},
+		Timeout: 2 * time.Minute,
+	})
+	install := executorCodexTarget(domain.LifecycleOpInstall, "0.44.0")
+	uninstall := executorCodexTarget(domain.LifecycleOpUninstall, "")
+	upgrade := executorCodexTarget(domain.LifecycleOpUpgrade, "0.45.0")
+	// 升级需要已安装的 0.44.0（先直装，随后快照）。
+	if err := e.InstallDirect(e.Prefix, "@openai/codex@0.44.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 安装失败：fake npm 注入 .fail-install → failed(op-failed)。
+	if err := e.SetFlag(".fail-install", true); err != nil {
+		t.Fatal(err)
+	}
+	rep := x.Execute(context.Background(), OpRequest{
+		OpID: "op-fail-install", Type: domain.LifecycleOpInstall, Version: "0.44.0",
+		Targets: []TargetSpec{install},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetFailed || r.Reason != domain.ReasonOpFailed {
+		t.Fatalf("failed install = %s/%s, want failed/op-failed", r.State, r.Reason)
+	}
+
+	// 2) 升级失败（同样注入）→ failed；随后卸载失败 → failed。
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-fail-upgrade", Type: domain.LifecycleOpUpgrade, Version: "0.45.0",
+		Targets: []TargetSpec{upgrade},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetFailed || r.Reason != domain.ReasonOpFailed {
+		t.Fatalf("failed upgrade = %s/%s", r.State, r.Reason)
+	}
+	if err := e.SetFlag(".fail-uninstall", true); err != nil {
+		t.Fatal(err)
+	}
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-fail-uninstall", Type: domain.LifecycleOpUninstall,
+		Targets: []TargetSpec{uninstall},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetFailed || r.Reason != domain.ReasonOpFailed {
+		t.Fatalf("failed uninstall = %s/%s", r.State, r.Reason)
+	}
+
+	// 3) 失败恢复：解除注入后按同一固定版本意图重试，全部成功。
+	if err := e.SetFlag(".fail-install", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.SetFlag(".fail-uninstall", false); err != nil {
+		t.Fatal(err)
+	}
+	for i, f := range []struct {
+		typ, version string
+		want         string
+	}{
+		{domain.LifecycleOpUpgrade, "0.45.0", "0.45.0"},
+		{domain.LifecycleOpUninstall, "", ""},
+	} {
+		rep := x.Execute(context.Background(), OpRequest{
+			OpID:    fmt.Sprintf("op-recover-%d", i),
+			Type:    f.typ,
+			Version: f.version,
+			Targets: []TargetSpec{executorCodexTarget(f.typ, f.version)},
+		})
+		if r := rep.Results[0]; r.State != domain.TargetSucceeded {
+			t.Fatalf("recovery step %s: %s/%s (%s)", f.typ, r.State, r.Reason, r.Message)
+		}
+		if r := rep.Results[0]; r.Evidence.ObservedVersion != f.want {
+			t.Fatalf("recovery step %s: verified %q, want %q", f.typ, r.Evidence.ObservedVersion, f.want)
+		}
+	}
+
+	// 全程（含失败与恢复）用户数据零变更。
+	after, err := SnapshotDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diffs := before.Diff(after); len(diffs) != 0 {
+		t.Fatalf("user data changed across failure/recovery flow:\n%s", before.Report(after))
+	}
+}

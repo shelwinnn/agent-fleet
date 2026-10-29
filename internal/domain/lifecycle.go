@@ -172,6 +172,17 @@ type LifecycleEvidence struct {
 // MaxEvidenceMessageLen 是证据消息的长度上限（超限拒绝，不静默截断）。
 const MaxEvidenceMessageLen = 2000
 
+// sensitiveRe 抹掉证据文本里 token 形态的值（npm 配置/授权头可能回显）。
+// 值统一替换为 [redacted]；键名保留供定位。
+var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|password|secret|_auth)(\s*[=:]\s*)("[^"]*"|\S+)`)
+
+// RedactEvidence 是证据文本的统一脱敏（KM-47 契约：message 限长脱敏，写入前
+// 由上报方执行）。节点侧（上报前）与控制面（入库前兜底）共用同一实现——
+// 脱敏规则只有一份，不会漂移。
+func RedactEvidence(s string) string {
+	return sensitiveRe.ReplaceAllString(s, "$1$2[redacted]")
+}
+
 // LifecycleTargetResult 是一个目标的持久化状态与证据。Reason 规则：失败、
 // 未执行、未知必须非空；成功必须为两个核验原因之一；pending 不带原因。
 type LifecycleTargetResult struct {

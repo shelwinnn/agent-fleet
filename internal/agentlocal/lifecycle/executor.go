@@ -20,7 +20,6 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -291,7 +290,7 @@ func (x *NodeExecutor) rediscover(ctx context.Context, op OpRequest, t TargetSpe
 			return TargetOutcome{TargetKey: key, State: domain.TargetSucceeded,
 				Reason:   domain.ReasonVerifiedPresent,
 				Message:  "pre-execution rediscovery: instance already at requested fixed version " + op.Version,
-				Evidence: evidenceOf(t, det.Version, det.ExecutablePath, "already at requested version"),
+				Evidence: x.evidenceOf(t, det.Version, det.ExecutablePath, "already at requested version"),
 			}, "", false
 		}
 		return TargetOutcome{}, fmt.Sprintf(
@@ -302,7 +301,7 @@ func (x *NodeExecutor) rediscover(ctx context.Context, op OpRequest, t TargetSpe
 			return TargetOutcome{TargetKey: key, State: domain.TargetSucceeded,
 				Reason:   domain.ReasonVerifiedAbsent,
 				Message:  "pre-execution rediscovery: instance already absent",
-				Evidence: evidenceOf(t, "", det.ExecutablePath, "already absent"),
+				Evidence: x.evidenceOf(t, "", det.ExecutablePath, "already absent"),
 			}, "", false
 		}
 		return TargetOutcome{}, "", true // 在场：前提成立
@@ -330,7 +329,7 @@ func (x *NodeExecutor) runEngine(ctx context.Context, key string, t TargetSpec,
 	}
 	return TargetOutcome{TargetKey: key, State: domain.TargetSucceeded,
 		Reason:   successReason,
-		Evidence: evidenceOf(t, verdict, out.ExecutablePath, string(out.Op)),
+		Evidence: x.evidenceOf(t, verdict, out.ExecutablePath, string(out.Op)),
 	}
 }
 
@@ -365,13 +364,15 @@ func normalizeEnv(env string) string {
 	return env
 }
 
-func evidenceOf(t TargetSpec, version, execPath, note string) domain.LifecycleEvidence {
+// evidenceOf 是证据构造的统一入口（RecordedAt 取注入时钟，保证测试时间域
+// 一致；消息经统一脱敏 + 限长）。
+func (x *NodeExecutor) evidenceOf(t TargetSpec, version, execPath, note string) domain.LifecycleEvidence {
 	return domain.LifecycleEvidence{
 		ObservedVersion: version,
 		ExecutablePath:  execPath,
 		Method:          t.Method,
 		Message:         truncateStr(redact(note), 256),
-		RecordedAt:      time.Now().UTC(),
+		RecordedAt:      x.now().UTC(),
 	}
 }
 
@@ -387,14 +388,9 @@ func failDiscovery(key, why string) TargetOutcome {
 		Reason: domain.ReasonDiscoveryFailed, Message: why}
 }
 
-// sensitiveRe 抹掉证据文本里 token 形态的值（npm 配置/授权头可能回显）。
-// 值统一替换为 [redacted]；键名保留供定位。
-var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|password|secret|_auth)(\s*[=:]\s*)("[^"]*"|\S+)`)
-
 // redact 是上报侧脱敏（KM-47 契约：证据 message 限长脱敏，写入前由上报方执行）。
-func redact(s string) string {
-	return sensitiveRe.ReplaceAllString(s, "$1$2[redacted]")
-}
+// 实现在 domain.RedactEvidence——与控制面入库兜底同一份规则，不会漂移。
+func redact(s string) string { return domain.RedactEvidence(s) }
 
 // truncateStr 限长并标注（超限截断不静默）。
 func truncateStr(s string, n int) string {

@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"sort"
 	"time"
 
@@ -129,11 +128,27 @@ func (c *Controller) CreateOperation(ctx context.Context, spec domain.LifecycleO
 	if spec.IdempotencyKey == "" {
 		return nil, false, fmt.Errorf("%w: idempotencyKey required", domain.ErrInvalid)
 	}
-	targets := make([]domain.LifecycleTarget, len(spec.Targets))
-	for i, t := range spec.Targets {
+	targets, err := c.prepareTargets(ctx, spec.Targets)
+	if err != nil {
+		return nil, false, err
+	}
+	spec.Targets = targets
+	op := &domain.LifecycleOperation{
+		Metadata: domain.ObjectMeta{UID: ids.NewUID(), Name: ids.NewUID()},
+		Spec:     spec,
+	}
+	return c.repo.CreateOperation(ctx, op)
+}
+
+// GetOperation 按 id 查询操作（逐目标状态与证据）。
+// prepareTargets 是两条创建路径（首建与重试）共用的目标准备：归一化、机器
+// 必须已在台账、OS/Arch 缺省时从最新观测回填（创建时的平台事实快照）。
+func (c *Controller) prepareTargets(ctx context.Context, in []domain.LifecycleTarget) ([]domain.LifecycleTarget, error) {
+	targets := make([]domain.LifecycleTarget, len(in))
+	for i, t := range in {
 		t = t.Normalize()
 		if _, err := c.machines.Get(ctx, t.Machine); err != nil {
-			return nil, false, fmt.Errorf("target machine %s: %w", t.Machine, err)
+			return nil, fmt.Errorf("target machine %s: %w", t.Machine, err)
 		}
 		if t.OS == "" || t.Arch == "" {
 			if obs, err := c.observed.Latest(ctx, t.Machine); err == nil && obs != nil {
@@ -150,15 +165,9 @@ func (c *Controller) CreateOperation(ctx context.Context, spec domain.LifecycleO
 		}
 		targets[i] = t
 	}
-	spec.Targets = targets
-	op := &domain.LifecycleOperation{
-		Metadata: domain.ObjectMeta{UID: ids.NewUID(), Name: ids.NewUID()},
-		Spec:     spec,
-	}
-	return c.repo.CreateOperation(ctx, op)
+	return targets, nil
 }
 
-// GetOperation 按 id 查询操作（逐目标状态与证据）。
 func (c *Controller) GetOperation(ctx context.Context, id string) (*domain.LifecycleOperation, error) {
 	return c.repo.GetOperation(ctx, id)
 }
@@ -183,9 +192,9 @@ func (c *Controller) Retry(ctx context.Context, originalID string, targets []dom
 	if err != nil {
 		return nil, err
 	}
-	norm := make([]domain.LifecycleTarget, len(targets))
-	for i, t := range targets {
-		norm[i] = t.Normalize()
+	norm, err := c.prepareTargets(ctx, targets)
+	if err != nil {
+		return nil, err
 	}
 	op := &domain.LifecycleOperation{
 		Metadata: domain.ObjectMeta{UID: ids.NewUID(), Name: ids.NewUID()},
@@ -236,7 +245,7 @@ func (c *Controller) RunLoop(ctx context.Context, every time.Duration) {
 			return
 		case <-ticker.C:
 			if err := c.ScanOnce(ctx); err != nil {
-				c.log.Error("lifecycle dispatch scan failed", "err", err)
+				c.log.Error("lifecycle scan failed", "event", "lifecycle_scan_error", "err", err)
 			}
 		}
 	}
@@ -261,7 +270,7 @@ func (c *Controller) ScanOnce(ctx context.Context) error {
 			err = fmt.Errorf("unknown op type %q", op.Spec.Type)
 		}
 		if err != nil {
-			c.log.Error("lifecycle op scan step failed", "op_id", op.Metadata.Name,
+			c.log.Error("lifecycle op scan step failed", "event", "lifecycle_op_step_error", "op_id", op.Metadata.Name,
 				"type", op.Spec.Type, "err", err)
 			if firstErr == nil {
 				firstErr = err
@@ -322,7 +331,7 @@ func (c *Controller) dispatchPending(ctx context.Context, op *domain.LifecycleOp
 		if !connected {
 			c.transitionTargets(ctx, op.Metadata.Name, pending[machine],
 				domain.TargetNotExecuted, domain.ReasonTargetOffline,
-				"machine is offline at dispatch time; intent is not queued (bring online and retry)")
+				"machine is offline at dispatch time; intent is not queued (not_executed has no re-run path: create a new operation once the machine is online)")
 			continue
 		}
 		err = c.dispatch.DispatchLifecycle(ctx, machine, req)
@@ -331,7 +340,7 @@ func (c *Controller) dispatchPending(ctx context.Context, op *domain.LifecycleOp
 			c.transitionTargets(ctx, op.Metadata.Name, pending[machine],
 				domain.TargetRunning, "",
 				"dispatched to node", withDispatchEvidence(now))
-			c.log.Info("lifecycle op dispatched", "op_id", op.Metadata.Name,
+			c.log.Info("lifecycle op dispatched", "event", "lifecycle_dispatched", "op_id", op.Metadata.Name,
 				"machine_id", machine, "targets", len(pending[machine]),
 				"rediscovery_required", req.RediscoveryRequired)
 			continue
@@ -488,7 +497,7 @@ func (c *Controller) scanTimeouts(ctx context.Context, ops []*domain.LifecycleOp
 				}
 				continue
 			}
-			c.log.Warn("lifecycle target timed out without result", "op_id", op.Metadata.Name,
+			c.log.Warn("lifecycle target timed out without result", "event", "lifecycle_timeout", "op_id", op.Metadata.Name,
 				"target", r.Target.Key(), "dispatched_at", dispatchedAt)
 		}
 	}
@@ -508,13 +517,13 @@ func (c *Controller) OnLifecycleResult(ctx context.Context, msg ResultMsg) error
 	op, err := c.repo.GetOperation(ctx, msg.OpID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			c.log.Warn("lifecycle result for unknown operation ignored", "op_id", msg.OpID)
+			c.log.Warn("lifecycle result for unknown operation ignored", "event", "lifecycle_result_unknown_op", "op_id", msg.OpID)
 			return nil
 		}
 		return err
 	}
 	if op.Spec.IdempotencyKey != msg.IdempotencyKey {
-		c.log.Warn("lifecycle result idempotency key mismatch", "op_id", msg.OpID)
+		c.log.Warn("lifecycle result idempotency key mismatch", "event", "lifecycle_result_key_mismatch", "op_id", msg.OpID)
 		return nil
 	}
 	if msg.NeedsReconfirmation {
@@ -522,7 +531,7 @@ func (c *Controller) OnLifecycleResult(ctx context.Context, msg ResultMsg) error
 			truncateMsg(redact(msg.ReconfirmReason))); err != nil {
 			return err
 		}
-		c.log.Warn("lifecycle op needs reconfirmation", "op_id", msg.OpID,
+		c.log.Warn("lifecycle op needs reconfirmation", "event", "lifecycle_needs_reconfirmation", "op_id", msg.OpID,
 			"reason", msg.ReconfirmReason)
 	}
 	for i := range msg.Results {
@@ -530,11 +539,11 @@ func (c *Controller) OnLifecycleResult(ctx context.Context, msg ResultMsg) error
 		key := r.Target.Normalize().Key()
 		stored := op.TargetByKey(key)
 		if stored == nil {
-			c.log.Warn("lifecycle result for unknown target ignored", "op_id", msg.OpID, "target", key)
+			c.log.Warn("lifecycle result for unknown target ignored", "event", "lifecycle_result_unknown_target", "op_id", msg.OpID, "target", key)
 			continue
 		}
 		if stored.Target.Machine != msg.Machine {
-			c.log.Warn("lifecycle result machine mismatch ignored", "op_id", msg.OpID,
+			c.log.Warn("lifecycle result machine mismatch ignored", "event", "lifecycle_result_machine_mismatch", "op_id", msg.OpID,
 				"target", key, "reported", msg.Machine, "stored", stored.Target.Machine)
 			continue
 		}
@@ -547,7 +556,7 @@ func (c *Controller) OnLifecycleResult(ctx context.Context, msg ResultMsg) error
 			domain.ValidateTargetResult(state, reason) != nil {
 			// 畸形上报：状态/原因配对不在白名单。落未知（结果不可用），
 			// 绝不静默丢——操作者必须看到"这个目标没结果"。
-			c.log.Warn("malformed lifecycle result recorded as unknown", "op_id", msg.OpID,
+			c.log.Warn("malformed lifecycle result recorded as unknown", "event", "lifecycle_result_malformed", "op_id", msg.OpID,
 				"target", key, "state", state, "reason", reason)
 			state, reason = domain.TargetUnknown, domain.ReasonResultLost
 			message = truncateMsg(fmt.Sprintf("node reported unusable result (state=%q reason=%q); verify actual state", r.State, r.Reason))
@@ -566,7 +575,7 @@ func (c *Controller) OnLifecycleResult(ctx context.Context, msg ResultMsg) error
 			}
 			return err
 		}
-		c.log.Info("lifecycle target result stored", "op_id", msg.OpID,
+		c.log.Info("lifecycle target result stored", "event", "lifecycle_result_stored", "op_id", msg.OpID,
 			"target", key, "state", state, "reason", reason)
 	}
 	return nil
@@ -603,17 +612,15 @@ func (c *Controller) transitionTargets(ctx context.Context, opID string, targets
 	for _, t := range targets {
 		err := c.repo.TransitionTarget(ctx, opID, t.Key(), state, reason, truncateMsg(message), ev)
 		if err != nil {
-			c.log.Error("lifecycle target transition failed", "op_id", opID,
+			c.log.Error("lifecycle target transition failed", "event", "lifecycle_transition_failed", "op_id", opID,
 				"target", t.Key(), "to", state, "err", err)
 		}
 	}
 }
 
-// sensitiveRe 与节点侧同一纪律：证据文本里 token 形态的值脱敏。
-var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|password|secret|_auth)(\s*[=:]\s*)("[^"]*"|\S+)`)
-
-// redact / truncateMsg：入库前脱敏限长（节点已做一遍，这里兜底——两道闸）。
-func redact(s string) string { return sensitiveRe.ReplaceAllString(s, "$1$2[redacted]") }
+// redact / truncateMsg：入库前脱敏限长（节点已做一遍，这里兜底——两道闸
+// 共用 domain.RedactEvidence 同一份规则，不会漂移）。
+func redact(s string) string { return domain.RedactEvidence(s) }
 
 func truncateMsg(s string) string {
 	const max = domain.MaxEvidenceMessageLen

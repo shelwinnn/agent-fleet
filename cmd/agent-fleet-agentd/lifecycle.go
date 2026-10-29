@@ -97,9 +97,9 @@ type lifecycleExecutor struct {
 	exec      *lifecycle.NodeExecutor
 	log       logger
 
-	mu      sync.Mutex
-	queue   []queuedLifecycleOp
-	current string
+	mu        sync.Mutex
+	queue     []queuedLifecycleOp
+	current   string
 	outboxDir string
 
 	// outbox 是已终结、未 Ack 的结果（内存权威 + 每条一文件的落盘镜像；
@@ -284,13 +284,4 @@ func (x *lifecycleExecutor) loadOutbox() {
 		x.outbox[res.GetOpId()] = &res
 		x.outboxOrder = append(x.outboxOrder, res.GetOpId())
 	}
-}
-
-// testLifecycleNode 是测试装配钩子：daemon 测试只需执行宿主的队列/outbox 行为，
-// 引擎本身不会被调用（fake server 不下发生命周期操作）；生产路径固定用
-// RegistryPolicy（见 runDaemon 装配），测试允许替换准入策略以隔离。
-var testLifecycleNode = func() *lifecycle.NodeExecutor {
-	return lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
-		Engines: map[string]lifecycle.Engine{"npm": lifecycle.NewNpmEngine(nil)},
-	})
 }

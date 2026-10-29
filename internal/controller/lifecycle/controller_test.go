@@ -393,7 +393,8 @@ func TestRetryOnlyFailedTargetsAndChain(t *testing.T) {
 	if retry.Status.ConfirmedAt == nil {
 		t.Fatal("retry of approved op must not require re-confirmation")
 	}
-	// succeeded 目标不可重试：改列非 failed 目标被拒（状态机校验在仓储事务内）。
+	// 不在原操作里的目标不可重试（m2 在台账但不是原操作目标 → 状态机校验拒绝）。
+	f.seedMachine("m2", true)
 	_, err := f.ctrl.Retry(f.ctx, orig.Metadata.Name,
 		[]domain.LifecycleTarget{f.codexTarget("m2")}, "operator")
 	if !errors.Is(err, domain.ErrRetryNotAllowed) && !errors.Is(err, domain.ErrInvalid) {
