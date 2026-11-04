@@ -16,12 +16,12 @@ package lifecycle
 
 import (
 	"context"
-	"strings"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/shelwinnn/agent-fleet/internal/domain"
@@ -252,11 +252,11 @@ type LifecycleInstance struct {
 // "尚未安装"是显式状态（NotInstalled）；InventoryMissing 表达"从未上报观测"——
 // 未知 ≠ 尚未安装。
 type LifecycleInstanceList struct {
-	Machine          string             `json:"machine"`
-	Env              string             `json:"env,omitempty"`
-	User             string             `json:"user,omitempty"`
-	NotInstalled     bool               `json:"notInstalled"`
-	InventoryMissing bool               `json:"inventoryMissing,omitempty"`
+	Machine          string              `json:"machine"`
+	Env              string              `json:"env,omitempty"`
+	User             string              `json:"user,omitempty"`
+	NotInstalled     bool                `json:"notInstalled"`
+	InventoryMissing bool                `json:"inventoryMissing,omitempty"`
 	Instances        []LifecycleInstance `json:"instances"`
 }
 
@@ -436,6 +436,10 @@ func (c *Controller) acceptedVersions(ctx context.Context, op *domain.LifecycleO
 	}
 	parent, err := c.repo.GetOperation(ctx, op.RetryOf)
 	if err != nil {
+		// 父操作读不到时没有前提可绑定：重试仍会携带重发现（节点对不一致
+		// 一律要求确认——保守方向），但要留下痕迹而不是无声吞掉。
+		c.log.Warn("retry premise lookup failed; dispatching without accepted versions",
+			"event", "lifecycle_premise_lookup_failed", "op_id", op.Metadata.Name, "err", err)
 		return nil
 	}
 	accepted := map[string]string{}
@@ -443,7 +447,7 @@ func (c *Controller) acceptedVersions(ctx context.Context, op *domain.LifecycleO
 		if r.State != domain.TargetPending {
 			continue
 		}
-		tr := parent.TargetByKey(r.Target.Key())
+		tr := parent.TargetByKey(r.Target.Normalize().Key())
 		if tr == nil || tr.Reason != domain.ReasonVersionMismatch ||
 			tr.Evidence == nil || tr.Evidence.ObservedVersion == "" {
 			continue

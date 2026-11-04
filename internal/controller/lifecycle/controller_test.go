@@ -2,12 +2,12 @@ package lifecycle
 
 import (
 	"context"
-	"strings"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -427,13 +427,13 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 	// needs_reconfirmation 置位；证据携带实测版本（确认将绑定到它）。
 	if err := f.ctrl.OnLifecycleResult(f.ctx, ResultMsg{
 		Machine: "m1", OpID: retry.Metadata.Name,
-		IdempotencyKey: retry.Spec.IdempotencyKey,
+		IdempotencyKey:      retry.Spec.IdempotencyKey,
 		NeedsReconfirmation: true,
 		ReconfirmReason:     "rediscovery found codex@0.45.0 before retry",
 		Results: []domain.LifecycleTargetResult{{
 			Target: f.codexTarget("m1"), State: domain.TargetFailed,
-			Reason:  domain.ReasonVersionMismatch,
-			Message: "rediscovery found codex@0.45.0 before retry, fixed-version intent is 0.44.0",
+			Reason:   domain.ReasonVersionMismatch,
+			Message:  "rediscovery found codex@0.45.0 before retry, fixed-version intent is 0.44.0",
 			Evidence: &domain.LifecycleEvidence{ObservedVersion: "0.45.0", RecordedAt: f.now},
 		}},
 		FinishedAt: f.now,
@@ -488,13 +488,13 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 	// 变化，须重新确认——操作级标记再次置位。
 	if err := f.ctrl.OnLifecycleResult(f.ctx, ResultMsg{
 		Machine: "m1", OpID: cont.Metadata.Name,
-		IdempotencyKey: cont.Spec.IdempotencyKey,
+		IdempotencyKey:      cont.Spec.IdempotencyKey,
 		NeedsReconfirmation: true,
 		ReconfirmReason:     "rediscovery found codex@0.46.0 before retry",
 		Results: []domain.LifecycleTargetResult{{
 			Target: f.codexTarget("m1"), State: domain.TargetFailed,
-			Reason:  domain.ReasonVersionMismatch,
-			Message: "rediscovery found codex@0.46.0 before retry, fixed-version intent is 0.44.0",
+			Reason:   domain.ReasonVersionMismatch,
+			Message:  "rediscovery found codex@0.46.0 before retry, fixed-version intent is 0.44.0",
 			Evidence: &domain.LifecycleEvidence{ObservedVersion: "0.46.0", RecordedAt: f.now},
 		}},
 		FinishedAt: f.now,
@@ -519,10 +519,12 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	last = f.disp.requests()[len(f.disp.requests())-1]
+	if last.OpID != cont2.Metadata.Name {
+		t.Fatalf("continuation dispatch op = %s, want %s", last.OpID, cont2.Metadata.Name)
+	}
 	if v := last.AcceptedObservedVersions[f.codexTarget("m1").Normalize().Key()]; v != "0.46.0" {
 		t.Fatalf("re-confirmation must bind to latest observation: accepted = %q, want 0.46.0", v)
 	}
-	_ = cont2
 }
 
 // ---- 结果回灌：幂等、脱敏、机器归属、畸形上报 ----
@@ -804,5 +806,53 @@ func TestResultPersistenceFullPathNoSecrets(t *testing.T) {
 	// 白名单字段照常落库（脱敏不牺牲证据价值）。
 	if r.Evidence.ObservedVersion != "0.44.0" || r.Evidence.ExecutablePath != "/usr/local/bin/codex" {
 		t.Fatalf("whitelisted evidence fields lost: %+v", r.Evidence)
+	}
+}
+
+// TestInstancesProjection（KM-49 修复波/T7 P5 契约侧落地）：实例发现投影——
+// inventory 在但无 codex 条目 → notInstalled 显式表达；多实例（多条目）逐条
+// 投影（路径/版本/安装态/versionError）。
+func TestInstancesProjection(t *testing.T) {
+	f := newFixture(t)
+	f.seedMachine("m1", true)
+
+	// inventory 在、无 codex 条目 → 显式"尚未安装"。
+	f.seedObservation("m1", "linux", "amd64")
+	list, err := f.ctrl.Instances(f.ctx, "m1", "native", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.InventoryMissing || !list.NotInstalled || len(list.Instances) != 0 {
+		t.Fatalf("no codex entries must be explicit notInstalled: %+v", list)
+	}
+
+	// 多实例（inventory 多条目）逐条投影；非 codex 家族不混入。
+	rec := &domain.ObservedStateRecord{Machine: "m1", InventorySeq: 2, RecordedAt: f.now}
+	obs := domain.ObservedState{InventorySeq: 2, Agents: []domain.AgentObservation{
+		{Family: "codex", Version: "0.44.0", ConfigPath: "/opt/prefix1/bin/codex", Installed: true},
+		{Family: "codex", Version: "", ConfigPath: "/opt/prefix2/bin/codex", Installed: true,
+			VersionError: "version read failed"},
+		{Family: "claude", Version: "1.0.0", Installed: true},
+	}}
+	b, _ := json.Marshal(obs)
+	rec.Payload = b
+	if _, err := f.observed.Store(f.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	list, err = f.ctrl.Instances(f.ctx, "m1", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.NotInstalled || list.InventoryMissing {
+		t.Fatalf("installed instances must not be notInstalled/missing: %+v", list)
+	}
+	if len(list.Instances) != 2 {
+		t.Fatalf("instances = %d, want 2 (multi-instance projection, foreign family excluded)", len(list.Instances))
+	}
+	if list.Instances[0].Version != "0.44.0" || list.Instances[0].Path != "/opt/prefix1/bin/codex" {
+		t.Fatalf("instance[0] = %+v", list.Instances[0])
+	}
+	if list.Instances[1].VersionError == "" {
+		t.Fatalf("version error must surface explicitly: %+v", list.Instances[1])
 	}
 }

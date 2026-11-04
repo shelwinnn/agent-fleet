@@ -2,10 +2,10 @@ package lifecycle
 
 import (
 	"context"
-	"strings"
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 

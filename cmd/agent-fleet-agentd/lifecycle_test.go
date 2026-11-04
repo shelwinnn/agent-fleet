@@ -88,6 +88,13 @@ func TestLifecycleHostQueueDedupeAndOutboxReplay(t *testing.T) {
 			res.GetResults()[0].GetState() != domain.TargetSucceeded {
 			t.Fatalf("worker result mismatch: %+v", res)
 		}
+		// 身份逐段回显（KM-49 修复波/T7 断链修复）：控制面按目标身份键对位，
+		// 缺 Target 的结果会被按"未知目标"丢弃。
+		tgt := res.GetResults()[0].GetTarget()
+		if tgt.GetMachineId() != "ws-1" || tgt.GetUser() != "alice" ||
+			tgt.GetMethod() != "npm" || tgt.GetPackage() != "@openai/codex" {
+			t.Fatalf("target identity not echoed: %+v", tgt)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no result from worker")
 	}
