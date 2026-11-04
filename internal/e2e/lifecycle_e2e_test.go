@@ -54,7 +54,7 @@ func TestE2EMainPathsInstallUpgradeUninstall(t *testing.T) {
 	h := newHarness(t, env, harnessOptions{})
 	const machine = "ws-main"
 	h.seedMachine(machine)
-	pump := h.connectNode(machine)
+	h.connectNode(machine)
 
 	// 页面的意图写入：PUT desired（present@0.44.0）→ GET 可读回。
 	code, body := h.restDo(http.MethodPut, "/api/v1/machines/"+machine+"/lifecycle/desired",
@@ -156,7 +156,6 @@ func TestE2EMainPathsInstallUpgradeUninstall(t *testing.T) {
 	if _, err := os.Stat(shimPath(env.Prefix, "codex")); err == nil {
 		t.Fatal("codex shim still present after uninstall")
 	}
-	_ = pump // 节点泵的生命周期由 harness 管理；显式引用避免空声明歧义
 }
 
 // TestE2EFixedVersionSurvivesMidExecutionDrift：创建时固定 0.44.0，注入
@@ -173,16 +172,14 @@ func TestE2EFixedVersionSurvivesMidExecutionDrift(t *testing.T) {
 	pump := h.connectNode(machine)
 
 	// 故障注入：安装命令进入引擎的那一刻，上游漂移到 0.46.0。
-	pump.engine.mu.Lock()
-	pump.engine.onInstall = func(string) {
+	pump.engine.setOnInstall(func(string) {
 		if err := env.Publish(codexPackage, "0.46.0", "codex", "codex-cli 0.46.0"); err != nil {
 			t.Errorf("publish drift version: %v", err)
 		}
 		if err := env.SetLatest(codexPackage, "0.46.0"); err != nil {
 			t.Errorf("flip latest tag: %v", err)
 		}
-	}
-	pump.engine.mu.Unlock()
+	})
 
 	body := h.runThroughChain(domain.LifecycleOpInstall, "e2e-pin-1", "0.44.0",
 		[]domain.LifecycleTarget{codexTarget(machine, codexPackage)})
@@ -282,6 +279,42 @@ func TestE2EUpstreamQueryFailureUnknownVsCacheFallback(t *testing.T) {
 	if msg, _ := res["message"].(string); msg == "" {
 		t.Fatal("discovery failure must carry a reason message for the page")
 	}
+
+	// 4) 真实的查询命令失败（.fail-view 注入：非零退出）同链路可见：
+	//    REST 报告 failed(query_failed) 且缓存回退仍在——"查不到"是逐源业务
+	//    结果，不是传输层错误；解除注入后查询恢复。
+	if err := env.SetFlag(".fail-view", true); err != nil {
+		t.Fatal(err)
+	}
+	code, report = h.restDo(http.MethodPost, "/api/v1/agents/codex/upstream-versions/check", "")
+	if code != http.StatusOK {
+		t.Fatalf("upstream check under injected failure = %d: %v", code, report)
+	}
+	src = upstreamNpmSource(t, report)
+	if src["status"] != "failed" {
+		t.Fatalf("npm source status under .fail-view = %v, want failed", src["status"])
+	}
+	failure, _ = src["failure"].(map[string]any)
+	if failure["reason"] != "query_failed" {
+		t.Fatalf("failure reason = %v, want query_failed (real command failure)", failure["reason"])
+	}
+	if _, ok := src["lastSuccess"].(map[string]any); !ok {
+		t.Fatalf("cache fallback must survive a command failure too: %v", src)
+	}
+	if err := env.SetFlag(".fail-view", false); err != nil {
+		t.Fatal(err)
+	}
+	// 解除注入并把 latest 还原为可解析版本 → 查询恢复（缓存被新鲜结果刷新）。
+	if err := env.SetLatest(codexPackage, "0.44.0"); err != nil {
+		t.Fatal(err)
+	}
+	code, report = h.restDo(http.MethodPost, "/api/v1/agents/codex/upstream-versions/check", "")
+	if code != http.StatusOK {
+		t.Fatalf("upstream check after clearing flag = %d: %v", code, report)
+	}
+	if raw := upstreamNpmRaw(t, report); raw != "0.44.0" {
+		t.Fatalf("recovery check = %q, want 0.44.0", raw)
+	}
 }
 
 // TestE2EPartialFailureRetryOnlyFailedLinkedToOriginal：两个目标一个失败——
@@ -300,9 +333,7 @@ func TestE2EPartialFailureRetryOnlyFailedLinkedToOriginal(t *testing.T) {
 	pump := h.connectNode(machine)
 
 	// 故障注入：alt 包的引擎调用失败（真实引擎语义不变，只有这一个包失败）。
-	pump.engine.mu.Lock()
-	pump.engine.failInstall = map[string]string{altPackage: "injected engine failure for alt package"}
-	pump.engine.mu.Unlock()
+	pump.engine.setFailInstall(map[string]string{altPackage: "injected engine failure for alt package"})
 
 	code, body := h.createOperation(domain.LifecycleOpInstall, "e2e-partial-1", "0.44.0",
 		[]domain.LifecycleTarget{codexTarget(machine, codexPackage), codexTarget(machine, altPackage)})
@@ -355,9 +386,7 @@ func TestE2EPartialFailureRetryOnlyFailedLinkedToOriginal(t *testing.T) {
 	}
 
 	// 解除注入 → 重试派发（首派带重发现：alt 缺席 → 前提成立 → 执行）→ 成功。
-	pump.engine.mu.Lock()
-	pump.engine.failInstall = nil
-	pump.engine.mu.Unlock()
+	pump.engine.setFailInstall(nil)
 	h.scanOnce()
 	retryBody := h.waitOperation(retryID)
 	if state, reason := targetState(t, retryBody, altPackage); state != domain.TargetSucceeded || reason != domain.ReasonVerifiedPresent {
@@ -414,7 +443,7 @@ func TestE2EOfflineBeforeCommitNeverAutoExecutes(t *testing.T) {
 	}
 
 	// 节点上线：旧意图不得复活；not_executed 保持原样。
-	pump := h.connectNode(machine)
+	h.connectNode(machine)
 	h.scanOnce()
 	body = mustGet(t, h, offlineID)
 	state, reason = targetState(t, body, codexPackage)
@@ -438,7 +467,6 @@ func TestE2EOfflineBeforeCommitNeverAutoExecutes(t *testing.T) {
 	if state, _ := targetState(t, mustGet(t, h, offlineID), codexPackage); state != domain.TargetNotExecuted {
 		t.Fatal("old intent executed after a later operation — not_executed must have no outgoing edge")
 	}
-	_ = pump
 }
 
 // TestE2EResultLostShowsUnknownAndVerifyFirst：节点执行了但结果回不来——目标
@@ -503,6 +531,22 @@ func TestE2EResultLostShowsUnknownAndVerifyFirst(t *testing.T) {
 	if got := installedVersion(t, env.Prefix, codexPackage); got != "0.44.0" {
 		t.Fatalf("target actual state = %q, want 0.44.0 (execution happened, only the result was lost)", got)
 	}
+
+	// "先核对"的正向闭环：操作者面对未知，经一次全新操作（fresh op，重新
+	// 确认、重新执行、重新发现）核对实际状态——核验证据必须与磁盘实况一致，
+	// 而丢失的结果既没有被复用，原操作也没有被再次派发。
+	pump.dropResults.Store(false)
+	body = h.runThroughChain(domain.LifecycleOpInstall, "e2e-lost-verify", "0.44.0",
+		[]domain.LifecycleTarget{codexTarget(machine, codexPackage)})
+	if state, reason := targetState(t, body, codexPackage); state != domain.TargetSucceeded || reason != domain.ReasonVerifiedPresent {
+		t.Fatalf("verify op = %s/%s: %v", state, reason, body)
+	}
+	if ev := evidenceVersion(t, body, codexPackage); ev != "0.44.0" {
+		t.Fatalf("verify evidence = %q, want the rediscovered actual version 0.44.0", ev)
+	}
+	if got := pump.dispatches.Load(); got != 2 {
+		t.Fatalf("original op must never be re-dispatched; node saw %d dispatches, want exactly 2 (lost op + fresh verify op)", got)
+	}
 }
 
 // TestE2EDuplicateSubmissionDeduplicated：重复提交同一请求复用同一操作；
@@ -536,7 +580,10 @@ func TestE2EDuplicateSubmissionDeduplicated(t *testing.T) {
 	}
 	h.scanOnce()
 	time.Sleep(200 * time.Millisecond)
-	h.scanOnce() // 复扫不得对同一操作再派发（running 目标不在派发集合）
+	// 复扫：无论此刻操作处于 running 还是已终态，都不得产生第二次派发
+	// （running 不在派发集合；终态目标无出边）——去重归因由下面的
+	// dispatches==1 断言给出。
+	h.scanOnce()
 	body := h.waitOperation(opID)
 	if state, reason := targetState(t, body, codexPackage); state != domain.TargetSucceeded || reason != domain.ReasonVerifiedPresent {
 		t.Fatalf("dedup install = %s/%s: %v", state, reason, body)
@@ -700,22 +747,6 @@ func mustGet(t *testing.T, h *harness, opID string) map[string]any {
 		t.Fatalf("get operation %s = %d: %v", opID, code, body)
 	}
 	return body
-}
-
-// firstResult 取指定目标的结果对象（message 等字段的读取入口）。
-func firstResult(t *testing.T, body map[string]any, pkg string) map[string]any {
-	t.Helper()
-	status, _ := body["status"].(map[string]any)
-	results, _ := status["results"].([]any)
-	for _, r := range results {
-		res, _ := r.(map[string]any)
-		tgt, _ := res["target"].(map[string]any)
-		if tgt["package"] == pkg {
-			return res
-		}
-	}
-	t.Fatalf("target %s missing: %v", pkg, body)
-	return nil
 }
 
 // upstreamNpmSource 取上游报告里 npm 来源的对象。

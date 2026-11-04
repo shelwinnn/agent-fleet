@@ -214,28 +214,6 @@ func (h *harness) restDo(method, path, body string) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
-func (h *harness) restRaw(method, path, body string) (int, string) {
-	h.t.Helper()
-	var reader io.Reader
-	if body != "" {
-		reader = strings.NewReader(body)
-	}
-	req, err := http.NewRequest(method, h.rest.URL+path, reader)
-	if err != nil {
-		h.t.Fatalf("new request %s %s: %v", method, path, err)
-	}
-	resp, err := h.rest.Client().Do(req)
-	if err != nil {
-		h.t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		h.t.Fatalf("read body: %v", err)
-	}
-	return resp.StatusCode, string(raw)
-}
-
 // seedMachine 走 REST 建 Machine（页面的第一步：接入主机）。
 func (h *harness) seedMachine(name string) {
 	h.t.Helper()
@@ -246,9 +224,10 @@ func (h *harness) seedMachine(name string) {
 	}
 }
 
-// createOperation / confirmOperation / getOperation / retryOperation 是
-// Lifecycle.svelte 页面对应的四个动作端点（confirm 是预览确认对话框的后端
-// 契约，见 KM-49 交付说明）。
+// createOperation / confirmOperation / getOperation / retryOperation 覆盖页面
+// 会发起的动作端点。保真度说明：confirm 是预览确认对话框的后端契约端点
+// （KM-49；未确认不得派发），已交付的 T5 页面尚未接线该调用——集成缝隙，
+// 见包文档与 KM-51 回报。
 func (h *harness) createOperation(opType, key, version string, targets []domain.LifecycleTarget) (int, map[string]any) {
 	h.t.Helper()
 	targetJSON, err := json.Marshal(targets)
@@ -316,8 +295,8 @@ func (h *harness) waitOperation(opID string) map[string]any {
 	}
 }
 
-// targetState 取操作响应里指定目标的 state/reason（页面逐目标渲染的字段）。
-func targetState(t *testing.T, body map[string]any, pkg string) (state, reason string) {
+// firstResult 取指定目标的结果对象（页面逐目标渲染的数据行）。
+func firstResult(t *testing.T, body map[string]any, pkg string) map[string]any {
 	t.Helper()
 	status, _ := body["status"].(map[string]any)
 	results, _ := status["results"].([]any)
@@ -325,31 +304,28 @@ func targetState(t *testing.T, body map[string]any, pkg string) (state, reason s
 		res, _ := r.(map[string]any)
 		tgt, _ := res["target"].(map[string]any)
 		if tgt["package"] == pkg {
-			state, _ = res["state"].(string)
-			reason, _ = res["reason"].(string)
-			return state, reason
+			return res
 		}
 	}
 	t.Fatalf("target %s missing in operation results: %v", pkg, body)
-	return "", ""
+	return nil
+}
+
+// targetState 取指定目标的 state/reason（页面逐目标渲染的字段）。
+func targetState(t *testing.T, body map[string]any, pkg string) (state, reason string) {
+	t.Helper()
+	res := firstResult(t, body, pkg)
+	state, _ = res["state"].(string)
+	reason, _ = res["reason"].(string)
+	return state, reason
 }
 
 // evidenceVersion 取指定目标证据里的实测版本（页面"实际版本"列的数据来源）。
 func evidenceVersion(t *testing.T, body map[string]any, pkg string) string {
 	t.Helper()
-	status, _ := body["status"].(map[string]any)
-	results, _ := status["results"].([]any)
-	for _, r := range results {
-		res, _ := r.(map[string]any)
-		tgt, _ := res["target"].(map[string]any)
-		if tgt["package"] == pkg {
-			ev, _ := res["evidence"].(map[string]any)
-			v, _ := ev["observedVersion"].(string)
-			return v
-		}
-	}
-	t.Fatalf("target %s missing for evidence lookup: %v", pkg, body)
-	return ""
+	ev, _ := firstResult(t, body, pkg)["evidence"].(map[string]any)
+	v, _ := ev["observedVersion"].(string)
+	return v
 }
 
 // codexTarget 构造页面上会选择的标准目标（native 环境的 codex npm 实例）。
@@ -548,7 +524,7 @@ func (h *harness) connectNode(machineName string) *pumpNode {
 		Engines: map[string]agentlc.Engine{"npm": engine},
 		Policy:  allowPolicy{},
 		Timeout: 2 * time.Minute,
-		Log:     quietLogger{},
+		Log:     silentLogger{},
 	})
 	p := &pumpNode{t: h.t, machine: machineName, engine: engine, executor: executor, stream: stream, done: make(chan struct{})}
 	p.startOnce.Do(func() { go p.run() })
@@ -644,7 +620,8 @@ func (p *pumpNode) executeOp(ex *fleetv1.ExecuteLifecycleOperation) *agentlc.Rep
 }
 
 // reportToProto 与 cmd/agent-fleet-agentd/lifecycle.go 的 lifecycleReportToProto
-// 同构（同一协议契约的两端）。
+// 同构（同一协议契约的两端；KM-51 修复后 daemon 侧同样回带幂等键与逐目标
+// 身份——本泵的字段集与 daemon 侧逐字段对齐）。
 func reportToProto(rep *agentlc.Report, idempotencyKey string) *fleetv1.LifecycleOperationResult {
 	out := &fleetv1.LifecycleOperationResult{
 		OpId:                rep.OpID,
@@ -713,6 +690,20 @@ func (e *hookedEngine) installCalls(pkg string) int {
 	return e.calls[pkg]
 }
 
+// setFailInstall 注入"指定包的安装/升级在引擎入口失败"（部分目标失败）。
+func (e *hookedEngine) setFailInstall(fail map[string]string) {
+	e.mu.Lock()
+	e.failInstall = fail
+	e.mu.Unlock()
+}
+
+// setOnInstall 注入"安装/升级进入引擎前"的钩子（执行中上游漂移）。
+func (e *hookedEngine) setOnInstall(hook func(pkg string)) {
+	e.mu.Lock()
+	e.onInstall = hook
+	e.mu.Unlock()
+}
+
 func (e *hookedEngine) Detect(ctx context.Context, req agentlc.Request) (agentlc.Detected, error) {
 	return e.inner.Detect(ctx, req)
 }
@@ -741,7 +732,9 @@ type allowPolicy struct{}
 
 func (allowPolicy) Check(string, string, string) error { return nil }
 
-type quietLogger struct{}
+// silentLogger 是执行引擎的最小日志接口的静默替身（节点侧命名沿用
+// lifecycle.Logger 语义，避免与 daemon 测试里的 quietLogger 函数同形异义）。
+type silentLogger struct{}
 
-func (quietLogger) Info(string, ...any) {}
-func (quietLogger) Warn(string, ...any) {}
+func (silentLogger) Info(string, ...any) {}
+func (silentLogger) Warn(string, ...any) {}
