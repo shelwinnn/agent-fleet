@@ -94,6 +94,8 @@ type Server struct {
 	certs    domain.AgentCertificateRepository
 	observed domain.ObservedStateRepository
 	sink     ResultSink
+	// lifecycleSink 是生命周期结果回灌入口（KM-49；main 装配 lifecycle.Controller）。
+	lifecycleSink LifecycleResultSink
 
 	registry *connRegistry
 }

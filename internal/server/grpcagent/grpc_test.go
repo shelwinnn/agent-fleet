@@ -20,6 +20,7 @@ import (
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
 	"github.com/shelwinnn/agent-fleet/internal/controller/machine"
+	lifecyclectl "github.com/shelwinnn/agent-fleet/internal/controller/lifecycle"
 	"github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"
@@ -47,6 +48,8 @@ type harness struct {
 	profiles   domain.ProfileRepository
 	snapshots  domain.SnapshotRepository
 	ops        domain.OperationRepository
+	lc         *lifecyclectl.Controller
+	lcRepo     domain.LifecycleRepository
 }
 
 func quietLog() *slog.Logger {
@@ -92,6 +95,13 @@ func newHarness(t *testing.T, cfg Config) *harness {
 	rec.SetDispatcher(srv)
 	srv.SetResultSink(rec)
 
+	// KM-49：生命周期控制器双接线（Dispatcher = 本 Server；结果回灌 sink），
+	// 与 reconcile 同一模式；闭环用例见 lifecycle_test.go。
+	lcRepo := sqlite.NewLifecycleStore(db)
+	lc := lifecyclectl.New(lcRepo, machines, observed, lifecyclectl.Config{}, quietLog())
+	lc.SetDispatcher(srv)
+	srv.SetLifecycleSink(lc)
+
 	g := srv.GRPCServer()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -105,6 +115,7 @@ func newHarness(t *testing.T, cfg Config) *harness {
 		tokenStore: sqlite.NewEnrollmentStore(db),
 		machines:   machines, certs: certs, observed: observed, status: status, ctrl: ctrl,
 		rec: rec, profiles: profiles, snapshots: snapshots, ops: ops,
+		lc: lc, lcRepo: lcRepo,
 	}
 }
 

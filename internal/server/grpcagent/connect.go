@@ -205,6 +205,24 @@ func (s *Server) handleUpstream(ctx context.Context, machine string, msg *fleetv
 		}}); err != nil {
 			return err
 		}
+	case *fleetv1.AgentToServer_LifecycleOperationResult:
+		// KM-49：生命周期逐目标结果。服务端按 op_id 幂等接收（终态无出边，
+		// 重复上报在编排层被跳过）；§8.2 同纪律：处理完成后回 Ack，节点收到
+		// Ack 才淘汰 outbox 项（Ack 复用 OperationResultAck，键为生命周期
+		// 操作 id——节点侧按 outbox 归属路由，两套 outbox 键空间互斥）。
+		res := payload.LifecycleOperationResult
+		if s.lifecycleSink == nil {
+			s.log.Warn("lifecycle result received but no sink wired",
+				"machine_id", machine, "op_id", res.GetOpId())
+		} else if err := s.lifecycleSink.OnLifecycleResult(ctx, lifecycleResultFromProto(machine, res)); err != nil {
+			s.log.Error("lifecycle result handling failed", "machine_id", machine,
+				"op_id", res.GetOpId(), "err", err)
+		}
+		if err := stream.Send(&fleetv1.ServerToAgent{Payload: &fleetv1.ServerToAgent_OperationResultAck{
+			OperationResultAck: &fleetv1.OperationResultAck{OperationId: res.GetOpId()},
+		}}); err != nil {
+			return err
+		}
 	case *fleetv1.AgentToServer_LogEvent:
 		// 仅运维日志（spec §11.3）；限长与脱敏在输出侧统一处理。
 		s.log.Info("agent log", "machine_id", machine,

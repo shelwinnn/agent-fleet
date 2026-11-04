@@ -16,6 +16,7 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/fixture"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/lifecycle"
 	"github.com/shelwinnn/agent-fleet/internal/desiredstate"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"google.golang.org/grpc"
@@ -198,8 +199,15 @@ func TestRunStreamRequestInventoryAndWelcomeHeartbeat(t *testing.T) {
 	exec := newExecutor(home, cfg.DataDir, reg, collector, quietLogger())
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
+	lifecycleExec := newLifecycleExecutor(cfg.MachineID, cfg.DataDir, lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
+		Engines: map[string]lifecycle.Engine{"npm": lifecycle.NewNpmEngine(nil)},
+	}), quietLogger())
+	lifecycleMsgs := make(chan *fleetv1.LifecycleOperationResult, 32)
+	go lifecycleExec.RunWorker(ctx, lifecycleMsgs)
 	done := make(chan error, 1)
-	go func() { done <- runStream(ctx, cfg, conn, collector, exec, workerMsgs, quietLogger()) }()
+	go func() {
+		done <- runStream(ctx, cfg, conn, collector, exec, workerMsgs, lifecycleExec, lifecycleMsgs, quietLogger())
+	}()
 
 	// 初始全量 inventory（seq 1）+ RequestInventory 触发的第二次（seq 2）。
 	for want := int64(1); want <= 2; want++ {
@@ -272,8 +280,15 @@ func TestRunStreamReportsVerifyEvidence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	workerMsgs := make(chan workerMsg, 32)
 	go exec.RunWorker(ctx, workerMsgs)
+	lifecycleExec := newLifecycleExecutor(cfg.MachineID, cfg.DataDir, lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
+		Engines: map[string]lifecycle.Engine{"npm": lifecycle.NewNpmEngine(nil)},
+	}), quietLogger())
+	lifecycleMsgs := make(chan *fleetv1.LifecycleOperationResult, 32)
+	go lifecycleExec.RunWorker(ctx, lifecycleMsgs)
 	done := make(chan error, 1)
-	go func() { done <- runStream(ctx, cfg, conn, collector, exec, workerMsgs, quietLogger()) }()
+	go func() {
+		done <- runStream(ctx, cfg, conn, collector, exec, workerMsgs, lifecycleExec, lifecycleMsgs, quietLogger())
+	}()
 
 	// 真实快照（fixture 家族，受管键可收敛）。
 	snap, err := desiredstate.BuildSnapshot("ws-1", 1, domain.DesiredState{

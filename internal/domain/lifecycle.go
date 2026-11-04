@@ -172,6 +172,17 @@ type LifecycleEvidence struct {
 // MaxEvidenceMessageLen 是证据消息的长度上限（超限拒绝，不静默截断）。
 const MaxEvidenceMessageLen = 2000
 
+// sensitiveRe 抹掉证据文本里 token 形态的值（npm 配置/授权头可能回显）。
+// 值统一替换为 [redacted]；键名保留供定位。
+var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|password|secret|_auth)(\s*[=:]\s*)("[^"]*"|\S+)`)
+
+// RedactEvidence 是证据文本的统一脱敏（KM-47 契约：message 限长脱敏，写入前
+// 由上报方执行）。节点侧（上报前）与控制面（入库前兜底）共用同一实现——
+// 脱敏规则只有一份，不会漂移。
+func RedactEvidence(s string) string {
+	return sensitiveRe.ReplaceAllString(s, "$1$2[redacted]")
+}
+
 // LifecycleTargetResult 是一个目标的持久化状态与证据。Reason 规则：失败、
 // 未执行、未知必须非空；成功必须为两个核验原因之一；pending 不带原因。
 type LifecycleTargetResult struct {
@@ -546,6 +557,15 @@ var lifecycleCapabilityRegistry = []LifecycleCapability{
 	},
 }
 
+// LifecycleCapabilities 返回能力矩阵的快照副本（KM-46 §7 文档数据的只读出口，
+// 供 GET /api/v1/lifecycle/capabilities 展示）。它是文档数据而非支持声明：
+// supported 集合在 T8 真机证据前为空。
+func LifecycleCapabilities() []LifecycleCapability {
+	out := make([]LifecycleCapability, len(lifecycleCapabilityRegistry))
+	copy(out, lifecycleCapabilityRegistry)
+	return out
+}
+
 // LookupLifecycleCapability 查询组合能力：精确匹配优先，其次通配；无记录
 // 一律按未验证处理（未验证不标支持——缺省即未验证）。
 func LookupLifecycleCapability(os, arch, method string) LifecycleCapability {
@@ -637,6 +657,10 @@ type LifecycleRepository interface {
 	GetOperationByIdempotencyKey(ctx context.Context, key string) (*LifecycleOperation, error)
 	// ListOperationsByMachine 列出涉及某机器的操作（创建时间序）。
 	ListOperationsByMachine(ctx context.Context, machine string) ([]*LifecycleOperation, error)
+	// ListUnfinishedOperations 列出相位未到 Completed 的操作（创建时间序）。
+	// 执行编排（KM-49）据此扫描可派发的已确认操作与超时未归的目标；
+	// not_executed/unknown/succeeded/failed 都算落定，不会无限滞留本列表。
+	ListUnfinishedOperations(ctx context.Context) ([]*LifecycleOperation, error)
 	// ListRetryChildren 返回以 id 为原操作的重试操作（追溯链的直接子代）。
 	ListRetryChildren(ctx context.Context, id string) ([]*LifecycleOperation, error)
 	// TransitionTarget 在单事务内做逐目标白名单迁移并重算操作相位。目标不存在

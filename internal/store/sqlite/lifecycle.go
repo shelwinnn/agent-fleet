@@ -450,6 +450,13 @@ func (s *lifecycleStore) ListRetryChildren(ctx context.Context, id string) ([]*d
 	return s.listByOpIDs(ctx, `SELECT id FROM lifecycle_operations WHERE retry_of = ? ORDER BY created_at, id`, id)
 }
 
+// ListUnfinishedOperations 列出相位未到 Completed 的操作（KM-49 执行编排的
+// 派发与超时扫描输入）。phase 列由 TransitionTarget 按逐目标状态推导维护。
+func (s *lifecycleStore) ListUnfinishedOperations(ctx context.Context) ([]*domain.LifecycleOperation, error) {
+	return s.listByOpIDs(ctx, `SELECT id FROM lifecycle_operations
+		WHERE phase <> ? ORDER BY created_at, id`, domain.OperationPhaseCompleted)
+}
+
 // listByOpIDs 先收集操作 id（游标关闭后再逐个取全量），与既有仓储的列表
 // 形状一致：行遍历期间不发起嵌套查询。
 func (s *lifecycleStore) listByOpIDs(ctx context.Context, idQuery string, args ...any) ([]*domain.LifecycleOperation, error) {

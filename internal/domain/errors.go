@@ -35,6 +35,11 @@ const (
 	ReasonUnauthorized     = "Unauthorized"
 	ReasonNotReady         = "NotReady"
 	ReasonMethodNotAllowed = "MethodNotAllowed"
+	// KM-49 生命周期动作端点（§6.4 错误体 reason code；与逐目标原因码
+	// "unsupported-combo" 等是不同命名空间——这里是 HTTP 错误体首要素）。
+	ReasonIdempotencyConflict = "IdempotencyConflict" // 幂等键复用携带不同内容（409）
+	ReasonRetryNotAllowed     = "RetryNotAllowed"     // 重试指向非确定失败目标或意图不一致（409）
+	ReasonCapabilityBlocked   = "CapabilityBlocked"   // 能力矩阵阻塞的组合（422，创建即拒）
 )
 
 // NotImplemented 标记骨架路由：资源类型已规划、实现归属后续切片。
