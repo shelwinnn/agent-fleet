@@ -7,7 +7,7 @@
 //     上线后不自动执行旧意图（状态机无出边）；派发不可达同理；
 //   - 结果回灌：逐目标幂等落库（证据先脱敏限长），未知不计成功、不自动重试；
 //   - 超时扫描：running 超过派发 deadline + 宽限仍无结果 → unknown
-//    （timeout-no-result）——结果丢失按 spec 显示未知并先核对；
+//     （timeout-no-result）——结果丢失按 spec 显示未知并先核对；
 //   - CheckUpdate：只读上游（T3 发现服务），逐目标记录四态，不经节点通道。
 //
 // 停止管理（unmanaged）只存在于意图文档（T2），不是操作类型：本控制器没有
@@ -123,7 +123,7 @@ func (c *Controller) SetDispatcher(d Dispatcher) { c.dispatch = d }
 
 // CreateOperation 以幂等键创建持久操作。目标机器必须已在台账；OS/Arch 缺省时
 // 从最新观测回填（创建时的平台事实快照）；能力判定由仓储层快照进目标
-//（domain.SnapshotCapability），阻塞组合在创建时即被拒绝（ErrUnsupportedCombo）。
+// （domain.SnapshotCapability），阻塞组合在创建时即被拒绝（ErrUnsupportedCombo）。
 func (c *Controller) CreateOperation(ctx context.Context, spec domain.LifecycleOperationSpec) (*domain.LifecycleOperation, bool, error) {
 	if spec.IdempotencyKey == "" {
 		return nil, false, fmt.Errorf("%w: idempotencyKey required", domain.ErrInvalid)
@@ -185,7 +185,7 @@ func (c *Controller) Confirm(ctx context.Context, id string, at time.Time) error
 }
 
 // Retry 创建重试操作：仅列原操作中确定失败的目标；类型与固定版本继承原操作
-//（改意图必须新建操作）；retryOf 关联追溯链。同一已批准意图的重试不重复确认
+// （改意图必须新建操作）；retryOf 关联追溯链。同一已批准意图的重试不重复确认
 // ——继承原操作确认时刻。幂等键服务端生成（重试语义已由追溯校验防重）。
 func (c *Controller) Retry(ctx context.Context, originalID string, targets []domain.LifecycleTarget, createdBy string) (*domain.LifecycleOperation, error) {
 	orig, err := c.repo.GetOperation(ctx, originalID)

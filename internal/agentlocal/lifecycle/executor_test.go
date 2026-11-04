@@ -193,7 +193,7 @@ func TestExecuteRefusesPlatformMismatch(t *testing.T) {
 }
 
 // TestExecuteRefusesUnknownMethodAndEnv：无引擎适配的安装方式与异构执行环境
-//（如 wsl 目标打到 native agentd）一律执行前拒绝。
+// （如 wsl 目标打到 native agentd）一律执行前拒绝。
 func TestExecuteRefusesUnknownMethodAndEnv(t *testing.T) {
 	eng := &fakeEngine{}
 	x := execWith(eng)

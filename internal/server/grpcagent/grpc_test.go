@@ -19,8 +19,8 @@ import (
 	"time"
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
-	"github.com/shelwinnn/agent-fleet/internal/controller/machine"
 	lifecyclectl "github.com/shelwinnn/agent-fleet/internal/controller/lifecycle"
+	"github.com/shelwinnn/agent-fleet/internal/controller/machine"
 	"github.com/shelwinnn/agent-fleet/internal/controller/reconcile"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"github.com/shelwinnn/agent-fleet/internal/enrollment"

@@ -315,7 +315,7 @@ type runEngineFn func(ctx context.Context, req Request) (Outcome, error)
 
 // runEngine 执行引擎调用并映射结果。引擎内建"操作后重新发现并独立核验"，
 // 这里只做状态/原因的如实映射：引擎错误 ≠ 成功，证据只取引擎核验后的实测值
-//（Outcome.VerifiedVersion 来自独立重发现，不是上游返回值——KM-46 零值陷阱）。
+// （Outcome.VerifiedVersion 来自独立重发现，不是上游返回值——KM-46 零值陷阱）。
 func (x *NodeExecutor) runEngine(ctx context.Context, key string, t TargetSpec,
 	successReason string, run runEngineFn) TargetOutcome {
 	out, err := run(ctx, requestOf(t))
