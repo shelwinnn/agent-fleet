@@ -339,6 +339,11 @@ describe('契约 mock 后端（T2/T3 形状）', () => {
       ],
     });
     const opId = created.operation.metadata.name;
+    // 未确认不派发（对齐控制器闸门）：settle 前必须确认。
+    expect(() => b.settleOperation(opId, [{ targetKey: () => true, state: 'succeeded' }])).toThrow('not dispatchable');
+    expect(b.dispatchable(opId)).toBe(false);
+    await b.confirmOperation(opId);
+    expect(b.dispatchable(opId)).toBe(true);
     b.settleOperation(opId, [
       { targetKey: (t: LifecycleTarget) => t.machine === 'a', state: 'succeeded', reason: 'verified-present', observedVersion: '0.56.0' },
       { targetKey: (t: LifecycleTarget) => t.machine === 'b', state: 'failed', reason: 'version-mismatch' },
@@ -359,6 +364,16 @@ describe('契约 mock 后端（T2/T3 形状）', () => {
     const retry2 = await b.retryOperation(opId, { targets: failed.map((f) => f.target as LifecycleTarget) });
     expect(retry2.status.needsReconfirmation).toBe(true);
     expect(needsReconfirmationView(retry2, zh)?.text).toContain('暂停');
+    // 重试继承原操作确认（不重复确认），但影响变化时闸门仍拦住，重新确认后放行
+    expect(retry2.status.confirmedAt).not.toBeNull();
+    expect(b.dispatchable(retry2.metadata.name)).toBe(false);
+    const reconfirmed = await b.confirmOperation(retry2.metadata.name);
+    expect(reconfirmed.status.needsReconfirmation).toBe(false);
+    expect(b.dispatchable(reconfirmed.metadata.name)).toBe(true);
+    // 确认幂等：重复确认不产生重复变更（仍是同一操作、无新增行）
+    const again = await b.confirmOperation(retry2.metadata.name);
+    expect(again.metadata.name).toBe(retry2.metadata.name);
+    expect(b.operations.size).toBe(3); // original + retry + retry2
   });
 
   it('意图合并：未提及的 agent 原样保留（省略 ≠ 卸载），内容无变化不新增代', async () => {

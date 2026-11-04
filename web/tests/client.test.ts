@@ -173,6 +173,19 @@ describe('生命周期端点（KM-47 / T3 契约路径）', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/lifecycle/operations');
   });
 
+  it('确认端点：POST /lifecycle/operations/{opId}/confirm（无请求体），返回确认后操作', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(op));
+    const client = new FleetClient({ fetch: fetchMock as unknown as typeof fetch });
+    const confirmed = await client.confirmLifecycleOperation('lc-op-1');
+    expect(confirmed.metadata.name).toBe('lc-op-1');
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/v1/lifecycle/operations/lc-op-1/confirm');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeUndefined();
+    const gw = new RestLifecycleGateway(client);
+    await expect(gw.confirmOperation('lc-op-1')).resolves.toMatchObject({ metadata: { name: 'lc-op-1' } });
+  });
+
   it('重试 / 操作查询 / 能力矩阵 / 上游检查路径正确编码', async () => {
     const fetchMock = vi.fn(async (..._args: unknown[]) => jsonResponse(op));
     const client = new FleetClient({ fetch: fetchMock as unknown as typeof fetch, baseUrl: 'http://cp:7788' });

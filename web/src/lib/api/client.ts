@@ -322,6 +322,19 @@ export class FleetClient {
       opts,
     );
 
+  /**
+   * 确认生命周期操作（KM-49 补全的执行编排入口）：记录确认时刻，未确认的
+   * 操作不派发；影响变化（needsReconfirmation）置位后经重新确认清除标记并
+   * 放行。幂等——重复确认只更新确认时刻，不产生重复变更。返回确认后的操作。
+   */
+  confirmLifecycleOperation = (opId: string, opts?: RequestOptions) =>
+    this.json<LifecycleOperation>(
+      'POST',
+      `/api/v1/lifecycle/operations/${encodeURIComponent(opId)}/confirm`,
+      undefined,
+      opts,
+    );
+
   /** 对确定失败的目标创建重试操作（retryOf 关联原操作；类型与固定版本继承，不可更改）。 */
   retryLifecycleOperation = (opId: string, req: LifecycleRetryRequest, opts?: RequestOptions) =>
     this.json<LifecycleOperation>(

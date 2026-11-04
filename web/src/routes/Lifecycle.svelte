@@ -94,6 +94,7 @@
   type TrackedOp = Awaited<ReturnType<LifecycleGateway['getOperation']>>;
   let tracked = $state<TrackedOp[]>([]);
   let retryingOpId = $state<string | null>(null);
+  let confirmingOpId = $state<string | null>(null);
   let lookupError = $state<string | null>(null);
   let resultsMsg = $state<string | null>(null);
 
@@ -303,8 +304,20 @@
     } catch (err) {
       opError = err;
     }
-    // 期望状态只在操作创建成功后写入：确认"执行"的前提是这次变更真的立住了。
-    if (op && includeDesired) {
+    // 确认是预览确认动作的后端记录（未确认不派发）：失败时操作仍在但停在
+    // 未确认，结果面板给出"确认执行"恢复入口；期望状态不写（前提未成立）。
+    let confirmError: unknown = null;
+    if (op) {
+      try {
+        op = await gateway.confirmOperation(op.metadata.name);
+        addTracked(op);
+      } catch (err) {
+        confirmError = err;
+      }
+    }
+    // 期望状态只在操作创建并确认成功后写入（预览里分开列明，成败如实上报）。
+    let desiredUpdateError: unknown = null;
+    if (op && confirmError === null && includeDesired) {
       try {
         const update =
           type === 'Uninstall'
@@ -312,24 +325,53 @@
             : desiredPresentUpdate(previewVersion, req.targets[0].method, req.targets[0].package);
         desired = await gateway.putDesired(machine.metadata.name, update);
       } catch (err) {
-        feedback = {
-          kind: 'error',
-          text: t('lc.preview.partialDesiredFailed', { id: op.metadata.name, reason: failureText(err, loc) }),
-        };
+        desiredUpdateError = err;
       }
     }
-    if (op) {
-      if (feedback === null) {
-        feedback = {
-          kind: 'ok',
-          text: reused ? t('lc.preview.reused', { id: op.metadata.name }) : t('lc.preview.created', { id: op.metadata.name }),
-        };
-      }
+    if (!op) {
+      feedback = { kind: 'error', text: `${t('lc.preview.failed')}${failureText(opError, loc)}` };
+    } else if (confirmError !== null) {
+      feedback = {
+        kind: 'error',
+        text: `${t('lc.results.confirmFailed')}${failureText(confirmError, loc)} ${t('lc.results.unconfirmedDetail')}`,
+      };
+    } else if (desiredUpdateError !== null) {
+      feedback = {
+        kind: 'error',
+        text: t('lc.preview.partialDesiredFailed', {
+          id: op.metadata.name,
+          reason: failureText(desiredUpdateError, loc),
+        }),
+      };
+    } else {
+      feedback = {
+        kind: 'ok',
+        text: reused ? t('lc.preview.reused', { id: op.metadata.name }) : t('lc.preview.created', { id: op.metadata.name }),
+      };
+    }
+    if (op && confirmError === null) {
       previewKind = null;
       versionInput = '';
       versionTouched = false;
-    } else {
-      feedback = { kind: 'error', text: `${t('lc.preview.failed')}${failureText(opError, loc)}` };
+    }
+  }
+
+  /** 结果面板里的确认/重新确认（未确认不派发；needsReconfirmation 经重新确认清除）。 */
+  async function confirmTracked(op: TrackedOp) {
+    confirmingOpId = op.metadata.name;
+    try {
+      const confirmed = await gateway.confirmOperation(op.metadata.name);
+      addTracked(confirmed);
+      feedback = {
+        kind: 'ok',
+        text: op.status.needsReconfirmation
+          ? t('lc.results.reconfirmDone')
+          : t('lc.results.confirmDone', { id: op.metadata.name }),
+      };
+    } catch (err) {
+      feedback = { kind: 'error', text: `${t('lc.results.confirmFailed')}${failureText(err, loc)}` };
+    } finally {
+      confirmingOpId = null;
     }
   }
 
@@ -749,9 +791,11 @@
   <ResultsPanel
     operations={tracked}
     {retryingOpId}
+    {confirmingOpId}
     {lookupError}
     message={resultsMsg}
     onretry={retryFailed}
+    onconfirmOp={confirmTracked}
     onlookup={lookupOperation}
   />
 </div>

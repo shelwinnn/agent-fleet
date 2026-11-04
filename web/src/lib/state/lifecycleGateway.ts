@@ -1,10 +1,10 @@
 /**
  * 生命周期页面的数据通道（KM-50）。
  *
- * 接口按"T2 落地契约（api/openapi/fleet-v1.yaml 的 /api/v1/lifecycle/* 与
- * /machines/{name}/lifecycle/desired）+ T3 上游发现 + 实例发现"划分。
- * 生产实现 RestLifecycleGateway 直连 FleetClient；REST 处理器属 T4/后端切片，
- * 未就绪时调用会得到 ApiError（如 404/501），页面如实呈现失败原因——绝不 mock 兜底。
+ * 接口按"T2/T4 落地契约（api/openapi/fleet-v1.yaml 的 /api/v1/lifecycle/* 与
+ * /machines/{name}/lifecycle/desired，含 confirm 确认端点）+ T3 上游发现 + 实例发现"划分。
+ * 生产实现 RestLifecycleGateway 直连 FleetClient；端点未装配或资源缺失时得到
+ * ApiError（如 404/501），页面如实呈现失败原因——绝不 mock 兜底。
  *
  * 实例发现（受管环境、用户与已装实例的路径/来源/版本）尚无落地契约：为不编造
  * 端点，RestLifecycleGateway.getInstanceInventory 显式抛 InventoryNotWiredError，
@@ -67,6 +67,8 @@ export interface LifecycleGateway {
   getCapabilities(): Promise<LifecycleCapability[]>;
   createOperation(req: LifecycleOperationCreateRequest): Promise<{ operation: LifecycleOperation; reused: boolean }>;
   getOperation(opId: string): Promise<LifecycleOperation>;
+  /** 记录操作者确认；未确认不派发，needsReconfirmation 经重新确认清除（幂等）。 */
+  confirmOperation(opId: string): Promise<LifecycleOperation>;
   retryOperation(opId: string, req: LifecycleRetryRequest): Promise<LifecycleOperation>;
   checkUpstream(agent: string): Promise<UpstreamVersionReport>;
 }
@@ -102,6 +104,10 @@ export class RestLifecycleGateway implements LifecycleGateway {
 
   getOperation(opId: string) {
     return this.client.getLifecycleOperation(opId);
+  }
+
+  confirmOperation(opId: string) {
+    return this.client.confirmLifecycleOperation(opId);
   }
 
   retryOperation(opId: string, req: LifecycleRetryRequest) {

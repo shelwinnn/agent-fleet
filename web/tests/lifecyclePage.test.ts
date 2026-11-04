@@ -367,6 +367,7 @@ describe('逐目标结果与重试', () => {
       ],
     });
     const opId = created.operation.metadata.name;
+    await h.backend.confirmOperation(opId); // 未确认不派发：settle 前先确认
     h.backend.settleOperation(opId, [
       { targetKey: (t) => t.env === '', state: 'succeeded', reason: 'verified-present', observedVersion: '0.56.0' },
       { targetKey: (t) => t.env !== '', state: 'failed', reason: 'version-mismatch', message: 'still 0.54.2 after upgrade' },
@@ -499,6 +500,84 @@ describe('评审修复回归', () => {
     const desired = await h.backend.getDesired('linux-build');
     expect(desired).toBeNull(); // 期望状态未被触碰
     expect(body().querySelector('[data-testid="lc-op"]')).toBeNull();
+  });
+});
+
+describe('confirm 端点接线（KM-50 修复；对齐 T6 e2e 链路）', () => {
+  it('预览确认 → 操作已确认并可派发；确认后逐目标结果可见（确认前不派发、确认后派发）', async () => {
+    const h = await mountPage();
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+
+    // 页面的确认动作已接线：mock 里操作带有确认时刻且可派发（契约闸门）
+    const ops = [...h.backend.operations.values()];
+    expect(ops).toHaveLength(1);
+    expect(ops[0].status.confirmedAt).not.toBeNull();
+    expect(h.backend.dispatchable(ops[0].metadata.name)).toBe(true);
+    // 确认前不派发：闸门由 mock 复刻（settleOperation 未确认时拒绝）——由 mock 单测锁定；
+    // 这里断言确认后真实派发推进：settle 后结果面板可见成功与实测版本
+    h.backend.settleOperation(ops[0].metadata.name, [
+      { targetKey: () => true, state: 'succeeded', reason: 'verified-present', observedVersion: '0.56.1' },
+    ]);
+    setInput('#lc-lookup', ops[0].metadata.name);
+    buttonByText('查询').click();
+    await settle();
+    expect(body().textContent).toContain('实测版本 0.56.1');
+    expect(body().textContent).not.toContain('已创建但未确认');
+  });
+
+  it('未确认的操作如实呈现"确认前不派发"，面板确认入口可恢复派发', async () => {
+    const h = await mountPage();
+    // 绕过页面确认动作直接创建（模拟确认请求失败的残余状态）
+    const created = await h.backend.createOperation({
+      type: 'Upgrade',
+      idempotencyKey: 'unconfirmed-seed',
+      version: '0.56.1',
+      targets: [{ machine: 'linux-build', env: '', user: 'ci', agent: 'codex', method: 'npm', package: '@openai/codex' }],
+    });
+    setInput('#lc-lookup', created.operation.metadata.name);
+    buttonByText('查询').click();
+    await settle();
+
+    expect(body().textContent).toContain('已创建但未确认');
+    expect(body().textContent).toContain('确认前操作不会派发');
+    expect(body().textContent).not.toContain('确认于'); // 尚无确认时刻
+    // 面板确认入口 → 幂等确认 → 可派发
+    buttonByText('确认执行').click();
+    await settle();
+    expect(body().textContent).toContain('已确认操作');
+    expect(h.backend.dispatchable(created.operation.metadata.name)).toBe(true);
+  });
+
+  it('确认后不再出示确认入口；重复确认的幂等由契约保证，面板只有一张操作卡', async () => {
+    const h = await mountPage();
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+    expect(h.backend.operations.size).toBe(1); // 幂等：同一意图只有一个操作行
+
+    // 已确认操作：无"未确认"横幅、无重复确认按钮；重复确认的幂等语义（不产生
+    // 重复变更）由 mock 单测与 T4 处理器共同锁定
+    setInput('#lc-lookup', [...h.backend.operations.keys()][0]);
+    buttonByText('查询').click();
+    await settle();
+    expect(body().textContent).not.toContain('已创建但未确认');
+    expect(body().querySelectorAll('[data-testid="lc-op"]').length).toBe(1);
   });
 });
 

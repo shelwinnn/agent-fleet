@@ -27,12 +27,25 @@
   interface Props {
     operations: LifecycleOperation[];
     retryingOpId?: string | null;
+    /** 正在执行确认/重新确认请求的操作 id。 */
+    confirmingOpId?: string | null;
     lookupError?: string | null;
     message?: string | null;
     onretry: (op: LifecycleOperation, targets: LifecycleTarget[]) => void;
+    /** 确认/重新确认（同一契约端点：未确认不派发；重新确认清除影响变化标记）。 */
+    onconfirmOp: (op: LifecycleOperation) => void;
     onlookup: (id: string) => void;
   }
-  let { operations, retryingOpId = null, lookupError = null, message = null, onretry, onlookup }: Props = $props();
+  let {
+    operations,
+    retryingOpId = null,
+    confirmingOpId = null,
+    lookupError = null,
+    message = null,
+    onretry,
+    onconfirmOp,
+    onlookup,
+  }: Props = $props();
 
   const loc = $derived(i18n.locale);
   let lookupId = $state('');
@@ -99,7 +112,30 @@
           <Alert.Root class="mt-2">
             <Alert.Title>{t('lc.results.needsReconfirmation')}</Alert.Title>
             <Alert.Description>{reconfirm.text}</Alert.Description>
+            <div class="mt-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={confirmingOpId === op.metadata.name}
+                onclick={() => onconfirmOp(op)}
+              >
+                {confirmingOpId === op.metadata.name ? t('lc.preview.submitting') : t('lc.results.reconfirmAction')}
+              </Button>
+            </div>
           </Alert.Root>
+        {:else if !op.status.confirmedAt}
+          <!-- 未确认不派发（契约执行闸门）：如实呈现并给出确认入口，不假装在执行 -->
+          <div class="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-dashed p-3" role="status">
+            <span class="text-sm font-medium">{t('lc.results.unconfirmed')}</span>
+            <span class="text-xs text-muted-foreground">{t('lc.results.unconfirmedDetail')}</span>
+            <Button
+              size="sm"
+              disabled={confirmingOpId === op.metadata.name}
+              onclick={() => onconfirmOp(op)}
+            >
+              {confirmingOpId === op.metadata.name ? t('lc.preview.submitting') : t('lc.preview.confirm')}
+            </Button>
+          </div>
         {/if}
 
         <div class="mt-2">

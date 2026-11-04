@@ -230,10 +230,33 @@ export class MockLifecycleBackend implements LifecycleGateway {
     return JSON.parse(JSON.stringify(op)) as LifecycleOperation;
   }
 
-  /** 测试推进逐目标状态：模拟执行结果（真实执行由 T4 引擎承担）。 */
+  /**
+   * 记录操作者确认（对齐 T4 控制器 Confirm/MarkConfirmed）：幂等置确认时刻并
+   * 清除 needsReconfirmation；重复确认不产生重复变更。
+   */
+  async confirmOperation(opId: string): Promise<LifecycleOperation> {
+    const op = this.operations.get(opId);
+    if (!op) throw apiError(404, 'NotFound', `operation ${opId} not found`);
+    op.status.confirmedAt = NOW_STR;
+    op.status.needsReconfirmation = false;
+    op.status.reconfirmReason = undefined;
+    op.metadata.resourceVersion = (op.metadata.resourceVersion ?? 0) + 1;
+    return JSON.parse(JSON.stringify(op)) as LifecycleOperation;
+  }
+
+  /** 该操作是否可派发（对齐控制器闸门：confirmedAt 为空或 needsReconfirmation 时不派发）。 */
+  dispatchable(opId: string): boolean {
+    const op = this.operations.get(opId);
+    return !!op && op.status.confirmedAt != null && !op.status.needsReconfirmation;
+  }
+
+  /** 测试推进逐目标状态：模拟执行结果（真实执行由 T4 引擎承担）。未确认的操作不派发。 */
   settleOperation(opId: string, results: { targetKey: (t: LifecycleTarget) => boolean; state: LifecycleTargetResult['state']; reason?: string; message?: string; observedVersion?: string }[]) {
     const op = this.operations.get(opId);
     if (!op) throw new Error(`unknown op ${opId}`);
+    if (op.status.confirmedAt == null || op.status.needsReconfirmation) {
+      throw new Error(`operation ${opId} is not dispatchable: unconfirmed or needs reconfirmation`);
+    }
     op.status.results = (op.status.results ?? []).map((r) => {
       const hit = results.find((x) => x.targetKey(r.target as LifecycleTarget));
       if (!hit) return r;
@@ -273,7 +296,8 @@ export class MockLifecycleBackend implements LifecycleGateway {
       status: {
         phase: 'Pending',
         results: req.targets.map((t) => ({ target: t, state: 'pending' }) as LifecycleTargetResult),
-        confirmedAt: NOW_STR,
+        // 同一已批准操作的重试不重复确认：继承原操作确认时刻。
+        confirmedAt: original.status.confirmedAt ?? NOW_STR,
         ...(this.retryNeedsReconfirmation
           ? { needsReconfirmation: true, reconfirmReason: 'rediscovered target state differs from the approved premise' }
           : {}),
