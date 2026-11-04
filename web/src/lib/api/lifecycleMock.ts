@@ -29,9 +29,10 @@ function apiError(status: number, reason: string, message: string): ApiError {
 
 export const NOW_STR = '2026-10-29T08:00:00Z';
 
-/** 能力矩阵取值对齐 KM-46 §7：supported 真机证据前为空集。 */
+/** 能力矩阵夹具：linux npm 建模为 supported（真机证据在案）以验证放行路径；
+ *  darwin 保持 unverified、windows 全部 blocked，用于验证入口关闭与如实展示。 */
 export const MOCK_CAPABILITIES: LifecycleCapability[] = [
-  { os: 'linux', arch: 'amd64', method: 'npm', state: 'unverified', evidenceLevel: 'isolated', reason: '隔离环境已验证，真机待验收' },
+  { os: 'linux', arch: 'amd64', method: 'npm', state: 'supported', evidenceLevel: 'real_machine', reason: '真机验收通过' },
   { os: 'linux', arch: 'amd64', method: 'binary', state: 'blocked', evidenceLevel: 'none', reason: 'binary 通道不支持固定版本升级' },
   { os: 'windows', arch: 'amd64', method: 'npm', state: 'blocked', evidenceLevel: 'none', reason: 'Windows npm/.cmd shim 待实测' },
   { os: 'windows', arch: 'amd64', method: 'binary', state: 'blocked', evidenceLevel: 'none', reason: 'binary 通道阻塞' },
@@ -54,6 +55,16 @@ export function mockInventory(): Record<string, AgentInstanceInventory> {
         { env: 'wsl:ubuntu', user: 'dev', agent: 'codex', method: 'npm', package: CODEX_PACKAGE, version: '0.54.2', executablePath: '/home/dev/.npm-global/bin/codex' },
       ],
       inventorySeq: 41,
+      discoveredAt: NOW_STR,
+    },
+    // darwin 无实例：安装视图里 unverified 方式如实禁用（P7）。
+    'mac-ci': {
+      machine: 'mac-ci',
+      os: 'darwin',
+      arch: 'arm64',
+      environments: [{ env: '', users: ['ci2'] }],
+      instances: [],
+      inventorySeq: 9,
       discoveredAt: NOW_STR,
     },
     // 单用户无实例：显式"尚未安装"路径。
@@ -127,6 +138,10 @@ export class MockLifecycleBackend implements LifecycleGateway {
   createError: Error | null = null;
   /** 置位后 confirmOperation 一律失败（模拟确认请求失败，验证恢复路径）。 */
   confirmError: Error | null = null;
+  /** 置位后 createOperation 抛出一次（模拟响应丢失的网络错误），随后自动清除。 */
+  transientCreateError: Error | null = null;
+  /** 每次 createOperation 尝试的幂等键记录（验证 P6 键保留语义）。 */
+  createKeyLog: string[] = [];
   private seq = 0;
 
   constructor() {
@@ -188,6 +203,12 @@ export class MockLifecycleBackend implements LifecycleGateway {
   }
 
   async createOperation(req: LifecycleOperationCreateRequest): Promise<{ operation: LifecycleOperation; reused: boolean }> {
+    this.createKeyLog.push(req.idempotencyKey);
+    if (this.transientCreateError) {
+      const err = this.transientCreateError;
+      this.transientCreateError = null;
+      throw err;
+    }
     if (this.createError) throw this.createError;
     const existing = [...this.operations.values()].find((o) => o.spec.idempotencyKey === req.idempotencyKey);
     if (existing) {

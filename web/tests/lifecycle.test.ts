@@ -75,15 +75,15 @@ describe('精确固定版本校验', () => {
 });
 
 describe('能力矩阵呈现', () => {
-  it('按 os/arch/method 找到能力；unverified 提供入口、blocked 只展示不提供', () => {
+  it('按 os/arch/method 找到能力；入口仅对 supported 开放，unverified/blocked 如实展示不提供（T7 P7）', () => {
     const cap = capabilityFor(MOCK_CAPABILITIES, 'linux', 'amd64', 'npm');
-    expect(cap?.state).toBe('unverified');
-    expect(cap?.evidenceLevel).toBe('isolated');
+    expect(cap?.state).toBe('supported');
+    expect(cap?.evidenceLevel).toBe('real_machine');
 
     const win = methodOfferings(MOCK_CAPABILITIES, 'windows', 'amd64');
     const npm = win.find((o) => o.method === 'npm')!;
     const binary = win.find((o) => o.method === 'binary')!;
-    expect(npm.offered).toBe(false); // windows npm 阻塞
+    expect(npm.offered).toBe(false); // windows npm blocked
     expect(binary.offered).toBe(false);
     // 状态与原因仍然如实列出（不隐藏限制）
     expect(npm.capability?.state).toBe('blocked');
@@ -91,6 +91,13 @@ describe('能力矩阵呈现', () => {
 
     const linux = methodOfferings(MOCK_CAPABILITIES, 'linux', 'amd64');
     expect(linux.find((o) => o.method === 'npm')!.offered).toBe(true);
+
+    // unverified 同样不提供入口（执行会被节点准入拒绝，入口即误导）
+    const darwin = methodOfferings(MOCK_CAPABILITIES, 'darwin', 'arm64');
+    expect(darwin.find((o) => o.method === 'npm')!.offered).toBe(false);
+    expect(darwin.find((o) => o.method === 'npm')!.capability?.state).toBe('unverified');
+    // 能力未知（无记录）也不提供入口
+    expect(methodOfferings([], 'linux', 'amd64').find((o) => o.method === 'npm')).toBeUndefined();
   });
 
   it('supported=ok、unverified=warn、blocked=danger，未知=muted（未验证不标支持）', () => {
@@ -288,7 +295,7 @@ describe('实例选择辅助', () => {
       package: '@openai/codex',
       os: 'linux',
       arch: 'amd64',
-      capabilityState: 'unverified',
+      capabilityState: 'supported',
     });
     expect(t.env).toBeUndefined(); // 空 env = native，字段可缺省
   });
