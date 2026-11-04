@@ -125,6 +125,8 @@ export class MockLifecycleBackend implements LifecycleGateway {
   enforceRetryValidation = true;
   /** 置位后 createOperation 一律失败（模拟后端拒绝，验证 UI 不产生部分变更）。 */
   createError: Error | null = null;
+  /** 置位后 confirmOperation 一律失败（模拟确认请求失败，验证恢复路径）。 */
+  confirmError: Error | null = null;
   private seq = 0;
 
   constructor() {
@@ -235,6 +237,7 @@ export class MockLifecycleBackend implements LifecycleGateway {
    * 清除 needsReconfirmation；重复确认不产生重复变更。
    */
   async confirmOperation(opId: string): Promise<LifecycleOperation> {
+    if (this.confirmError) throw this.confirmError;
     const op = this.operations.get(opId);
     if (!op) throw apiError(404, 'NotFound', `operation ${opId} not found`);
     op.status.confirmedAt = NOW_STR;
@@ -296,8 +299,9 @@ export class MockLifecycleBackend implements LifecycleGateway {
       status: {
         phase: 'Pending',
         results: req.targets.map((t) => ({ target: t, state: 'pending' }) as LifecycleTargetResult),
-        // 同一已批准操作的重试不重复确认：继承原操作确认时刻。
-        confirmedAt: original.status.confirmedAt ?? NOW_STR,
+        // 同一已批准操作的重试不重复确认：仅在原操作已确认时继承
+        //（对齐 internal/controller/lifecycle/controller.go——未确认原操作的重试保持未确认）。
+        confirmedAt: original.status.confirmedAt ?? undefined,
         ...(this.retryNeedsReconfirmation
           ? { needsReconfirmation: true, reconfirmReason: 'rediscovered target state differs from the approved premise' }
           : {}),

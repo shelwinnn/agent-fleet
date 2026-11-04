@@ -550,8 +550,8 @@ describe('confirm 端点接线（KM-50 修复；对齐 T6 e2e 链路）', () => 
     expect(body().textContent).toContain('已创建但未确认');
     expect(body().textContent).toContain('确认前操作不会派发');
     expect(body().textContent).not.toContain('确认于'); // 尚无确认时刻
-    // 面板确认入口 → 幂等确认 → 可派发
-    buttonByText('确认执行').click();
+    // 面板确认入口 → 确认 → 可派发
+    buttonByText('确认派发').click();
     await settle();
     expect(body().textContent).toContain('已确认操作');
     expect(h.backend.dispatchable(created.operation.metadata.name)).toBe(true);
@@ -578,6 +578,68 @@ describe('confirm 端点接线（KM-50 修复；对齐 T6 e2e 链路）', () => 
     await settle();
     expect(body().textContent).not.toContain('已创建但未确认');
     expect(body().querySelectorAll('[data-testid="lc-op"]').length).toBe(1);
+  });
+});
+
+describe('confirm 失败恢复与重新确认（评审修复）', () => {
+  it('确认失败：期望状态不写、操作卡如实停在未确认，面板确认入口可恢复派发', async () => {
+    const backend = new MockLifecycleBackend();
+    backend.confirmError = new Error('network refused');
+    const h = await mountPage(backend);
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+
+    expect(body().textContent).toContain('确认未完成');
+    expect(body().textContent).toContain('确认前操作不会派发');
+    // 确认前提未成立：期望状态未被触碰
+    expect(await h.backend.getDesired('linux-build')).toBeNull();
+    // 操作卡在面板上可见且带恢复入口（操作已在创建时进入追踪）
+    expect(body().querySelectorAll('[data-testid="lc-op"]').length).toBe(1);
+    expect(body().textContent).toContain('已创建但未确认');
+    // 恢复：确认请求成功后可派发
+    backend.confirmError = null;
+    buttonByText('确认派发').click();
+    await settle();
+    const op = [...backend.operations.values()][0];
+    expect(op.status.confirmedAt).not.toBeNull();
+    expect(backend.dispatchable(op.metadata.name)).toBe(true);
+  });
+
+  it('重新确认清除影响变化标记并放行；页面不产生重复操作行', async () => {
+    const h = await mountPage();
+    const created = await h.backend.createOperation({
+      type: 'Upgrade',
+      idempotencyKey: 'reconfirm-seed',
+      version: '0.56.1',
+      targets: [{ machine: 'linux-build', env: '', user: 'ci', agent: 'codex', method: 'npm', package: '@openai/codex' }],
+    });
+    const opId = created.operation.metadata.name;
+    await h.backend.confirmOperation(opId);
+    // 模拟重试重发现发现影响变化：置 needsReconfirmation（闸门拦住）
+    const op = h.backend.operations.get(opId)!;
+    op.status.needsReconfirmation = true;
+    op.status.reconfirmReason = 'version-mismatch';
+    expect(h.backend.dispatchable(opId)).toBe(false);
+
+    setInput('#lc-lookup', opId);
+    buttonByText('查询').click();
+    await settle();
+    expect(body().textContent).toContain('影响已变化，需重新确认');
+    const before = h.backend.operations.size;
+    buttonByText('重新确认并继续').click();
+    await settle();
+    expect(body().textContent).toContain('已重新确认');
+    expect(h.backend.operations.size).toBe(before); // 无重复操作行
+    expect(h.backend.dispatchable(opId)).toBe(true);
+    expect(body().textContent).not.toContain('影响已变化');
   });
 });
 

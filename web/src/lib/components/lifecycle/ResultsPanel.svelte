@@ -133,7 +133,7 @@
               disabled={confirmingOpId === op.metadata.name}
               onclick={() => onconfirmOp(op)}
             >
-              {confirmingOpId === op.metadata.name ? t('lc.preview.submitting') : t('lc.preview.confirm')}
+              {confirmingOpId === op.metadata.name ? t('lc.preview.submitting') : t('lc.results.confirmAction')}
             </Button>
           </div>
         {/if}
