@@ -12,7 +12,7 @@ import (
 
 // fakeQuerier 是受控版本源：按调用序回放预置结果，不发起任何外部命令。
 type fakeQuerier struct {
-	mu     sync.Mutex
+	mu sync.Mutex
 	// resps 是 **npm 来源**的逐次脚本（耗尽后复用最后一个）。Check 对全部
 	// 来源并发查询（npm/brew 同时发起），全局脚本会让并发消费者争抢序列、
 	// 断言随机失效——因此脚本按方法圈定：未脚本化的方法得到显式错误（不

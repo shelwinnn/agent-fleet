@@ -423,7 +423,7 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 	// needs_reconfirmation 置位；同一操作不再派发（目标已落定）。
 	if err := f.ctrl.OnLifecycleResult(f.ctx, ResultMsg{
 		Machine: "m1", OpID: retry.Metadata.Name,
-		IdempotencyKey: retry.Spec.IdempotencyKey,
+		IdempotencyKey:      retry.Spec.IdempotencyKey,
 		NeedsReconfirmation: true,
 		ReconfirmReason:     "rediscovery found codex@0.45.0 before retry",
 		Results: []domain.LifecycleTargetResult{{

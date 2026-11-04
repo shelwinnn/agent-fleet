@@ -13,7 +13,7 @@ import (
 )
 
 // LifecycleResultSink 是控制面对节点生命周期结果上报的处理入口
-//（由 lifecycle.Controller 实现；与 ResultSink 同一双接线模式）。
+// （由 lifecycle.Controller 实现；与 ResultSink 同一双接线模式）。
 type LifecycleResultSink interface {
 	OnLifecycleResult(ctx context.Context, msg lifecyclectl.ResultMsg) error
 }

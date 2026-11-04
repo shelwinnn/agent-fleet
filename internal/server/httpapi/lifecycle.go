@@ -42,11 +42,11 @@ func (s *Server) handleLifecycleCreateOperation(w http.ResponseWriter, r *http.R
 		return
 	}
 	var req struct {
-		Type           string                  `json:"type"`
-		IdempotencyKey string                  `json:"idempotencyKey"`
-		Version        string                  `json:"version"`
+		Type           string                   `json:"type"`
+		IdempotencyKey string                   `json:"idempotencyKey"`
+		Version        string                   `json:"version"`
 		Targets        []domain.LifecycleTarget `json:"targets"`
-		CreatedBy      string                  `json:"createdBy"`
+		CreatedBy      string                   `json:"createdBy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, domain.ReasonInvalid, "invalid JSON body: "+err.Error(), nil)
@@ -191,7 +191,7 @@ func lifecycleDesiredView(rec *domain.LifecycleDesiredRecord) map[string]any {
 }
 
 // writeLifecycleError 把生命周期哨兵错误映射为 §6.4 错误体
-//（幂等冲突/不可重试 → 409；能力阻塞 → 422；其余走通用映射）。
+// （幂等冲突/不可重试 → 409；能力阻塞 → 422；其余走通用映射）。
 func writeLifecycleError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrIdempotencyConflict):

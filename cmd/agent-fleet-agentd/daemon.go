@@ -9,7 +9,6 @@ import (
 
 	fleetv1 "github.com/shelwinnn/agent-fleet/api/proto/fleet/v1"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter"
-	"github.com/shelwinnn/agent-fleet/internal/agentlocal/lifecycle"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/claude"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/codex"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/dsh"
@@ -18,6 +17,7 @@ import (
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/omp"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/adapter/opencode"
 	"github.com/shelwinnn/agent-fleet/internal/agentlocal/inventory"
+	"github.com/shelwinnn/agent-fleet/internal/agentlocal/lifecycle"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
