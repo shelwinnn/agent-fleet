@@ -3,6 +3,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, FleetClient } from '../src/lib/api/client.js';
+import { RestLifecycleGateway } from '../src/lib/state/lifecycleGateway.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -130,5 +131,58 @@ describe('FleetClient', () => {
     expect(String(installUrl)).toBe('/api/v1/ssh/include');
     expect(installInit.method).toBe('POST');
     expect(JSON.parse(String(installInit.body))).toEqual({ action: 'install', confirm: true });
+  });
+});
+
+describe('生命周期端点（KM-47 / T3 契约路径）', () => {
+  const op = {
+    metadata: { name: 'lc-op-1' },
+    spec: { type: 'Install', idempotencyKey: 'k', version: '0.56.0', targets: [] },
+    status: { phase: 'Pending' },
+  };
+
+  it('desired 读取/写入走 /machines/{name}/lifecycle/desired；404 归一为 null（从未纳管）', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).endsWith('/404-machine/lifecycle/desired')
+        ? jsonResponse({ reason: 'NotFound', message: 'x', timestamp: 't' }, 404)
+        : jsonResponse({ schemaVersion: 'lifecycle-v1', entries: {}, revision: 1, digest: 'sha256:x' }),
+    );
+    const client = new FleetClient({ fetch: fetchMock });
+    const doc = await client.getLifecycleDesired('ws-1');
+    expect(doc.revision).toBe(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/v1/machines/ws-1/lifecycle/desired');
+    expect(init.method).toBe('GET');
+    await client.putLifecycleDesired('ws-1', { entries: { codex: { intent: 'present', version: '0.56.0', method: 'npm', package: '@openai/codex' } } });
+    const [, putInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(putInit.method).toBe('PUT');
+
+    const gw = new RestLifecycleGateway(client);
+    await expect(gw.getDesired('404-machine')).resolves.toBeNull();
+  });
+
+  it('创建操作：201=新建、200=幂等复用（duplicate）', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      jsonResponse(op, init?.body && JSON.parse(init.body as string).idempotencyKey === 'reused-key' ? 200 : 201),
+    );
+    const client = new FleetClient({ fetch: fetchMock });
+    const fresh = await client.createLifecycleOperation({ type: 'Install', idempotencyKey: 'new-key', version: '0.56.0', targets: [] });
+    expect(fresh.reused).toBe(false);
+    const again = await client.createLifecycleOperation({ type: 'Install', idempotencyKey: 'reused-key', version: '0.56.0', targets: [] });
+    expect(again.reused).toBe(true);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/lifecycle/operations');
+  });
+
+  it('重试 / 操作查询 / 能力矩阵 / 上游检查路径正确编码', async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) => jsonResponse(op));
+    const client = new FleetClient({ fetch: fetchMock as unknown as typeof fetch, baseUrl: 'http://cp:7788' });
+    await client.retryLifecycleOperation('op/1', { targets: [] });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('http://cp:7788/api/v1/lifecycle/operations/op%2F1/retry');
+    await client.getLifecycleOperation('lc-op-1');
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe('http://cp:7788/api/v1/lifecycle/operations/lc-op-1');
+    await client.getLifecycleCapabilities();
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe('http://cp:7788/api/v1/lifecycle/capabilities');
+    await client.checkUpstreamVersions('codex');
+    expect(String(fetchMock.mock.calls[3]?.[0])).toBe('http://cp:7788/api/v1/agents/codex/upstream-versions/check');
   });
 });

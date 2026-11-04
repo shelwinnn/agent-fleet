@@ -13,6 +13,12 @@ import type {
   DeploymentList,
   IncludeInstallResult,
   IncludePreview,
+  LifecycleCapabilityList,
+  LifecycleDesiredDocument,
+  LifecycleDesiredUpdate,
+  LifecycleOperation,
+  LifecycleOperationCreateRequest,
+  LifecycleRetryRequest,
   Machine,
   MachineDrift,
   MachineList,
@@ -23,6 +29,7 @@ import type {
   RenderPreview,
   Skill,
   SkillList,
+  UpstreamVersionReport,
 } from './types';
 
 /** §6.4 错误体映射后的错误对象。 */
@@ -267,6 +274,76 @@ export class FleetClient {
       'POST',
       `/api/v1/deployments/${encodeURIComponent(name)}/targets/${encodeURIComponent(machine)}/skip`,
       { reason },
+      opts,
+    );
+
+  // ---- lifecycle（KM-47 契约：/api/v1/machines/{name}/lifecycle/desired 与 /api/v1/lifecycle/*）----
+
+  /**
+   * 查看机器的显式生命周期意图。404 表示从未纳管——"未纳管"是可查询的显式
+   * 状态，不是 absent（省略绝不构成隐式卸载）；调用方用 ApiError.status===404 区分。
+   */
+  getLifecycleDesired = (name: string, opts?: RequestOptions) =>
+    this.json<LifecycleDesiredDocument>(
+      'GET',
+      `/api/v1/machines/${encodeURIComponent(name)}/lifecycle/desired`,
+      undefined,
+      opts,
+    );
+
+  /** 更新显式意图（合并语义：提及的 agent 显式替换，未提及的原样保留）。 */
+  putLifecycleDesired = (name: string, update: LifecycleDesiredUpdate, opts?: RequestOptions) =>
+    this.json<LifecycleDesiredDocument>(
+      'PUT',
+      `/api/v1/machines/${encodeURIComponent(name)}/lifecycle/desired`,
+      update,
+      opts,
+    );
+
+  /**
+   * 以幂等键创建生命周期操作。201 = 新操作；200 = 幂等复用既有操作
+   * （duplicate），UI 据此提示"重复提交已复用同一操作"而不产生重复变更。
+   */
+  async createLifecycleOperation(
+    req: LifecycleOperationCreateRequest,
+    opts?: RequestOptions,
+  ): Promise<{ operation: LifecycleOperation; reused: boolean }> {
+    const resp = await this.request('POST', '/api/v1/lifecycle/operations', req, opts);
+    const operation = (await resp.json()) as LifecycleOperation;
+    return { operation, reused: resp.status === 200 };
+  }
+
+  /** 查询生命周期操作（逐目标状态、原因与证据，不含秘密）。 */
+  getLifecycleOperation = (opId: string, opts?: RequestOptions) =>
+    this.json<LifecycleOperation>(
+      'GET',
+      `/api/v1/lifecycle/operations/${encodeURIComponent(opId)}`,
+      undefined,
+      opts,
+    );
+
+  /** 对确定失败的目标创建重试操作（retryOf 关联原操作；类型与固定版本继承，不可更改）。 */
+  retryLifecycleOperation = (opId: string, req: LifecycleRetryRequest, opts?: RequestOptions) =>
+    this.json<LifecycleOperation>(
+      'POST',
+      `/api/v1/lifecycle/operations/${encodeURIComponent(opId)}/retry`,
+      req,
+      opts,
+    );
+
+  /** 查询生命周期能力矩阵（supported 在 T8 真机证据前为空集；unverified 不标支持）。 */
+  getLifecycleCapabilities = (opts?: RequestOptions) =>
+    this.json<LifecycleCapabilityList>('GET', '/api/v1/lifecycle/capabilities', undefined, opts);
+
+  /**
+   * 检查上游可用版本（T3/KM-48 契约，逐来源含失败记录与缓存回退）。
+   * 查询失败也是 200 报告的一部分，不映射 HTTP 错误。
+   */
+  checkUpstreamVersions = (agent: string, opts?: RequestOptions) =>
+    this.json<UpstreamVersionReport>(
+      'POST',
+      `/api/v1/agents/${encodeURIComponent(agent)}/upstream-versions/check`,
+      undefined,
       opts,
     );
 }

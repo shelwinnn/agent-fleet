@@ -71,6 +71,14 @@ export class FleetStore {
   readonly operationOwners = new Map<string, string>();
   private recentOperationsFetchedAt = 0;
   private started = false;
+  /** 生命周期事件的订阅者（Lifecycle 页注册；返回退订函数）。 */
+  private lifecycleListeners = new Set<(ev: ResourceEvent) => void>();
+
+  /** 订阅 lifecycle-desired / lifecycle-operations 事件；返回退订函数。 */
+  onLifecycleEvent(listener: (ev: ResourceEvent) => void): () => void {
+    this.lifecycleListeners.add(listener);
+    return () => this.lifecycleListeners.delete(listener);
+  }
 
   constructor(client?: FleetClient) {
     this.client = client ?? new FleetClient();
@@ -121,6 +129,12 @@ export class FleetStore {
     this.lastEventAt = new Date();
     if (!this.tracker.accept(ev.resource, ev.id, ev.revision)) {
       this.eventsCoalesced += 1;
+      return;
+    }
+    // 生命周期事件（KM-47 起）由订阅者自行重取：lifecycle-desired 按机器名、
+    // lifecycle-operations 按操作 id。它们不进通用重取计划（planRefetch 不识别）。
+    if (ev.resource === 'lifecycle-desired' || ev.resource === 'lifecycle-operations') {
+      for (const listener of this.lifecycleListeners) listener(ev);
       return;
     }
     this.pending.push(ev);

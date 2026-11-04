@@ -32,6 +32,7 @@ pnpm integration    # 与真实控制面的联调检查（需控制面在 127.0.
 | `#/skills` | Skills（Name/Source/Requested Ref/Resolved Revision/Digest/Machines） | §24.5 |
 | `#/deployments`、`#/deployments/:name` | Deployments（批次进度与逐机结果） | §24.6 |
 | `#/ssh-inventory` | SSH Inventory（别名 + OpenSSH include 预览与导出） | §24.7 |
+| `#/lifecycle` | Codex 维护（KM-50：目标选择 → 检查更新 → 预览确认 → 逐目标结果） | codex-lifecycle spec（User Stories 1–33） |
 
 hash 路由：静态产物可被任意静态服务器托管，不需要服务端 rewrite 规则。
 
@@ -43,6 +44,7 @@ hash 路由：静态产物可被任意静态服务器托管，不需要服务端
 | 未决操作与阻塞 | `src/lib/state/operations.ts` | 未决相位集合与 §4.3 唯一索引谓词一致（含 AwaitingConfirmation/Unknown）；列出被阻塞的动作与三个例外端点（确认/取消/跳过）；跳过必须填原因且明示"不表示节点已停止、不计入成功"。 |
 | Deployment 目标异常态 | `src/lib/state/deployments.ts` | `Superseded`（机器已在更新代，附原因码）与 `Skipped`（显式跳过）与 `Failed` 分开显示，且都不计入成功；`Blocked` 明示"不计入失败也不推进批次"。 |
 | SSH 路径 AwaitingConfirmation 与 plan 基线失效 | `src/lib/state/ssh.ts` | "等待确认（剩余 T）"、确认入口旁的基线提示（apply 会重算 plan 并比对基线，不一致报 `ReplanRequired`）、计划超时语义、host-key 失败与"需升级 agentd"提示。 |
+| 生命周期逐目标四态（KM-50） | `src/lib/state/lifecycle.ts` | 成功/失败/未执行/未知各带原因与下一步；**unknown 永远 warn 色**、不计成功、明示"不会自动重试"；`needsReconfirmation` 显示"执行已暂停"；上游查询失败时无缓存即"可用版本未知"，**未知 ≠ 最新**；"停止管理"与"卸载"文案严格区分。 |
 
 实时更新（FR-14.2）：`GET /api/v1/events` 的 SSE 事件 = `event: <resource-type>` +
 `data: {id, revision}`；客户端 `src/lib/state/refetch.ts` 按 (类型, id) + revision 记账并折叠成
@@ -83,6 +85,15 @@ hash 路由：静态产物可被任意静态服务器托管，不需要服务端
    `/api` 命名空间未匹配时仍是 §6.4 JSON 404（KM-21 既有行为，有测试锁定）。
 8. **凭据边界**：UI 不展示也不存储任何 secret（含 `POST /machines/{name}/enroll-token` 的一次性明文 token），
    因此不提供签发入口。
+9. **生命周期 REST 处理器未接线（KM-50 登记）**：T2（KM-47）落地的是模型 + proto/OpenAPI 契约，
+   `/api/v1/lifecycle/*` 与 `/machines/{name}/lifecycle/desired` 的 REST 处理器、以及
+   `POST /api/v1/agents/{agent}/upstream-versions/check`（T3，PR #22）未全部并线前，生产环境调用会
+   得到 404/501。Lifecycle 页对这些失败**如实呈现原因与重试提示**，不以任何兜底数据冒充可用；
+   页面行为的验证用契约形状的 mock（`web/src/lib/api/lifecycleMock.ts`，仅测试 import）完成，
+   浏览器发起的真实链路由 T6 收口。
+10. **实例发现无落地契约（KM-50 登记）**：受管环境/用户/已装实例（路径、来源、版本）尚无 REST 契约。
+    为不编造端点，`RestLifecycleGateway.getInstanceInventory` 显式抛 `InventoryNotWiredError`，
+    页面呈现"实例发现尚未接入控制面"；等价 mock 由测试注入。T4/后端落地契约后接通。
 
 ## 核查必改与建议的闭环（KM-25 复核后）
 
