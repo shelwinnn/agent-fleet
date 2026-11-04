@@ -68,6 +68,52 @@ func execLifecycleMsg(opID string) *fleetv1.ExecuteLifecycleOperation {
 	}
 }
 
+// TestLifecycleReportSatisfiesControlPlaneContract：worker 产出的上行消息必须
+// 携带控制面对位落库所需的全部身份（KM-51 链路缺陷修复的回归锁）。此前的
+// 转换不带幂等键与逐目标身份，真实链路上控制面按"键不匹配/未知目标"拒收
+// 每一份结果——单元测试各自为战测不出来，E2E（internal/e2e）才暴露。
+func TestLifecycleReportSatisfiesControlPlaneContract(t *testing.T) {
+	x, msgs, _, cancel := lifecycleHostSetup(t)
+	defer cancel()
+
+	msg := execLifecycleMsg("op-contract")
+	if res := x.Enqueue(msg); res != nil {
+		t.Fatalf("unexpected replay: %+v", res)
+	}
+	var wire *fleetv1.LifecycleOperationResult
+	select {
+	case wire = <-msgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no result from worker")
+	}
+
+	if got := wire.GetIdempotencyKey(); got != msg.GetSpec().GetIdempotencyKey() {
+		t.Fatalf("uplink idempotency key = %q, want %q (control plane rejects results on key mismatch)", got, msg.GetSpec().GetIdempotencyKey())
+	}
+	if n := len(wire.GetResults()); n != 1 {
+		t.Fatalf("results = %d, want 1", n)
+	}
+	tgt := wire.GetResults()[0].GetTarget()
+	if tgt == nil {
+		t.Fatal("uplink target identity missing (control plane files results by target key)")
+	}
+
+	// 按服务端 lifecycleResultFromProto 的读取方式还原目标身份，键必须与
+	// 派发时的目标键逐段一致（对位落库的唯一依据）。
+	served := domain.LifecycleTarget{
+		Machine: tgt.GetMachineId(), Env: tgt.GetEnv(), User: tgt.GetUser(),
+		Agent: tgt.GetAgent(), Method: tgt.GetMethod(), Package: tgt.GetPackage(),
+	}
+	want := domain.LifecycleTarget{Machine: "ws-1", Env: "native", User: "alice",
+		Agent: "codex", Method: "npm", Package: "@openai/codex"}.Key()
+	if got := served.Normalize().Key(); got != want {
+		t.Fatalf("served target key = %q, want %q", got, want)
+	}
+	if wire.GetIdempotencyKey() != msg.GetSpec().GetIdempotencyKey() {
+		t.Fatalf("served idempotency key = %q", wire.GetIdempotencyKey())
+	}
+}
+
 // TestLifecycleHostQueueDedupeAndOutboxReplay：重复派发幂等——执行中/已入队
 // 忽略、已终结从 outbox 重发；Ack 后淘汰。
 func TestLifecycleHostQueueDedupeAndOutboxReplay(t *testing.T) {

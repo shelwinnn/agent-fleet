@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,10 +60,14 @@ func codexExecutables(agent string) []string {
 }
 
 // lifecycleReportToProto 把执行结果转换为上行消息（节点已脱敏限长；控制面
-// 落库前还有第二道闸——两道闸同一纪律）。
-func lifecycleReportToProto(rep *lifecycle.Report) *fleetv1.LifecycleOperationResult {
+// 落库前还有第二道闸——两道闸同一纪律）。幂等键与逐目标身份必须随上行回带：
+// 控制面按 opId+幂等键对位、按目标身份键落库，缺任一字段整份上报会被
+// OnLifecycleResult 拒收（KM-51 链路缺陷修复：此前上行不带这两个字段，
+// 真实链路上每个结果都被判"键不匹配/未知目标"丢弃）。
+func lifecycleReportToProto(rep *lifecycle.Report, idempotencyKey string) *fleetv1.LifecycleOperationResult {
 	out := &fleetv1.LifecycleOperationResult{
 		OpId:                rep.OpID,
+		IdempotencyKey:      idempotencyKey,
 		NeedsReconfirmation: rep.NeedsReconfirmation,
 		ReconfirmReason:     rep.ReconfirmReason,
 		FinishedAtUnix:      rep.FinishedAt.Unix(),
@@ -72,6 +77,14 @@ func lifecycleReportToProto(rep *lifecycle.Report) *fleetv1.LifecycleOperationRe
 			State:   r.State,
 			Reason:  r.Reason,
 			Message: r.Message,
+		}
+		// 目标身份逐段还原（TargetKey 与控制面 domain.LifecycleTarget.Key 同构：
+		// \x1f 分隔的 machine/env/user/agent/method/package）。
+		if segments := strings.Split(r.TargetKey, "\x1f"); len(segments) == 6 {
+			item.Target = &fleetv1.LifecycleTarget{
+				MachineId: segments[0], Env: segments[1], User: segments[2],
+				Agent: segments[3], Method: segments[4], Package: segments[5],
+			}
 		}
 		item.Evidence = &fleetv1.LifecycleEvidence{
 			ObservedVersion: r.Evidence.ObservedVersion,
@@ -213,7 +226,7 @@ func (x *lifecycleExecutor) RunWorker(ctx context.Context, msgs chan<- *fleetv1.
 			Deadline:            lifecycleTargetDeadline(q.msg),
 			Targets:             lifecycleTargetsOf(x.machineID, q.msg),
 		})
-		res := lifecycleReportToProto(&rep)
+		res := lifecycleReportToProto(&rep, q.msg.GetSpec().GetIdempotencyKey())
 
 		x.mu.Lock()
 		x.current = ""
