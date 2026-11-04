@@ -1757,6 +1757,12 @@ components:
         notInstalled:
           type: boolean
           description: 尚未安装（显式表达；与"查询失败"严格区分）
+        inventoryMissing:
+          type: boolean
+          description: |
+            该机尚无观测 inventory（agentd 从未上报）：实例状态未知——未知 ≠
+            尚未安装（notInstalled 恒 false，instances 为空，前端不得提供安装
+            入口以外的误导信息）。
         instances:
           type: array
           items:
