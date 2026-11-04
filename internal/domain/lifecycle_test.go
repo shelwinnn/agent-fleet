@@ -445,3 +445,23 @@ func TestValidateTargetEvidenceRules(t *testing.T) {
 		t.Fatal("evidence message limit must be positive")
 	}
 }
+
+// TestLifecycleTargetKeyIncludesInstancePath（KM-49 修复波/T7 P5 契约侧）：
+// 实例路径参与目标身份——同一来源的两个实例是两个目标；未绑定时键保持
+// 既有形态（6 段，兼容存量行）。
+func TestLifecycleTargetKeyIncludesInstancePath(t *testing.T) {
+	base := LifecycleTarget{Machine: "m1", Env: "native", User: "alice", Agent: "codex",
+		Method: "npm", Package: "@openai/codex"}
+	if got, want := base.Key(), "m1\x1fnative\x1falice\x1fcodex\x1fnpm\x1f@openai/codex\x1f"; got != want {
+		t.Fatalf("unbound key = %q, want %q", got, want)
+	}
+	bound := base
+	bound.InstancePath = " /opt/npm-prefix "
+	if got, want := bound.Normalize().Key(),
+		"m1\x1fnative\x1falice\x1fcodex\x1fnpm\x1f@openai/codex\x1f/opt/npm-prefix"; got != want {
+		t.Fatalf("bound key = %q, want %q（实例路径参与身份且归一化）", got, want)
+	}
+	if bound.Key() == base.Key() {
+		t.Fatal("bound and unbound instances must be distinct targets")
+	}
+}

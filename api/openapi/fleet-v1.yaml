@@ -889,6 +889,27 @@ paths:
                 $ref: "#/components/schemas/LifecycleOperation"
         "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /api/v1/machines/{name}/lifecycle/instances:
+    get:
+      tags: [lifecycle]
+      summary: 查询机器的 Codex 安装实例清单（KM-49 修复波/T7 P5 契约侧）
+      description: |
+        实例发现查询：返回该机的 Codex 实例（路径、版本、安装态），供前端做
+        目标选择——多实例时必须显式选择，"尚未安装"是显式状态（notInstalled=true
+        且 instances 为空），不是错误。数据来自节点上报的观测 inventory（agentd
+        采集；不触碰用户数据）。查询失败/机器未纳管走 §6.4 错误体。来源（安装
+        方式）以 inventory 现有能力如实返回：当前节点采集不区分安装来源时为
+        "unknown"，不猜测。
+      parameters:
+        - $ref: "#/components/parameters/ResourceName"
+      responses:
+        "200":
+          description: 实例清单（含"尚未安装"显式表达）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleInstanceList"
+        "404": { $ref: "#/components/responses/Error" }
   /api/v1/lifecycle/capabilities:
     get:
       tags: [lifecycle]
@@ -1531,6 +1552,18 @@ components:
           description: 创建时从机器台账快照（不参与身份）
         arch:
           type: string
+        instancePath:
+          type: string
+          description: |
+            绑定的明确安装实例（安装根/前缀路径）。参与目标身份（KM-49 修复波/
+            T7 P5 契约侧：多实例时必须显式选择）；空 = 未绑定，执行引擎按进程
+            作用域决定（遇多实例显式失败，不静默替换）。
+        acceptedObservedVersion:
+          type: string
+          description: |
+            执行前提（KM-49 修复波/T7 P4，不参与身份）：操作者重新确认时接受的
+            当前实际版本。仅出现在执行派发链路（节点通道镜像字段）；REST 记录
+            中恒缺省——确认绑定的是派发时的观测，不在操作记录里重放。
         capabilityState:
           type: string
           enum: [supported, unverified, blocked]
@@ -1688,6 +1721,47 @@ components:
           description: none=无证据；isolated=隔离环境已验证（真机待验收）；real_machine=真机证据
         reason:
           type: string
+    LifecycleInstance:
+      type: object
+      description: 一个 Codex 安装实例（实例发现查询的逐实例条目；KM-49 修复波/T7 P5 契约侧）。
+      required: [installed]
+      properties:
+        agent:
+          type: string
+          description: agent 家族（如 "codex"）
+        version:
+          type: string
+          description: 实测版本；installed=false 时缺省
+        path:
+          type: string
+          description: 实例路径（程序入口或配置位置，来自节点采集）
+        installed:
+          type: boolean
+          description: 是否已安装
+        versionError:
+          type: string
+          description: 版本读取失败的显式原因（"读取失败" ≠ "未安装"）
+    LifecycleInstanceList:
+      type: object
+      description: 实例发现查询结果。"尚未安装"是显式状态（notInstalled=true），不是错误。
+      required: [machine, notInstalled, instances]
+      properties:
+        machine:
+          type: string
+        env:
+          type: string
+          description: 查询的执行环境（空 = native）
+        user:
+          type: string
+          description: 查询的受管用户
+        notInstalled:
+          type: boolean
+          description: 尚未安装（显式表达；与"查询失败"严格区分）
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/LifecycleInstance"
+
     LifecycleCapabilityList:
       type: object
       required: [items]

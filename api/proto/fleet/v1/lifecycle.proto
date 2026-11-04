@@ -34,6 +34,9 @@ message LifecycleTarget {
   string agent = 4;   // 如 "codex"
   string method = 5;  // 安装方式/来源（能力矩阵合法取值：npm|brew|…，binary 已阻塞）
   string package = 6; // 如 "@openai/codex"
+  // 绑定的明确安装实例（安装根/前缀路径）。参与目标身份（KM-49 修复波/T7 P5
+  // 契约侧：多实例必须显式选择）；空 = 未绑定，执行引擎按进程作用域决定。
+  string instance_path = 11;
   // 创建时从机器台账取得并快照的平台事实（不参与身份），供能力判定与审计。
   string os = 7;
   string arch = 8;
@@ -91,6 +94,12 @@ message ExecuteLifecycleOperation {
   // 变化（实际状态与固定版本意图前提不一致）时上报 needs_reconfirmation，
   // 由操作者重新确认后才可继续。
   bool rediscovery_required = 2;
+  // 每个目标"操作者已确认接受的当前实际版本"（KM-49 修复波/T7 P4：确认绑定
+  // 到具体观测）。重试首派逐目标携带；节点重发现时：实测 == 本值 → 前提
+  // 成立可执行；实测既不等于固定版本也不等于本值 → 影响再次变化，重新上报
+  // needs_reconfirmation。与目标 instance_path 同为审计/执行前提字段，不参与
+  // 身份键。
+  string accepted_observed_version = 4;
   // 单操作超时上限（unix 秒；沿 context 传播，上限 10 分钟——窄适配层纪律）。
   int64 deadline_unix = 3;
 }
