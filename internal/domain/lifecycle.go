@@ -182,12 +182,19 @@ const MaxEvidenceMessageLen = 2000
 
 // sensitiveRe 抹掉证据文本里 token 形态的值（npm 配置/授权头可能回显）。
 // 值统一替换为 [redacted]；键名保留供定位。
-var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|password|secret|_auth)(\s*[=:]\s*)("[^"]*"|\S+)`)
+var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|auth|password|secret)(\s*[=:]\s*)("[^"]*"|\S+)`)
+
+// authHeaderRe 遮盖 HTTP 风格授权头的**整个值**（KM-49 修复波/T7 S1：首版
+// 只遮 key=value 形态，`Authorization: Bearer <token>` 的多词值里 scheme 之后的
+// 凭据会漏网——逐行把头值整体替换，不区分 Bearer/Basic/自定义 scheme；键
+// 覆盖 authorization/auth 及 proxy- 前缀形态，"author:" 这类良性前缀不受影响）。
+var authHeaderRe = regexp.MustCompile(`(?i)((?:proxy-)?auth(?:orization)?\s*[:=]\s*)[^\r\n]*`)
 
 // RedactEvidence 是证据文本的统一脱敏（KM-47 契约：message 限长脱敏，写入前
 // 由上报方执行）。节点侧（上报前）与控制面（入库前兜底）共用同一实现——
-// 脱敏规则只有一份，不会漂移。
+// 脱敏规则只有一份，不会漂移。两趟：授权头整值遮盖 → 通用 key=value 遮盖。
 func RedactEvidence(s string) string {
+	s = authHeaderRe.ReplaceAllString(s, "$1[redacted]")
 	return sensitiveRe.ReplaceAllString(s, "$1$2[redacted]")
 }
 

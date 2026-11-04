@@ -37,9 +37,10 @@ func lifecycleHostSetup(t *testing.T) (*lifecycleExecutor, chan *fleetv1.Lifecyc
 	t.Helper()
 	eng := &countingEngine{}
 	node := lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
-		Engines: map[string]lifecycle.Engine{"npm": eng},
-		Policy:  allowAllPolicy{},
-		Timeout: 5 * time.Second,
+		Engines:     map[string]lifecycle.Engine{"npm": eng},
+		Policy:      allowAllPolicy{},
+		Timeout:     5 * time.Second,
+		RuntimeUser: func() string { return "alice" },
 	})
 	x := newLifecycleExecutor("ws-1", t.TempDir(), node, quietLogger())
 	msgs := make(chan *fleetv1.LifecycleOperationResult, 8)
@@ -114,9 +115,10 @@ func TestLifecycleHostOutboxSurvivesRestart(t *testing.T) {
 	eng := &countingEngine{}
 	newHost := func() *lifecycleExecutor {
 		node := lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
-			Engines: map[string]lifecycle.Engine{"npm": eng},
-			Policy:  allowAllPolicy{},
-			Timeout: 5 * time.Second,
+			Engines:     map[string]lifecycle.Engine{"npm": eng},
+			Policy:      allowAllPolicy{},
+			Timeout:     5 * time.Second,
+			RuntimeUser: func() string { return "alice" },
 		})
 		return newLifecycleExecutor("ws-1", dir, node, quietLogger())
 	}

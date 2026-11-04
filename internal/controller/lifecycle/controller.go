@@ -16,6 +16,7 @@ package lifecycle
 
 import (
 	"context"
+	"strings"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,10 +51,14 @@ type DispatchRequest struct {
 	IdempotencyKey string
 	Version        string
 	CreatedBy      string
-	// RediscoveryRequired：重试链上尚无"影响变化→重新确认"时为 true（节点先
-	// 重新发现实际状态）；链上任一环已经操作者重新确认后，后续重试为 false
-	// ——同一现实不得再次阻断执行（见 chainHasReconfirmation）。
+	// RediscoveryRequired：重试操作恒为 true（KM-49 修复波/T7 P4：每次重试都
+	// 必须核验当前实际状态——确认绑定到具体观测，不是豁免后续重发现的通行证）。
 	RediscoveryRequired bool
+	// AcceptedObservedVersions 是逐目标的"操作者重新确认时接受的当前实际版本"
+	//（键 = 目标身份键）。取自父操作该目标 failed(version-mismatch) 证据的
+	// ObservedVersion——操作者确认的对象就是那份观测。节点重发现时：实测
+	// == 接受版本 → 前提成立可执行；实测是其他值 → 影响再次变化，须重新确认。
+	AcceptedObservedVersions map[string]string
 	// Deadline 是整单超时（控制面时钟）；节点据此给每个目标设 context 上限。
 	Deadline time.Time
 	// Targets 是本次派发给该机器的 pending 目标（固定版本意图不变）。
@@ -233,6 +238,73 @@ func (c *Controller) Capabilities() []domain.LifecycleCapability {
 	return domain.LifecycleCapabilities()
 }
 
+// LifecycleInstance 是实例发现查询的逐实例条目（KM-49 修复波/T7 P5 契约侧的
+// 落地；OpenAPI LifecycleInstance 同构）。
+type LifecycleInstance struct {
+	Agent        string `json:"agent,omitempty"`
+	Version      string `json:"version,omitempty"`
+	Path         string `json:"path,omitempty"`
+	Installed    bool   `json:"installed"`
+	VersionError string `json:"versionError,omitempty"`
+}
+
+// LifecycleInstanceList 是实例发现查询结果（OpenAPI LifecycleInstanceList 同构）。
+// "尚未安装"是显式状态（NotInstalled）；InventoryMissing 表达"从未上报观测"——
+// 未知 ≠ 尚未安装。
+type LifecycleInstanceList struct {
+	Machine          string             `json:"machine"`
+	Env              string             `json:"env,omitempty"`
+	User             string             `json:"user,omitempty"`
+	NotInstalled     bool               `json:"notInstalled"`
+	InventoryMissing bool               `json:"inventoryMissing,omitempty"`
+	Instances        []LifecycleInstance `json:"instances"`
+}
+
+// Instances 实例发现查询：从该机最新观测 inventory 投影 Codex 实例清单
+// （路径/版本/安装态），供前端目标选择——多实例逐条列出，"尚未安装"显式
+// 表达。数据来自节点上报的观测（agentd 采集，不触碰用户数据）；来源（安装
+// 方式）按 inventory 现状如实缺省，不猜测。
+func (c *Controller) Instances(ctx context.Context, machine, env, user string) (*LifecycleInstanceList, error) {
+	if _, err := c.machines.Get(ctx, machine); err != nil {
+		return nil, err
+	}
+	out := &LifecycleInstanceList{
+		Machine:   machine,
+		Env:       strings.TrimSpace(env),
+		User:      strings.TrimSpace(user),
+		Instances: []LifecycleInstance{},
+	}
+	rec, err := c.observed.Latest(ctx, machine)
+	if errors.Is(err, domain.ErrNotFound) {
+		out.InventoryMissing = true // 未知 ≠ 尚未安装
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var obs domain.ObservedState
+	if err := json.Unmarshal(rec.Payload, &obs); err != nil {
+		return nil, fmt.Errorf("instances: parse observation: %w", err)
+	}
+	for _, a := range obs.Agents {
+		if a.Family != "codex" {
+			continue
+		}
+		out.Instances = append(out.Instances, LifecycleInstance{
+			Agent:        a.Family,
+			Version:      a.Version,
+			Path:         a.ConfigPath,
+			Installed:    a.Installed,
+			VersionError: a.VersionError,
+		})
+	}
+	if len(out.Instances) == 0 {
+		// inventory 在但没有任何 codex 条目：显式"尚未安装"。
+		out.NotInstalled = true
+	}
+	return out, nil
+}
+
 // ---- 派发编排与扫描 ----
 
 // RunLoop 是周期编排循环：派发扫描 + CheckUpdate 推进 + 超时扫描。
@@ -314,13 +386,14 @@ func (c *Controller) dispatchPending(ctx context.Context, op *domain.LifecycleOp
 	}
 	sort.Strings(order)
 	req := DispatchRequest{
-		OpID:                op.Metadata.Name,
-		Type:                op.Spec.Type,
-		IdempotencyKey:      op.Spec.IdempotencyKey,
-		Version:             op.Spec.Version,
-		CreatedBy:           op.Spec.CreatedBy,
-		RediscoveryRequired: op.RetryOf != "" && !c.chainHasReconfirmation(ctx, op),
-		Deadline:            c.cfg.Now().Add(c.cfg.OpTimeout),
+		OpID:                     op.Metadata.Name,
+		Type:                     op.Spec.Type,
+		IdempotencyKey:           op.Spec.IdempotencyKey,
+		Version:                  op.Spec.Version,
+		CreatedBy:                op.Spec.CreatedBy,
+		RediscoveryRequired:      op.RetryOf != "",
+		AcceptedObservedVersions: c.acceptedVersions(ctx, op),
+		Deadline:                 c.cfg.Now().Add(c.cfg.OpTimeout),
 	}
 	for _, machine := range order {
 		req.Targets = pending[machine]
@@ -352,26 +425,32 @@ func (c *Controller) dispatchPending(ctx context.Context, op *domain.LifecycleOp
 	return nil
 }
 
-// chainHasReconfirmation 报告重试链（含本操作）是否已经发生过"影响变化后的
-// 重新确认"。判据锚在**同一时钟域**的控制器写入值上：重试创建时继承父操作
-// 的确认时刻，重新确认经 MarkConfirmed 写入更晚时刻——子确认晚于父确认当且
-// 仅当发生过重新确认。用途：重试操作的首派必须携带重发现标记（继承的确认
-// 不豁免重发现）；而链上任何一环已经历"重发现→影响变化→重新确认"之后，其
-// 后续重试（继承重新确认时刻）不再携带——操作者已接受当时的实际状态，同一
-// 现实不得再次阻断执行（否则"重发现→标记→确认→重试"永远循环）。
-func (c *Controller) chainHasReconfirmation(ctx context.Context, op *domain.LifecycleOperation) bool {
-	cur := op
-	for cur != nil && cur.RetryOf != "" {
-		parent, err := c.repo.GetOperation(ctx, cur.RetryOf)
-		if err != nil || parent.Status.ConfirmedAt == nil || cur.Status.ConfirmedAt == nil {
-			return false
-		}
-		if cur.Status.ConfirmedAt.After(*parent.Status.ConfirmedAt) {
-			return true
-		}
-		cur = parent
+// acceptedVersions 为重试操作收集逐目标的执行前提（KM-49 修复波/T7 P4）：
+// 每个待派发目标在父操作中的 failed(version-mismatch) 结果携带重发现证据
+// （ObservedVersion）——那是操作者重新确认时看到的实际状态。派发把它作为
+// "接受版本"带回节点：节点重发现实测与之一致才执行；确认之后状态又变了
+// （实测是其他值），节点重新上报影响变化，必须再次确认。非重试操作返回空。
+func (c *Controller) acceptedVersions(ctx context.Context, op *domain.LifecycleOperation) map[string]string {
+	if op.RetryOf == "" {
+		return nil
 	}
-	return false
+	parent, err := c.repo.GetOperation(ctx, op.RetryOf)
+	if err != nil {
+		return nil
+	}
+	accepted := map[string]string{}
+	for _, r := range op.Status.Results {
+		if r.State != domain.TargetPending {
+			continue
+		}
+		tr := parent.TargetByKey(r.Target.Key())
+		if tr == nil || tr.Reason != domain.ReasonVersionMismatch ||
+			tr.Evidence == nil || tr.Evidence.ObservedVersion == "" {
+			continue
+		}
+		accepted[r.Target.Key()] = tr.Evidence.ObservedVersion
+	}
+	return accepted
 }
 
 // machineConnected 查询机器 agentd 连接条件（与 reconcile.channelState 的
@@ -561,11 +640,19 @@ func (c *Controller) OnLifecycleResult(ctx context.Context, msg ResultMsg) error
 			state, reason = domain.TargetUnknown, domain.ReasonResultLost
 			message = truncateMsg(fmt.Sprintf("node reported unusable result (state=%q reason=%q); verify actual state", r.State, r.Reason))
 		}
-		ev := r.Evidence
-		if ev != nil {
-			red := *ev
-			red.Message = truncateMsg(redact(ev.Message))
-			ev = &red
+		// 证据按白名单字段重建（KM-49 修复波/T7 S1：不透传节点对象整体——
+		// 只接受五个已声明的安全字段；message 经统一脱敏限长后仍仅是兜底，
+		// 白名单才是第一道闸）。
+		var ev *domain.LifecycleEvidence
+		if r.Evidence != nil {
+			ev = &domain.LifecycleEvidence{
+				ObservedVersion: r.Evidence.ObservedVersion,
+				ExecutablePath:  r.Evidence.ExecutablePath,
+				Method:          r.Evidence.Method,
+				InventorySeq:    r.Evidence.InventorySeq,
+				Message:         truncateMsg(redact(r.Evidence.Message)),
+				RecordedAt:      r.Evidence.RecordedAt,
+			}
 		} else if state == domain.TargetSucceeded || state == domain.TargetFailed {
 			ev = &domain.LifecycleEvidence{RecordedAt: c.cfg.Now()}
 		}

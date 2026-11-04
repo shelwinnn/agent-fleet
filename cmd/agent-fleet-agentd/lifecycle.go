@@ -43,7 +43,9 @@ func lifecycleTargetsOf(machineID string, msg *fleetv1.ExecuteLifecycleOperation
 			Method: t.GetMethod(), Package: t.GetPackage(),
 			Version: spec.GetVersion(), Env: t.GetEnv(),
 			OS: t.GetOs(), Arch: t.GetArch(),
-			Executables: codexExecutables(t.GetAgent()),
+			InstancePath:            t.GetInstancePath(),
+			AcceptedObservedVersion: t.GetAcceptedObservedVersion(),
+			Executables:             codexExecutables(t.GetAgent()),
 		})
 	}
 	return targets

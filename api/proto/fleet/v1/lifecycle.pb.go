@@ -56,6 +56,11 @@ type LifecycleTarget struct {
 	// 绑定的明确安装实例（安装根/前缀路径）。参与目标身份（KM-49 修复波/T7 P5
 	// 契约侧：多实例必须显式选择）；空 = 未绑定，执行引擎按进程作用域决定。
 	InstancePath string `protobuf:"bytes,11,opt,name=instance_path,json=instancePath,proto3" json:"instance_path,omitempty"`
+	// 执行前提，不参与身份键（KM-49 修复波/T7 P4：确认绑定到具体观测）。重试
+	// 首派逐目标携带"操作者重新确认时接受的当前实际版本"；节点重发现时：
+	// 实测 == 本值 → 前提成立可执行；实测既不等于固定版本也不等于本值 →
+	// 影响再次变化，重新上报 needs_reconfirmation。
+	AcceptedObservedVersion string `protobuf:"bytes,12,opt,name=accepted_observed_version,json=acceptedObservedVersion,proto3" json:"accepted_observed_version,omitempty"`
 	// 创建时从机器台账取得并快照的平台事实（不参与身份），供能力判定与审计。
 	Os   string `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
 	Arch string `protobuf:"bytes,8,opt,name=arch,proto3" json:"arch,omitempty"`
@@ -141,6 +146,13 @@ func (x *LifecycleTarget) GetPackage() string {
 func (x *LifecycleTarget) GetInstancePath() string {
 	if x != nil {
 		return x.InstancePath
+	}
+	return ""
+}
+
+func (x *LifecycleTarget) GetAcceptedObservedVersion() string {
+	if x != nil {
+		return x.AcceptedObservedVersion
 	}
 	return ""
 }
@@ -442,12 +454,6 @@ type ExecuteLifecycleOperation struct {
 	// 变化（实际状态与固定版本意图前提不一致）时上报 needs_reconfirmation，
 	// 由操作者重新确认后才可继续。
 	RediscoveryRequired bool `protobuf:"varint,2,opt,name=rediscovery_required,json=rediscoveryRequired,proto3" json:"rediscovery_required,omitempty"`
-	// 每个目标"操作者已确认接受的当前实际版本"（KM-49 修复波/T7 P4：确认绑定
-	// 到具体观测）。重试首派逐目标携带；节点重发现时：实测 == 本值 → 前提
-	// 成立可执行；实测既不等于固定版本也不等于本值 → 影响再次变化，重新上报
-	// needs_reconfirmation。与目标 instance_path 同为审计/执行前提字段，不参与
-	// 身份键。
-	AcceptedObservedVersion string `protobuf:"bytes,4,opt,name=accepted_observed_version,json=acceptedObservedVersion,proto3" json:"accepted_observed_version,omitempty"`
 	// 单操作超时上限（unix 秒；沿 context 传播，上限 10 分钟——窄适配层纪律）。
 	DeadlineUnix  int64 `protobuf:"varint,3,opt,name=deadline_unix,json=deadlineUnix,proto3" json:"deadline_unix,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -496,13 +502,6 @@ func (x *ExecuteLifecycleOperation) GetRediscoveryRequired() bool {
 		return x.RediscoveryRequired
 	}
 	return false
-}
-
-func (x *ExecuteLifecycleOperation) GetAcceptedObservedVersion() string {
-	if x != nil {
-		return x.AcceptedObservedVersion
-	}
-	return ""
 }
 
 func (x *ExecuteLifecycleOperation) GetDeadlineUnix() int64 {
@@ -604,7 +603,7 @@ var File_fleet_v1_lifecycle_proto protoreflect.FileDescriptor
 
 const file_fleet_v1_lifecycle_proto_rawDesc = "" +
 	"\n" +
-	"\x18fleet/v1/lifecycle.proto\x12\bfleet.v1\"\xbf\x02\n" +
+	"\x18fleet/v1/lifecycle.proto\x12\bfleet.v1\"\xfb\x02\n" +
 	"\x0fLifecycleTarget\x12\x1d\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\tR\tmachineId\x12\x10\n" +
@@ -613,7 +612,8 @@ const file_fleet_v1_lifecycle_proto_rawDesc = "" +
 	"\x05agent\x18\x04 \x01(\tR\x05agent\x12\x16\n" +
 	"\x06method\x18\x05 \x01(\tR\x06method\x12\x18\n" +
 	"\apackage\x18\x06 \x01(\tR\apackage\x12#\n" +
-	"\rinstance_path\x18\v \x01(\tR\finstancePath\x12\x0e\n" +
+	"\rinstance_path\x18\v \x01(\tR\finstancePath\x12:\n" +
+	"\x19accepted_observed_version\x18\f \x01(\tR\x17acceptedObservedVersion\x12\x0e\n" +
 	"\x02os\x18\a \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\b \x01(\tR\x04arch\x12)\n" +
 	"\x10capability_state\x18\t \x01(\tR\x0fcapabilityState\x12+\n" +
@@ -639,11 +639,10 @@ const file_fleet_v1_lifecycle_proto_rawDesc = "" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x123\n" +
 	"\atargets\x18\x05 \x03(\v2\x19.fleet.v1.LifecycleTargetR\atargets\x12\x1d\n" +
 	"\n" +
-	"created_by\x18\x06 \x01(\tR\tcreatedBy\"\xe5\x01\n" +
+	"created_by\x18\x06 \x01(\tR\tcreatedBy\"\xa9\x01\n" +
 	"\x19ExecuteLifecycleOperation\x124\n" +
 	"\x04spec\x18\x01 \x01(\v2 .fleet.v1.LifecycleOperationSpecR\x04spec\x121\n" +
-	"\x14rediscovery_required\x18\x02 \x01(\bR\x13rediscoveryRequired\x12:\n" +
-	"\x19accepted_observed_version\x18\x04 \x01(\tR\x17acceptedObservedVersion\x12#\n" +
+	"\x14rediscovery_required\x18\x02 \x01(\bR\x13rediscoveryRequired\x12#\n" +
 	"\rdeadline_unix\x18\x03 \x01(\x03R\fdeadlineUnix\"\x9b\x02\n" +
 	"\x18LifecycleOperationResult\x12\x13\n" +
 	"\x05op_id\x18\x01 \x01(\tR\x04opId\x12'\n" +
