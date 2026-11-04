@@ -28,6 +28,7 @@
     instancesFor,
     isExactVersion,
     isOperationSettled,
+    capabilityGateView,
     methodOfferings,
     newIdempotencyKey,
     opTypeOf,
@@ -95,18 +96,12 @@
    * 幂等键——创建请求响应丢失后重试，服务端按键复用同一操作，不产生重复变更。
    * 结果明确（操作已创建 / 服务端明确拒绝）后关闭窗口；意图（指纹）变化即换键。
    */
-  let submitKey = $state('');
-  let submitKeyFp = $state('');
-  function currentSubmitKey(fp: string): string {
-    if (submitKey === '' || submitKeyFp !== fp) {
-      submitKey = newIdempotencyKey();
-      submitKeyFp = fp;
+  let submitWindow = $state<{ key: string; fp: string } | null>(null);
+  function idempotencyKeyFor(fp: string): string {
+    if (submitWindow === null || submitWindow.fp !== fp) {
+      submitWindow = { key: newIdempotencyKey(), fp };
     }
-    return submitKey;
-  }
-  function closeSubmitKeyWindow() {
-    submitKey = '';
-    submitKeyFp = '';
+    return submitWindow.key;
   }
 
   // ---- 结果 ----
@@ -146,13 +141,7 @@
   const activeCapability = $derived(capFor(activeMethod));
   // 操作入口仅对有证据的 supported 组合开放（T7 P7）：unverified 的执行会被节点准入拒绝。
   const activeSupported = $derived(activeCapability?.state === 'supported');
-  const gateTitle = $derived(
-    activeCapability?.state === 'blocked'
-      ? t('lc.action.blocked')
-      : activeCapability?.state === 'unverified'
-        ? t('lc.action.entryGate.unverified')
-        : t('lc.action.entryGate.unknown'),
-  );
+  const gate = $derived(capabilityGateView(activeCapability, loc));
   const versionInvalid = $derived(versionInput.trim() !== '' && !isExactVersion(versionInput));
   const upstreamFillVersion = $derived(
     upstreamRows.find((r) => r.kind === 'ok' && r.method === (selectedInstance?.method ?? installMethod)) as
@@ -316,7 +305,7 @@
     const type: LifecycleOperationType = opTypeOf(previewKind);
     const req = {
       type,
-      idempotencyKey: currentSubmitKey(previewFingerprint),
+      idempotencyKey: idempotencyKeyFor(previewFingerprint),
       ...(previewVersion ? { version: previewVersion } : {}),
       targets: previewTargets,
     };
@@ -332,14 +321,9 @@
     } catch (err) {
       opError = err;
     }
-    if (op) {
-      // 结果明确（操作已存在）：幂等键窗口关闭，下一次意图换新键。
-      closeSubmitKeyWindow();
-    } else if (opError instanceof ApiError) {
-      // 服务端明确拒绝：同样结果明确，窗口关闭（重试将是一次全新提交）。
-      closeSubmitKeyWindow();
-    }
+    // 结果明确（操作已创建，或服务端给出明确裁决）：窗口关闭，下一次意图换新键；
     // 其余失败（网络错误等响应不明）：保留幂等键，重试同一意图时服务端按键去重。
+    if (op || opError instanceof ApiError) submitWindow = null;
     // 确认是预览确认动作的后端记录（未确认不派发）：失败时操作仍在但停在
     // 未确认，结果面板给出"确认派发"恢复入口；期望状态不写（前提未成立）。
     let confirmError: unknown = null;
@@ -675,11 +659,7 @@
                   variant={installMethod === of.method ? 'default' : 'outline'}
                   aria-pressed={installMethod === of.method}
                   disabled={!of.offered}
-                  title={of.offered
-                    ? undefined
-                    : of.capability?.state === 'blocked'
-                      ? t('lc.cap.blockedHint')
-                      : t('lc.action.entryGate.unverified')}
+                  title={of.offered ? undefined : (capabilityGateView(of.capability, loc)?.title ?? undefined)}
                   onclick={() => {
                     installMethod = of.method;
                     previewKind = null;
@@ -689,7 +669,7 @@
                 </Button>
                 <CapabilityBadge capability={of.capability} />
                 {#if !of.offered}
-                  <span class="text-xs text-muted-foreground">{of.capability?.reason ?? t('lc.cap.unknown')}</span>
+                  <span class="text-xs text-muted-foreground">{of.capability?.reason}</span>
                 {/if}
               </div>
             {/each}
@@ -734,9 +714,9 @@
             {#if !activeSupported}
               <!-- 未验证/blocked/能力未知：如实展示状态与原因，不提供操作入口（T7 P7） -->
               <div class="rounded-md border border-dashed p-3" role="status">
-                <p class="text-sm font-medium">{gateTitle}</p>
-                {#if activeCapability?.reason}
-                  <p class="mt-1 text-xs text-muted-foreground">{activeCapability.reason}</p>
+                <p class="text-sm font-medium">{gate?.title}</p>
+                {#if gate?.detail}
+                  <p class="mt-1 text-xs text-muted-foreground">{gate.detail}</p>
                 {/if}
                 {#if activeCapability?.state === 'unverified'}
                   <p class="mt-1 text-xs text-muted-foreground">{t('lc.cap.unverifiedHint')}</p>

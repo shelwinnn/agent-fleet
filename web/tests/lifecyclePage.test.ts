@@ -195,7 +195,7 @@ describe('目标选择', () => {
     expect(body().textContent).not.toContain('预览并确认');
   });
 
-  it('安装视图里 blocked 方式禁用但展示原因；unverified 方式可选', async () => {
+  it('安装视图：仅 supported 方式提供入口；blocked/unverified 方式禁用并展示原因', async () => {
     await mountPage();
     await pickTarget('linux-build', '', 'ci');
     await settle();

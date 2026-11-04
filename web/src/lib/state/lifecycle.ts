@@ -75,6 +75,19 @@ export function methodOfferings(
     }));
 }
 
+/** 操作入口关闭时的统一展示文案（标题/说明）；supported（可操作）返回 null。 */
+export function capabilityGateView(
+  capability: LifecycleCapability | undefined,
+  locale: Locale = 'zh-CN',
+): { title: string; detail?: string } | null {
+  if (!capability) return { title: translate(locale, 'lc.action.entryGate.unknown') };
+  if (capability.state === 'blocked')
+    return { title: translate(locale, 'lc.action.blocked'), detail: capability.reason };
+  if (capability.state === 'unverified')
+    return { title: translate(locale, 'lc.action.entryGate.unverified'), detail: capability.reason };
+  return null;
+}
+
 /** 能力状态的展示基调：supported=ok；unverified=warn（未验证不标支持）；blocked=danger。 */
 export function capabilityTone(state: LifecycleCapability['state'] | undefined): 'ok' | 'warn' | 'danger' | 'muted' {
   if (state === 'supported') return 'ok';
