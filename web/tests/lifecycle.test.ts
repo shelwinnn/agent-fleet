@@ -75,15 +75,15 @@ describe('精确固定版本校验', () => {
 });
 
 describe('能力矩阵呈现', () => {
-  it('按 os/arch/method 找到能力；unverified 提供入口、blocked 只展示不提供', () => {
+  it('按 os/arch/method 找到能力；入口仅对 supported 开放，unverified/blocked 如实展示不提供（T7 P7）', () => {
     const cap = capabilityFor(MOCK_CAPABILITIES, 'linux', 'amd64', 'npm');
-    expect(cap?.state).toBe('unverified');
-    expect(cap?.evidenceLevel).toBe('isolated');
+    expect(cap?.state).toBe('supported');
+    expect(cap?.evidenceLevel).toBe('real_machine');
 
     const win = methodOfferings(MOCK_CAPABILITIES, 'windows', 'amd64');
     const npm = win.find((o) => o.method === 'npm')!;
     const binary = win.find((o) => o.method === 'binary')!;
-    expect(npm.offered).toBe(false); // windows npm 阻塞
+    expect(npm.offered).toBe(false); // windows npm blocked
     expect(binary.offered).toBe(false);
     // 状态与原因仍然如实列出（不隐藏限制）
     expect(npm.capability?.state).toBe('blocked');
@@ -91,6 +91,13 @@ describe('能力矩阵呈现', () => {
 
     const linux = methodOfferings(MOCK_CAPABILITIES, 'linux', 'amd64');
     expect(linux.find((o) => o.method === 'npm')!.offered).toBe(true);
+
+    // unverified 同样不提供入口（执行会被节点准入拒绝，入口即误导）
+    const darwin = methodOfferings(MOCK_CAPABILITIES, 'darwin', 'arm64');
+    expect(darwin.find((o) => o.method === 'npm')!.offered).toBe(false);
+    expect(darwin.find((o) => o.method === 'npm')!.capability?.state).toBe('unverified');
+    // 能力未知（无记录）也不提供入口
+    expect(methodOfferings([], 'linux', 'amd64').find((o) => o.method === 'npm')).toBeUndefined();
   });
 
   it('supported=ok、unverified=warn、blocked=danger，未知=muted（未验证不标支持）', () => {
@@ -288,7 +295,7 @@ describe('实例选择辅助', () => {
       package: '@openai/codex',
       os: 'linux',
       arch: 'amd64',
-      capabilityState: 'unverified',
+      capabilityState: 'supported',
     });
     expect(t.env).toBeUndefined(); // 空 env = native，字段可缺省
   });
@@ -339,6 +346,11 @@ describe('契约 mock 后端（T2/T3 形状）', () => {
       ],
     });
     const opId = created.operation.metadata.name;
+    // 未确认不派发（对齐控制器闸门）：settle 前必须确认。
+    expect(() => b.settleOperation(opId, [{ targetKey: () => true, state: 'succeeded' }])).toThrow('not dispatchable');
+    expect(b.dispatchable(opId)).toBe(false);
+    await b.confirmOperation(opId);
+    expect(b.dispatchable(opId)).toBe(true);
     b.settleOperation(opId, [
       { targetKey: (t: LifecycleTarget) => t.machine === 'a', state: 'succeeded', reason: 'verified-present', observedVersion: '0.56.0' },
       { targetKey: (t: LifecycleTarget) => t.machine === 'b', state: 'failed', reason: 'version-mismatch' },
@@ -359,6 +371,16 @@ describe('契约 mock 后端（T2/T3 形状）', () => {
     const retry2 = await b.retryOperation(opId, { targets: failed.map((f) => f.target as LifecycleTarget) });
     expect(retry2.status.needsReconfirmation).toBe(true);
     expect(needsReconfirmationView(retry2, zh)?.text).toContain('暂停');
+    // 重试继承原操作确认（不重复确认），但影响变化时闸门仍拦住，重新确认后放行
+    expect(retry2.status.confirmedAt).not.toBeNull();
+    expect(b.dispatchable(retry2.metadata.name)).toBe(false);
+    const reconfirmed = await b.confirmOperation(retry2.metadata.name);
+    expect(reconfirmed.status.needsReconfirmation).toBe(false);
+    expect(b.dispatchable(reconfirmed.metadata.name)).toBe(true);
+    // 确认幂等：重复确认不产生重复变更（仍是同一操作、无新增行）
+    const again = await b.confirmOperation(retry2.metadata.name);
+    expect(again.metadata.name).toBe(retry2.metadata.name);
+    expect(b.operations.size).toBe(3); // original + retry + retry2
   });
 
   it('意图合并：未提及的 agent 原样保留（省略 ≠ 卸载），内容无变化不新增代', async () => {

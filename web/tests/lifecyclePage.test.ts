@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import { initLocale, setLocale } from '../src/lib/i18n/index.js';
 import { MockLifecycleBackend } from '../src/lib/api/lifecycleMock.js';
+import { ApiError } from '../src/lib/api/client.js';
 import { InventoryNotWiredError } from '../src/lib/state/lifecycleGateway.js';
 import type { ResourceEvent } from '../src/lib/api/types.js';
 import type { AgentInstanceInventory, LifecycleGateway } from '../src/lib/state/lifecycleGateway.js';
@@ -37,6 +38,7 @@ const MACHINES = [
   machine('win-prod', 'windows', 'amd64', 'True'),
   machine('linux-build', 'linux', 'amd64', 'True'),
   machine('mac-studio', 'darwin', 'arm64', 'False'),
+  machine('mac-ci', 'darwin', 'arm64', 'True'),
 ];
 
 async function settle(rounds = 6) {
@@ -165,11 +167,13 @@ describe('目标选择', () => {
     // 清单过期如实标注
     expect(body().textContent).toContain('实例清单已过期');
 
-    // 显式选中一个实例后，升级/卸载入口出现（来源已知）
+    // 显式选中一个实例后：unverified 组合如实展示状态与原因，不提供操作入口（T7 P7）
     body().querySelector<HTMLInputElement>('input[name="lc-instance"]')!.click();
     flushSync();
-    expect(buttonByText('升级').disabled).toBe(true); // 版本未填
-    expect(buttonByText('卸载')).toBeDefined();
+    expect(body().textContent).toContain('未验证组合暂不开放操作入口');
+    expect(body().textContent).toContain('真机待验收');
+    expect(body().textContent).not.toContain('预览并确认');
+    expect(body().querySelector('#lc-version-up')).toBeNull();
   });
 
   it('"尚未安装"是显式状态，并给出安装入口提示', async () => {
@@ -191,7 +195,7 @@ describe('目标选择', () => {
     expect(body().textContent).not.toContain('预览并确认');
   });
 
-  it('安装视图里 blocked 方式禁用但展示原因；unverified 方式可选', async () => {
+  it('安装视图：仅 supported 方式提供入口；blocked/unverified 方式禁用并展示原因', async () => {
     await mountPage();
     await pickTarget('linux-build', '', 'ci');
     await settle();
@@ -248,7 +252,7 @@ describe('安装：预览确认与执行', () => {
     expect(text).toContain('@openai/codex');
     expect(text).toContain('只动程序本体');
     expect(text).toContain('不会改写、删除或迁移');
-    expect(text).toContain('未验证组合'); // linux/amd64 npm 未验证，如实提示
+    expect(text).toContain('已验证支持'); // linux/amd64 npm supported（mock 夹具），允许入口
     expect(text).toContain('同时把期望状态设为"应存在"');
 
     const confirm = buttonByText('确认执行');
@@ -367,6 +371,7 @@ describe('逐目标结果与重试', () => {
       ],
     });
     const opId = created.operation.metadata.name;
+    await h.backend.confirmOperation(opId); // 未确认不派发：settle 前先确认
     h.backend.settleOperation(opId, [
       { targetKey: (t) => t.env === '', state: 'succeeded', reason: 'verified-present', observedVersion: '0.56.0' },
       { targetKey: (t) => t.env !== '', state: 'failed', reason: 'version-mismatch', message: 'still 0.54.2 after upgrade' },
@@ -499,6 +504,249 @@ describe('评审修复回归', () => {
     const desired = await h.backend.getDesired('linux-build');
     expect(desired).toBeNull(); // 期望状态未被触碰
     expect(body().querySelector('[data-testid="lc-op"]')).toBeNull();
+  });
+});
+
+describe('P7：未验证/blocked 组合无操作入口（如实展示状态与原因）', () => {
+  it('安装视图里 unverified 方式禁用并展示原因，无任何可进入预览的入口', async () => {
+    await mountPage();
+    await pickTarget('mac-ci', '', 'ci2');
+    expect(body().textContent).toContain('尚未安装');
+    const npm = buttonByText('npm');
+    const brew = buttonByText('brew');
+    expect(npm.disabled).toBe(true);
+    expect(brew.disabled).toBe(true);
+    expect(body().textContent).toContain('未验证');
+    expect(body().textContent).toContain('真机待验收');
+    expect(body().textContent).not.toContain('预览并确认');
+  });
+});
+
+describe('P6：幂等键保留至结果明确（响应丢失重试不产生重复操作）', () => {
+  /** 打开安装预览并完成"已阅读"勾选（尚未提交）；可预先注入 mock 故障。 */
+  async function armedInstallPreview(backend: MockLifecycleBackend) {
+    const h = await mountPage(backend);
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    return h;
+  }
+
+  it('创建请求响应丢失后重试：同一意图保留同一幂等键，服务端去重不产生重复操作', async () => {
+    const backend = new MockLifecycleBackend();
+    const h = await armedInstallPreview(backend);
+    backend.transientCreateError = new TypeError('network lost');
+    buttonByText('确认执行').click();
+    await settle();
+    // 第一次提交：网络错误（响应不明，操作未落地）
+    expect(body().textContent).toContain('创建操作失败');
+    expect(backend.operations.size).toBe(0);
+    // 预览仍在、已读仍有效：重试同一意图 → 同一幂等键 → 服务端只留一行
+    buttonByText('确认执行').click();
+    await settle();
+    expect(body().textContent).toContain('已创建操作');
+    expect(backend.createKeyLog).toHaveLength(2);
+    expect(backend.createKeyLog[0]).toBe(backend.createKeyLog[1]);
+    expect(backend.operations.size).toBe(1);
+  });
+
+  it('意图（版本）变化后换新幂等键：不同内容不与旧键冲突', async () => {
+    const backend = new MockLifecycleBackend();
+    const h = await armedInstallPreview(backend);
+    backend.transientCreateError = new TypeError('network lost');
+    buttonByText('确认执行').click();
+    await settle();
+    expect(backend.createKeyLog).toHaveLength(1);
+    // 改版本 = 意图变化 → 必须换键（同键不同内容会被服务端判 409 冲突）
+    setInput('#lc-version', '0.56.2');
+    expect(body().textContent).toContain('目标或版本已变化'); // 已读作废，重新确认
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+    expect(body().textContent).toContain('已创建操作');
+    expect(backend.createKeyLog).toHaveLength(2);
+    expect(backend.createKeyLog[1]).not.toBe(backend.createKeyLog[0]);
+    expect(backend.operations.size).toBe(1);
+  });
+
+  it('服务端明确拒绝（ApiError）后窗口关闭：重试提交用新键', async () => {
+    const backend = new MockLifecycleBackend();
+    backend.createError = new ApiError(422, { reason: 'UnsupportedCombination', message: 'rejected', timestamp: 't' });
+    const h = await armedInstallPreview(backend);
+    buttonByText('确认执行').click();
+    await settle();
+    expect(body().textContent).toContain('创建操作失败');
+    // 明确拒绝 = 结果明确：同指纹重试也换新键（上一次提交已被服务端裁决）
+    buttonByText('确认执行').click();
+    await settle();
+    expect(backend.createKeyLog).toHaveLength(2);
+    expect(backend.createKeyLog[1]).not.toBe(backend.createKeyLog[0]);
+  });
+
+  it('成功关闭保留窗口：完成一次安装后，新的相同意图提交用新键', async () => {
+    const backend = new MockLifecycleBackend();
+    const h = await armedInstallPreview(backend);
+    buttonByText('确认执行').click();
+    await settle();
+    expect(body().textContent).toContain('已创建操作');
+    expect(backend.createKeyLog).toHaveLength(1);
+    // 结果明确（操作已创建）：窗口关闭；重新发起同一版本安装 → 新键、新操作
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+    expect(backend.createKeyLog).toHaveLength(2);
+    expect(backend.createKeyLog[1]).not.toBe(backend.createKeyLog[0]);
+    expect(backend.operations.size).toBe(2);
+  });
+});
+
+describe('confirm 端点接线（KM-50 修复；对齐 T6 e2e 链路）', () => {
+  it('预览确认 → 操作已确认并可派发；确认后逐目标结果可见（确认前不派发、确认后派发）', async () => {
+    const h = await mountPage();
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+
+    // 页面的确认动作已接线：mock 里操作带有确认时刻且可派发（契约闸门）
+    const ops = [...h.backend.operations.values()];
+    expect(ops).toHaveLength(1);
+    expect(ops[0].status.confirmedAt).not.toBeNull();
+    expect(h.backend.dispatchable(ops[0].metadata.name)).toBe(true);
+    // 确认前不派发：闸门由 mock 复刻（settleOperation 未确认时拒绝）——由 mock 单测锁定；
+    // 这里断言确认后真实派发推进：settle 后结果面板可见成功与实测版本
+    h.backend.settleOperation(ops[0].metadata.name, [
+      { targetKey: () => true, state: 'succeeded', reason: 'verified-present', observedVersion: '0.56.1' },
+    ]);
+    setInput('#lc-lookup', ops[0].metadata.name);
+    buttonByText('查询').click();
+    await settle();
+    expect(body().textContent).toContain('实测版本 0.56.1');
+    expect(body().textContent).not.toContain('已创建但未确认');
+  });
+
+  it('未确认的操作如实呈现"确认前不派发"，面板确认入口可恢复派发', async () => {
+    const h = await mountPage();
+    // 绕过页面确认动作直接创建（模拟确认请求失败的残余状态）
+    const created = await h.backend.createOperation({
+      type: 'Upgrade',
+      idempotencyKey: 'unconfirmed-seed',
+      version: '0.56.1',
+      targets: [{ machine: 'linux-build', env: '', user: 'ci', agent: 'codex', method: 'npm', package: '@openai/codex' }],
+    });
+    setInput('#lc-lookup', created.operation.metadata.name);
+    buttonByText('查询').click();
+    await settle();
+
+    expect(body().textContent).toContain('已创建但未确认');
+    expect(body().textContent).toContain('确认前操作不会派发');
+    expect(body().textContent).not.toContain('确认于'); // 尚无确认时刻
+    // 面板确认入口 → 确认 → 可派发
+    buttonByText('确认派发').click();
+    await settle();
+    expect(body().textContent).toContain('已确认操作');
+    expect(h.backend.dispatchable(created.operation.metadata.name)).toBe(true);
+  });
+
+  it('确认后不再出示确认入口；重复确认的幂等由契约保证，面板只有一张操作卡', async () => {
+    const h = await mountPage();
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+    expect(h.backend.operations.size).toBe(1); // 幂等：同一意图只有一个操作行
+
+    // 已确认操作：无"未确认"横幅、无重复确认按钮；重复确认的幂等语义（不产生
+    // 重复变更）由 mock 单测与 T4 处理器共同锁定
+    setInput('#lc-lookup', [...h.backend.operations.keys()][0]);
+    buttonByText('查询').click();
+    await settle();
+    expect(body().textContent).not.toContain('已创建但未确认');
+    expect(body().querySelectorAll('[data-testid="lc-op"]').length).toBe(1);
+  });
+});
+
+describe('confirm 失败恢复与重新确认（评审修复）', () => {
+  it('确认失败：期望状态不写、操作卡如实停在未确认，面板确认入口可恢复派发', async () => {
+    const backend = new MockLifecycleBackend();
+    backend.confirmError = new Error('network refused');
+    const h = await mountPage(backend);
+    await pickTarget('linux-build', '', 'ci');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+
+    expect(body().textContent).toContain('确认未完成');
+    expect(body().textContent).toContain('确认前操作不会派发');
+    // 确认前提未成立：期望状态未被触碰
+    expect(await h.backend.getDesired('linux-build')).toBeNull();
+    // 操作卡在面板上可见且带恢复入口（操作已在创建时进入追踪）
+    expect(body().querySelectorAll('[data-testid="lc-op"]').length).toBe(1);
+    expect(body().textContent).toContain('已创建但未确认');
+    // 恢复：确认请求成功后可派发
+    backend.confirmError = null;
+    buttonByText('确认派发').click();
+    await settle();
+    const op = [...backend.operations.values()][0];
+    expect(op.status.confirmedAt).not.toBeNull();
+    expect(backend.dispatchable(op.metadata.name)).toBe(true);
+  });
+
+  it('重新确认清除影响变化标记并放行；页面不产生重复操作行', async () => {
+    const h = await mountPage();
+    const created = await h.backend.createOperation({
+      type: 'Upgrade',
+      idempotencyKey: 'reconfirm-seed',
+      version: '0.56.1',
+      targets: [{ machine: 'linux-build', env: '', user: 'ci', agent: 'codex', method: 'npm', package: '@openai/codex' }],
+    });
+    const opId = created.operation.metadata.name;
+    await h.backend.confirmOperation(opId);
+    // 模拟重试重发现发现影响变化：置 needsReconfirmation（闸门拦住）
+    const op = h.backend.operations.get(opId)!;
+    op.status.needsReconfirmation = true;
+    op.status.reconfirmReason = 'version-mismatch';
+    expect(h.backend.dispatchable(opId)).toBe(false);
+
+    setInput('#lc-lookup', opId);
+    buttonByText('查询').click();
+    await settle();
+    expect(body().textContent).toContain('影响已变化，需重新确认');
+    const before = h.backend.operations.size;
+    buttonByText('重新确认并继续').click();
+    await settle();
+    expect(body().textContent).toContain('已重新确认');
+    expect(h.backend.operations.size).toBe(before); // 无重复操作行
+    expect(h.backend.dispatchable(opId)).toBe(true);
+    expect(body().textContent).not.toContain('影响已变化');
   });
 });
 

@@ -9,6 +9,7 @@
    * 组合如实展示，阻塞组合不提供操作入口；上游查询失败显示未知，不显示"最新"。
    */
   import { onMount } from 'svelte';
+  import { ApiError } from '$lib/api/client';
   import type { LifecycleOperationType, LifecycleTarget, Machine, ResourceEvent } from '$lib/api/types.js';
   import type { LifecycleGateway, AgentInstanceInventory } from '$lib/state/lifecycleGateway.js';
   import { InventoryNotWiredError } from '$lib/state/lifecycleGateway.js';
@@ -27,6 +28,7 @@
     instancesFor,
     isExactVersion,
     isOperationSettled,
+    capabilityGateView,
     methodOfferings,
     newIdempotencyKey,
     opTypeOf,
@@ -89,11 +91,24 @@
   let previewKind = $state<'install' | 'upgrade' | 'uninstall' | null>(null);
   let stopOpen = $state(false);
   let submitting = $state(false);
+  /**
+   * 幂等键保留窗口（T7 P6）：同一已批准意图（指纹不变）在结果明确前复用同一
+   * 幂等键——创建请求响应丢失后重试，服务端按键复用同一操作，不产生重复变更。
+   * 结果明确（操作已创建 / 服务端明确拒绝）后关闭窗口；意图（指纹）变化即换键。
+   */
+  let submitWindow = $state<{ key: string; fp: string } | null>(null);
+  function idempotencyKeyFor(fp: string): string {
+    if (submitWindow === null || submitWindow.fp !== fp) {
+      submitWindow = { key: newIdempotencyKey(), fp };
+    }
+    return submitWindow.key;
+  }
 
   // ---- 结果 ----
   type TrackedOp = Awaited<ReturnType<LifecycleGateway['getOperation']>>;
   let tracked = $state<TrackedOp[]>([]);
   let retryingOpId = $state<string | null>(null);
+  let confirmingOpId = $state<string | null>(null);
   let lookupError = $state<string | null>(null);
   let resultsMsg = $state<string | null>(null);
 
@@ -124,7 +139,9 @@
     previewKind === 'install' ? installMethod : (selectedInstance?.method ?? installMethod),
   );
   const activeCapability = $derived(capFor(activeMethod));
-  const activeBlocked = $derived(activeCapability?.state === 'blocked');
+  // 操作入口仅对有证据的 supported 组合开放（T7 P7）：unverified 的执行会被节点准入拒绝。
+  const activeSupported = $derived(activeCapability?.state === 'supported');
+  const gate = $derived(capabilityGateView(activeCapability, loc));
   const versionInvalid = $derived(versionInput.trim() !== '' && !isExactVersion(versionInput));
   const upstreamFillVersion = $derived(
     upstreamRows.find((r) => r.kind === 'ok' && r.method === (selectedInstance?.method ?? installMethod)) as
@@ -277,6 +294,7 @@
   );
 
   function openPreview(kind: 'install' | 'upgrade' | 'uninstall') {
+    if (!activeSupported) return; // 防线：无证据组合不进入预览（入口本已隐藏）
     previewKind = kind;
     versionTouched = true;
     feedback = null;
@@ -287,7 +305,7 @@
     const type: LifecycleOperationType = opTypeOf(previewKind);
     const req = {
       type,
-      idempotencyKey: newIdempotencyKey(),
+      idempotencyKey: idempotencyKeyFor(previewFingerprint),
       ...(previewVersion ? { version: previewVersion } : {}),
       targets: previewTargets,
     };
@@ -303,8 +321,23 @@
     } catch (err) {
       opError = err;
     }
-    // 期望状态只在操作创建成功后写入：确认"执行"的前提是这次变更真的立住了。
-    if (op && includeDesired) {
+    // 结果明确（操作已创建，或服务端给出明确裁决）：窗口关闭，下一次意图换新键；
+    // 其余失败（网络错误等响应不明）：保留幂等键，重试同一意图时服务端按键去重。
+    if (op || opError instanceof ApiError) submitWindow = null;
+    // 确认是预览确认动作的后端记录（未确认不派发）：失败时操作仍在但停在
+    // 未确认，结果面板给出"确认派发"恢复入口；期望状态不写（前提未成立）。
+    let confirmError: unknown = null;
+    if (op) {
+      try {
+        op = await gateway.confirmOperation(op.metadata.name);
+        addTracked(op);
+      } catch (err) {
+        confirmError = err;
+      }
+    }
+    // 期望状态只在操作创建并确认成功后写入（预览里分开列明，成败如实上报）。
+    let desiredUpdateError: unknown = null;
+    if (op && confirmError === null && includeDesired) {
       try {
         const update =
           type === 'Uninstall'
@@ -312,24 +345,54 @@
             : desiredPresentUpdate(previewVersion, req.targets[0].method, req.targets[0].package);
         desired = await gateway.putDesired(machine.metadata.name, update);
       } catch (err) {
-        feedback = {
-          kind: 'error',
-          text: t('lc.preview.partialDesiredFailed', { id: op.metadata.name, reason: failureText(err, loc) }),
-        };
+        desiredUpdateError = err;
       }
     }
-    if (op) {
-      if (feedback === null) {
-        feedback = {
-          kind: 'ok',
-          text: reused ? t('lc.preview.reused', { id: op.metadata.name }) : t('lc.preview.created', { id: op.metadata.name }),
-        };
-      }
+    submitting = false;
+    if (!op) {
+      feedback = { kind: 'error', text: `${t('lc.preview.failed')}${failureText(opError, loc)}` };
+    } else if (confirmError !== null) {
+      feedback = {
+        kind: 'error',
+        text: `${t('lc.results.confirmFailed')}${failureText(confirmError, loc)} ${t('lc.results.unconfirmedDetail')}`,
+      };
+    } else if (desiredUpdateError !== null) {
+      feedback = {
+        kind: 'error',
+        text: t('lc.preview.partialDesiredFailed', {
+          id: op.metadata.name,
+          reason: failureText(desiredUpdateError, loc),
+        }),
+      };
+    } else {
+      feedback = {
+        kind: 'ok',
+        text: reused ? t('lc.preview.reused', { id: op.metadata.name }) : t('lc.preview.created', { id: op.metadata.name }),
+      };
+    }
+    if (op && confirmError === null) {
       previewKind = null;
       versionInput = '';
       versionTouched = false;
-    } else {
-      feedback = { kind: 'error', text: `${t('lc.preview.failed')}${failureText(opError, loc)}` };
+    }
+  }
+
+  /** 结果面板里的确认/重新确认（未确认不派发；needsReconfirmation 经重新确认清除）。 */
+  async function confirmTracked(op: TrackedOp) {
+    confirmingOpId = op.metadata.name;
+    try {
+      const confirmed = await gateway.confirmOperation(op.metadata.name);
+      addTracked(confirmed);
+      feedback = {
+        kind: 'ok',
+        text: op.status.needsReconfirmation
+          ? t('lc.results.reconfirmDone')
+          : t('lc.results.confirmDone', { id: op.metadata.name }),
+      };
+    } catch (err) {
+      feedback = { kind: 'error', text: `${t('lc.results.confirmFailed')}${failureText(err, loc)}` };
+    } finally {
+      confirmingOpId = null;
     }
   }
 
@@ -596,7 +659,7 @@
                   variant={installMethod === of.method ? 'default' : 'outline'}
                   aria-pressed={installMethod === of.method}
                   disabled={!of.offered}
-                  title={of.offered ? undefined : t('lc.cap.blockedHint')}
+                  title={of.offered ? undefined : (capabilityGateView(of.capability, loc)?.title ?? undefined)}
                   onclick={() => {
                     installMethod = of.method;
                     previewKind = null;
@@ -640,9 +703,6 @@
                   {t('lc.action.preview')}
                 </Button>
                 <CapabilityBadge capability={capFor(installMethod)} />
-                {#if capFor(installMethod)?.state === 'unverified'}
-                  <span class="text-xs text-muted-foreground">{t('lc.cap.unverifiedHint')}</span>
-                {/if}
               </div>
             {/if}
           </div>
@@ -651,10 +711,16 @@
           <div class="grid gap-2">
             <div class="text-xs font-medium text-muted-foreground">{t('lc.action.pickInstance')}</div>
             <p class="font-mono text-xs">{instanceTitle(selectedInstance, loc)} · {selectedInstance.executablePath ?? ''}</p>
-            {#if activeBlocked}
+            {#if !activeSupported}
+              <!-- 未验证/blocked/能力未知：如实展示状态与原因，不提供操作入口（T7 P7） -->
               <div class="rounded-md border border-dashed p-3" role="status">
-                <p class="text-sm font-medium">{t('lc.action.blocked')}</p>
-                <p class="mt-1 text-xs text-muted-foreground">{activeCapability?.reason}</p>
+                <p class="text-sm font-medium">{gate?.title}</p>
+                {#if gate?.detail}
+                  <p class="mt-1 text-xs text-muted-foreground">{gate.detail}</p>
+                {/if}
+                {#if activeCapability?.state === 'unverified'}
+                  <p class="mt-1 text-xs text-muted-foreground">{t('lc.cap.unverifiedHint')}</p>
+                {/if}
               </div>
             {:else if !selectedInstance.method}
               <!-- 来源未知：拒绝卸载/升级并说明原因（spec User Story 22） -->
@@ -690,9 +756,6 @@
                   {t('lc.action.uninstall')}
                 </Button>
                 <CapabilityBadge capability={activeCapability} />
-                {#if activeCapability?.state === 'unverified'}
-                  <span class="text-xs text-muted-foreground">{t('lc.cap.unverifiedHint')}</span>
-                {/if}
               </div>
             {/if}
           </div>
@@ -749,9 +812,11 @@
   <ResultsPanel
     operations={tracked}
     {retryingOpId}
+    {confirmingOpId}
     {lookupError}
     message={resultsMsg}
     onretry={retryFailed}
+    onconfirmOp={confirmTracked}
     onlookup={lookupOperation}
   />
 </div>

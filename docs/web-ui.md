@@ -85,15 +85,15 @@ hash 路由：静态产物可被任意静态服务器托管，不需要服务端
    `/api` 命名空间未匹配时仍是 §6.4 JSON 404（KM-21 既有行为，有测试锁定）。
 8. **凭据边界**：UI 不展示也不存储任何 secret（含 `POST /machines/{name}/enroll-token` 的一次性明文 token），
    因此不提供签发入口。
-9. **生命周期 REST 处理器未接线（KM-50 登记）**：T2（KM-47）落地的是模型 + proto/OpenAPI 契约，
-   `/api/v1/lifecycle/*` 与 `/machines/{name}/lifecycle/desired` 的 REST 处理器、以及
-   `POST /api/v1/agents/{agent}/upstream-versions/check`（T3，PR #22）未全部并线前，生产环境调用会
-   得到 404/501。Lifecycle 页对这些失败**如实呈现原因与重试提示**，不以任何兜底数据冒充可用；
-   页面行为的验证用契约形状的 mock（`web/src/lib/api/lifecycleMock.ts`，仅测试 import）完成，
-   浏览器发起的真实链路由 T6 收口。
+9. **生命周期 REST 已接线（KM-50 修复更新）**：T4（KM-49）已落地 `/api/v1/lifecycle/*`
+   （创建/查询/确认/重试）与 `/machines/{name}/lifecycle/desired`，T3（PR #22）的上游检查端点也已并线。
+   预览确认动作在创建后调用 confirm 端点（未确认不派发）；确认失败时操作停在未确认，
+   结果面板如实呈现"确认前不派发"并给出恢复入口。T4 装配缺失（`s.lifecycle == nil`）时端点返回 501，
+   页面对失败**如实呈现原因与重试提示**，不以任何兜底数据冒充可用；页面行为的验证用契约形状的
+   mock（`web/src/lib/api/lifecycleMock.ts`，仅测试 import）完成，真实链路由 T6 收口（KM-51）。
 10. **实例发现无落地契约（KM-50 登记）**：受管环境/用户/已装实例（路径、来源、版本）尚无 REST 契约。
     为不编造端点，`RestLifecycleGateway.getInstanceInventory` 显式抛 `InventoryNotWiredError`，
-    页面呈现"实例发现尚未接入控制面"；等价 mock 由测试注入。T4/后端落地契约后接通。
+    页面呈现"实例发现尚未接入控制面"；等价 mock 由测试注入。后端落地契约后接通。
 
 ## 核查必改与建议的闭环（KM-25 复核后）
 

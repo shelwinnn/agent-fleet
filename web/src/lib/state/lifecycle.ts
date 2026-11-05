@@ -48,11 +48,14 @@ export function capabilityFor(
 export interface MethodOffering {
   method: string;
   capability?: LifecycleCapability;
-  /** blocked 组合不提供操作入口，但状态与原因要如实展示。 */
+  /**
+   * 仅 supported 组合提供操作入口（T7 评审裁定）：unverified 组合的执行会被
+   * 节点准入拒绝——提供入口即是误导；blocked / 能力未知同理。状态与原因仍如实展示。
+   */
   offered: boolean;
 }
 
-/** 按能力矩阵列出某平台可表达的安装方式：blocked 也列出（展示原因）但不提供入口。 */
+/** 按能力矩阵列出某平台可表达的安装方式：入口仅对 supported 开放，其余如实展示。 */
 export function methodOfferings(
   capabilities: LifecycleCapability[],
   os: string | undefined,
@@ -68,8 +71,21 @@ export function methodOfferings(
     .map(([method, capability]) => ({
       method,
       capability,
-      offered: capability?.state !== 'blocked',
+      offered: capability?.state === 'supported',
     }));
+}
+
+/** 操作入口关闭时的统一展示文案（标题/说明）；supported（可操作）返回 null。 */
+export function capabilityGateView(
+  capability: LifecycleCapability | undefined,
+  locale: Locale = 'zh-CN',
+): { title: string; detail?: string } | null {
+  if (!capability) return { title: translate(locale, 'lc.action.entryGate.unknown') };
+  if (capability.state === 'blocked')
+    return { title: translate(locale, 'lc.action.blocked'), detail: capability.reason };
+  if (capability.state === 'unverified')
+    return { title: translate(locale, 'lc.action.entryGate.unverified'), detail: capability.reason };
+  return null;
 }
 
 /** 能力状态的展示基调：supported=ok；unverified=warn（未验证不标支持）；blocked=danger。 */
