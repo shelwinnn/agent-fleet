@@ -809,6 +809,14 @@ const zhCN = {
   'lc.next.unknown': '先核对目标实际状态，再决定下一步；未知不计入成功、不会自动重试。',
   'lc.next.pending': '等待执行，结果会自动更新。',
   'lc.next.running': '执行中，结果会自动更新。',
+
+  // ---- 应用列表 ----
+  'apps.lead': '要安装到机器上的代理。',
+  'apps.col.name': '名称',
+  'apps.col.available': '可用版本',
+  'apps.col.coverage': '覆盖',
+  'apps.col.status': '状态',
+  'apps.coverage': (p) => `${p.n} 台`,
 } as const satisfies Record<string, Message>;
 
 
@@ -1625,6 +1633,14 @@ const en: Record<MessageKey, Message> = {
   'lc.next.unknown': 'Verify the actual state of the target first, then decide; unknown does not count as success and is never retried automatically.',
   'lc.next.pending': 'Waiting to run; results update automatically.',
   'lc.next.running': 'Running; results update automatically.',
+
+  // ---- Apps list ----
+  'apps.lead': 'Agents to install on machines.',
+  'apps.col.name': 'Name',
+  'apps.col.available': 'Available version',
+  'apps.col.coverage': 'Coverage',
+  'apps.col.status': 'Status',
+  'apps.coverage': (p) => `${p.n} ${selectPlural('en', Number(p.n), 'machine', 'machines')}`,
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {
