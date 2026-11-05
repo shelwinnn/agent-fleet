@@ -10,8 +10,16 @@
    */
   import { onMount } from 'svelte';
   import { ApiError } from '$lib/api/client';
-  import type { LifecycleOperationType, LifecycleTarget, Machine, ResourceEvent } from '$lib/api/types.js';
-  import type { LifecycleGateway, AgentInstanceInventory } from '$lib/state/lifecycleGateway.js';
+  import type {
+    LifecycleDesiredDocument,
+    LifecycleOperation,
+    LifecycleOperationType,
+    LifecycleTarget,
+    LifecycleTargetState,
+    Machine,
+    ResourceEvent,
+  } from '$lib/api/types.js';
+  import type { LifecycleGateway, AgentInstance, AgentInstanceInventory } from '$lib/state/lifecycleGateway.js';
   import { InventoryNotWiredError } from '$lib/state/lifecycleGateway.js';
   import type { UpstreamRowView } from '$lib/state/lifecycle.js';
   import {
@@ -22,6 +30,7 @@
     desiredPresentUpdate,
     desiredUnmanagedUpdate,
     envLabel,
+    failedResults,
     impactFingerprint,
     instanceKey,
     instanceTitle,
@@ -29,8 +38,11 @@
     isExactVersion,
     isOperationSettled,
     capabilityGateView,
+    lifecycleStateLabel,
+    lifecycleStateTone,
     methodOfferings,
     newIdempotencyKey,
+    operationProgress,
     opTypeOf,
     upstreamRowView,
   } from '$lib/state/lifecycle.js';
@@ -111,6 +123,13 @@
   let confirmingOpId = $state<string | null>(null);
   let lookupError = $state<string | null>(null);
   let resultsMsg = $state<string | null>(null);
+
+  let hostInventory = $state<Record<string, AgentInstanceInventory | null>>({});
+  let desiredDocs = $state<Record<string, LifecycleDesiredDocument | null>>({});
+  let upgradeOpen = $state(false);
+  let upgradeStep = $state<'select' | 'preview'>('select');
+  let upgradeSelected = $state<string[]>([]);
+  let uninstallOpen = $state(false);
 
   // ---- 动作反馈 ----
   type Feedback = { kind: 'ok' | 'error'; text: string };
@@ -198,6 +217,32 @@
         }
       });
     }
+  });
+
+  $effect(() => {
+    const names = machines.map((item) => item.metadata.name);
+    let stop = false;
+    for (const name of names) {
+      void gateway.getInstanceInventory(name).then(
+        (inv) => {
+          if (!stop) hostInventory[name] = inv;
+        },
+        () => {
+          if (!stop) hostInventory[name] = null;
+        },
+      );
+      void gateway.getDesired(name).then(
+        (doc) => {
+          if (!stop) desiredDocs[name] = doc;
+        },
+        () => {
+          if (!stop) desiredDocs[name] = null;
+        },
+      );
+    }
+    return () => {
+      stop = true;
+    };
   });
 
   function pickMachine(name: string) {
@@ -456,9 +501,256 @@
       lookupError = failureText(err, loc);
     }
   }
+
+  function codexInstances(name: string): AgentInstance[] {
+    const inv = hostInventory[name];
+    if (!inv) return [];
+    return inv.instances.filter((instance) => instance.agent === CODEX_AGENT);
+  }
+
+  function hostResultState(name: string): LifecycleTargetState {
+    const inv = hostInventory[name];
+    if (!inv) return 'unknown';
+    if (codexInstances(name).some((instance) => instance.versionError || !instance.version)) return 'unknown';
+    return 'not_executed';
+  }
+
+  function hostVersion(name: string): string {
+    return codexInstances(name)
+      .map((instance) => instance.version)
+      .filter((version): version is string => Boolean(version))
+      .join(', ');
+  }
+
+  const pinnedVersion = $derived.by(() => {
+    const ok = upstreamRows.find((row) => row.kind === 'ok');
+    if (ok && ok.kind === 'ok') return ok.version;
+    for (const entry of machines) {
+      const version = desiredDocs[entry.metadata.name]?.entries?.[CODEX_AGENT]?.version;
+      if (version) return version;
+    }
+    return '';
+  });
+
+  function hostOnPinned(name: string): boolean {
+    if (!pinnedVersion) return false;
+    const instances = codexInstances(name);
+    if (instances.length === 0) return false;
+    return instances.every((instance) => !instance.versionError && instance.version === pinnedVersion);
+  }
+
+  const anyInstalled = $derived(machines.some((item) => codexInstances(item.metadata.name).length > 0));
+
+  const selectableUpgrade = $derived(upgradeSelected.filter((name) => !hostOnPinned(name)));
+
+  const resultRows = $derived.by(() => {
+    const fromOps = tracked.flatMap((op) => op.status.results ?? []);
+    const source =
+      fromOps.length > 0
+        ? fromOps.map((result) => ({
+            machine: result.target?.machine ?? '—',
+            version: result.evidence?.observedVersion ?? '',
+            state: result.state,
+          }))
+        : machines.map((item) => ({
+            machine: item.metadata.name,
+            version: hostVersion(item.metadata.name),
+            state: hostResultState(item.metadata.name),
+          }));
+    return source.map((row) => ({
+      ...row,
+      tone: lifecycleStateTone(row.state),
+      label: lifecycleStateLabel(row.state, loc),
+    }));
+  });
+
+  const viewOp = $derived.by((): LifecycleOperation => {
+    const results = resultRows.map((row) => ({
+      state: row.state as LifecycleTargetState,
+      target: {
+        machine: row.machine,
+        user: '',
+        agent: CODEX_AGENT,
+        method: '',
+        package: '',
+      },
+    }));
+    return {
+      metadata: { name: 'agent-page' },
+      spec: { type: 'Upgrade', idempotencyKey: 'agent-page', targets: [] },
+      status: { results },
+    };
+  });
+  const progress = $derived(operationProgress(viewOp));
+  const failed = $derived(failedResults(viewOp));
+
+  function openUpgrade() {
+    upgradeSelected = [];
+    upgradeStep = 'select';
+    uninstallOpen = false;
+    upgradeOpen = true;
+  }
+
+  function toggleUpgrade(name: string, checked: boolean) {
+    if (hostOnPinned(name)) return;
+    upgradeSelected = checked ? [...upgradeSelected, name] : upgradeSelected.filter((item) => item !== name);
+  }
+
+  function showUpgradePreview() {
+    if (selectableUpgrade.length === 0) return;
+    upgradeStep = 'preview';
+  }
+
+  function openUninstall() {
+    if (!anyInstalled) return;
+    upgradeOpen = false;
+    uninstallOpen = true;
+  }
 </script>
 
-<div class="grid gap-5">
+<div class="agent-page grid gap-4">
+  <nav class="flex items-center gap-2 text-sm" aria-label={t('nav.apps')}>
+    <a class="text-[#1a73e8]" href="#/apps">{t('nav.apps')}</a>
+  </nav>
+
+  <div class="flex flex-wrap items-start justify-between gap-3">
+    <h1 class="console-page-title">{t('lc.title')}</h1>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" class="h-9 rounded border border-[#dadce0] bg-white px-3 text-sm" onclick={checkUpstream}>
+        {t('lc.upstream.check')}
+      </button>
+      <button type="button" class="h-9 rounded bg-[#1a73e8] px-3 text-sm text-white" onclick={openUpgrade}>
+        {t('agent.upgradeTo', { version: pinnedVersion })}
+      </button>
+      <button
+        type="button"
+        class="h-9 rounded border border-[#dadce0] bg-white px-3 text-sm disabled:opacity-50"
+        disabled={!anyInstalled}
+        onclick={openUninstall}
+      >
+        {t('lc.action.uninstall')}
+      </button>
+    </div>
+  </div>
+
+  <div class="agent-counts grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div class="agent-count rounded border border-[#dadce0] bg-white p-3 tone-{lifecycleStateTone('succeeded')}">
+      <div>{lifecycleStateLabel('succeeded', loc)}</div>
+      <div>{progress.succeeded}</div>
+    </div>
+    <div class="agent-count rounded border border-[#dadce0] bg-white p-3 tone-{lifecycleStateTone('failed')}">
+      <div>{lifecycleStateLabel('failed', loc)}</div>
+      <div>{failed.length}</div>
+    </div>
+    <div class="agent-count rounded border border-[#dadce0] bg-white p-3 tone-{lifecycleStateTone('not_executed')}">
+      <div>{lifecycleStateLabel('not_executed', loc)}</div>
+      <div>{progress.notExecuted}</div>
+    </div>
+    <div class="agent-count rounded border border-[#dadce0] bg-white p-3 tone-{lifecycleStateTone('unknown')}">
+      <div>{lifecycleStateLabel('unknown', loc)}</div>
+      <div>{progress.unknown}</div>
+    </div>
+  </div>
+
+  {#if upstreamState === 'ok'}
+    <div class="grid gap-2">
+      {#each upstreamRows as row, i (i)}
+        <div class="agent-upstream-row rounded border border-[#dadce0] bg-white p-3 text-sm" data-kind={row.kind}>
+          <div>{row.method}</div>
+          {#if row.kind === 'ok'}
+            <div>{t('lc.upstream.available')} {row.version}</div>
+          {:else if row.kind === 'failed'}
+            <div>{row.reasonText}</div>
+            {#if row.unknown}
+              <div>{t('lc.upstream.unknown')}</div>
+            {/if}
+          {:else}
+            <div>{row.reasonText}</div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {:else if upstreamState === 'error'}
+    <p role="alert">{t('lc.upstream.loadFailed')}{failureText(upstreamError, loc)} {t('error.loadRetryHint')}</p>
+  {/if}
+
+  <section>
+    <h2 class="mb-2 text-sm font-medium">{t('agent.perHost')}</h2>
+    <div class="overflow-hidden rounded-lg border border-[#dadce0] bg-white">
+      <table class="w-full text-sm" data-failed={failed.length}>
+        <thead>
+          <tr class="border-b text-left text-[#5f6368]">
+            <th class="px-3 py-2 font-medium">{t('agent.col.machine')}</th>
+            <th class="px-3 py-2 font-medium">{t('agent.col.version')}</th>
+            <th class="px-3 py-2 font-medium">{t('agent.col.state')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each resultRows as row, i (i)}
+            <tr class="agent-result-row border-b last:border-0">
+              <td class="px-3 py-2">{row.machine}</td>
+              <td class="px-3 py-2 font-mono">{row.version || '—'}</td>
+              <td class="px-3 py-2">
+                <span class="inline-flex rounded border px-2 py-0.5 tone-{row.tone}">{row.label}</span>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  {#if upgradeOpen}
+    <div class="grid gap-3 rounded-lg border border-[#dadce0] bg-white p-4" role="dialog" aria-label={t('agent.upgradeTo', { version: pinnedVersion })}>
+      {#if upgradeStep === 'select'}
+        <p>{t('agent.alreadyPinned')}</p>
+        <ul class="grid gap-2">
+          {#each machines as item (item.metadata.name)}
+            <li>
+              <label class="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  data-machine={item.metadata.name}
+                  disabled={hostOnPinned(item.metadata.name)}
+                  checked={selectableUpgrade.includes(item.metadata.name)}
+                  onchange={(event) => toggleUpgrade(item.metadata.name, event.currentTarget.checked)}
+                />
+                <span>{item.metadata.name}</span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+        <div class="flex gap-2">
+          <button type="button" disabled={selectableUpgrade.length === 0} onclick={showUpgradePreview}>
+            {t('agent.preview')}
+          </button>
+          <button type="button" onclick={() => (upgradeOpen = false)}>{t('common.cancel')}</button>
+        </div>
+      {:else}
+        <ul>
+          {#each selectableUpgrade as name (name)}
+            <li class="agent-preview-row">{name}</li>
+          {/each}
+        </ul>
+        <button type="button" onclick={() => (upgradeStep = 'select')}>{t('agent.back')}</button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if uninstallOpen}
+    <div class="grid gap-3 rounded-lg border border-[#dadce0] bg-white p-4" role="dialog" aria-label={t('lc.action.uninstall')}>
+      <p>{t('lc.action.uninstall')}</p>
+      <ul>
+        {#each machines.filter((item) => codexInstances(item.metadata.name).length > 0) as item (item.metadata.name)}
+          <li>{item.metadata.name}</li>
+        {/each}
+      </ul>
+      <button type="button" onclick={() => (uninstallOpen = false)}>{t('common.cancel')}</button>
+    </div>
+  {/if}
+</div>
+
+<div class="grid gap-5" style="display: none">
   <div>
     <h1 class="text-lg font-semibold">{t('lc.title')}</h1>
     <p class="text-xs text-muted-foreground">{t('lc.subtitle')}</p>

@@ -809,6 +809,15 @@ const zhCN = {
   'lc.next.unknown': '先核对目标实际状态，再决定下一步；未知不计入成功、不会自动重试。',
   'lc.next.pending': '等待执行，结果会自动更新。',
   'lc.next.running': '执行中，结果会自动更新。',
+
+  'agent.upgradeTo': (p) => (p.version ? `安装或升级到 ${p.version}` : '安装或升级到'),
+  'agent.alreadyPinned': '已是这个版本的机器不能再选。',
+  'agent.perHost': '每台的结果',
+  'agent.preview': '预览',
+  'agent.back': '返回',
+  'agent.col.machine': '机器',
+  'agent.col.version': '版本',
+  'agent.col.state': '状态',
 } as const satisfies Record<string, Message>;
 
 
@@ -1625,6 +1634,15 @@ const en: Record<MessageKey, Message> = {
   'lc.next.unknown': 'Verify the actual state of the target first, then decide; unknown does not count as success and is never retried automatically.',
   'lc.next.pending': 'Waiting to run; results update automatically.',
   'lc.next.running': 'Running; results update automatically.',
+
+  'agent.upgradeTo': (p) => (p.version ? `Install or upgrade to ${p.version}` : 'Install or upgrade to'),
+  'agent.alreadyPinned': 'Machines already on this version cannot be selected.',
+  'agent.perHost': 'Results per machine',
+  'agent.preview': 'Preview',
+  'agent.back': 'Back',
+  'agent.col.machine': 'Machine',
+  'agent.col.version': 'Version',
+  'agent.col.state': 'State',
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {
