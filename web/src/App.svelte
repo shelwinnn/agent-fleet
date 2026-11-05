@@ -3,7 +3,6 @@
   import { fleetStore as store } from '$lib/state/fleet.svelte.js';
   import { initRouter, navigate, router } from '$lib/state/router.svelte.js';
   import { t, i18n, type MessageKey } from '$lib/i18n/index.js';
-  import { machineRows } from '$lib/state/machines.js';
   import { lifecycleStateLabel, lifecycleStateTone } from '$lib/state/lifecycle.js';
   import StateBadge from '$lib/components/StateBadge.svelte';
   import LogoMark from '$lib/components/shell/LogoMark.svelte';
@@ -21,7 +20,7 @@
   type NavMark = 'overview' | 'devices' | 'apps' | 'skills';
   type NavLink = { path: string; labelKey: MessageKey; mark: NavMark };
   type NavGroup = { labelKey: MessageKey | null; items: NavLink[] };
-  type Panel = 'scope' | 'attention' | 'help' | 'account';
+  type Panel = 'scope' | 'help' | 'account';
 
   const NAV: NavGroup[] = [
     { labelKey: null, items: [{ path: '/', labelKey: 'nav.overview', mark: 'overview' }] },
@@ -39,10 +38,6 @@
 
   let collapsed = $state(false);
   let panel = $state<Panel | null>(null);
-
-  const attention = $derived(
-    machineRows(store.machines, new Date(), i18n.locale).filter((row) => row.needsAttention),
-  );
 
   onMount(() => {
     initRouter();
@@ -105,22 +100,20 @@
 </script>
 
 {#snippet navMark(kind: NavMark)}
-  <svg class="nav-mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+  <svg class="nav-mark" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     {#if kind === 'overview'}
-      <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" />
-      <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor" />
-      <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor" />
-      <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" />
+      <rect x="3" y="3" width="5.5" height="5.5" rx="1" />
+      <rect x="11.5" y="3" width="5.5" height="5.5" rx="1" />
+      <rect x="3" y="11.5" width="5.5" height="5.5" rx="1" />
+      <rect x="11.5" y="11.5" width="5.5" height="5.5" rx="1" />
     {:else if kind === 'devices'}
-      <rect x="2" y="3" width="16" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6" />
-      <path d="M7 17h6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      <rect x="3" y="4" width="14" height="9" rx="1.5" />
+      <path d="M8 16.5h4M10 13v3.5" />
     {:else if kind === 'apps'}
-      <rect x="3" y="3" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6" />
-      <rect x="11" y="3" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6" />
-      <rect x="3" y="11" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6" />
-      <rect x="11" y="11" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.6" />
+      <path d="M10 2.5 16.5 6v8L10 17.5 3.5 14V6Z" />
+      <path d="M3.5 6 10 9.5 16.5 6M10 9.5v8" />
     {:else}
-      <path d="M10 2.5 12.2 7l5 .5-3.8 3.3 1.2 4.9L10 13.2 5.4 15.7 6.6 10.8 2.8 7.5 7.8 7Z" fill="currentColor" />
+      <path d="M10 2.5 12 7.2l5.2.5-4 3.5 1.2 5.1L10 13.6 5.6 16.3 6.8 11.2 2.8 7.7l5.2-.5Z" />
     {/if}
   </svg>
 {/snippet}
@@ -161,33 +154,6 @@
       placeholder={t('nav.search')}
       aria-label={t('nav.search')}
     />
-
-    <div class="console-anchor" data-open={panel === 'attention' ? 'true' : undefined}>
-      <button type="button" class="console-icon-text" aria-expanded={panel === 'attention'} onclick={() => toggle('attention')}>
-        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-          <path
-            d="M12 3a6 6 0 0 0-6 6v3.2L4 16h16l-2-3.8V9a6 6 0 0 0-6-6z"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-          />
-          <path d="M10 18a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8" />
-        </svg>
-        <span>{t('nav.attention')}</span>
-      </button>
-      {#if panel === 'attention'}
-        <div class="console-popover align-end">
-          <p class="console-popover-title">{t('nav.attention')}</p>
-          <ul class="console-menu">
-            {#each attention as row (row.name)}
-              <li>
-                <button type="button" onclick={() => openMachine(row.name)}>{row.name}</button>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-    </div>
 
     <div class="console-anchor" data-open={panel === 'help' ? 'true' : undefined}>
       <button
