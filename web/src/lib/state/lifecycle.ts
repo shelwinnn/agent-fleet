@@ -110,8 +110,9 @@ export function instanceKey(instance: AgentInstance): string {
 }
 
 export function targetIdentityKey(t: LifecycleTarget): string {
-  // 与后端 LifecycleTarget.Key() 同构（machine|env|user|agent|method|package|instancePath）；
-  // instancePath 空 = 未绑定（执行引擎按进程作用域决定）。
+  // 段序与后端 LifecycleTarget.Key()（domain/lifecycle.go，含 instancePath）一致；
+  // 分隔符（|）与空 env → native 归一是 UI 本地约定（后端用 \x1f 且不归一）：
+  // 本键只在 UI 内做影响指纹与去重，不与后端键直接比较。instancePath 空 = 未绑定。
   return `${t.machine}|${t.env || 'native'}|${t.user}|${t.agent}|${t.method}|${t.package}|${t.instancePath ?? ''}`;
 }
 
@@ -437,11 +438,13 @@ export interface DeviationView {
 
 /**
  * 期望意图 vs 实际观测的偏差。实际观测来自实例发现：installedVersion 为
- * undefined 且无实例 = 尚未安装；versionError = 已装但版本不可解析（未知 ≠ 一致）。
+ * undefined 且无实例 = 尚未安装；versionError = 已装但版本不可解析（未知 ≠ 一致）；
+ * unknown = 节点从未上报观测（inventoryMissing）——实际状态未知，不判定偏差
+ * （未知 ≠ 一致，也 ≠ 尚未安装）。
  */
 export function deviationView(
   entry: LifecycleEntry | undefined,
-  installed: { version?: string; versionError?: string; present: boolean },
+  installed: { version?: string; versionError?: string; present: boolean; unknown?: boolean },
   locale: Locale = 'zh-CN',
 ): DeviationView {
   if (!entry) {
@@ -456,6 +459,15 @@ export function deviationView(
       level: 'info',
       text: translate(locale, 'lc.deviation.unmanaged'),
       detail: translate(locale, 'lc.deviation.unmanagedDetail'),
+    };
+  }
+  if (installed.unknown) {
+    // absent/present 意图都需要实际观测才能核对；观测缺失时如实说"未知"，
+    // 绝不把 present=false 当成"尚未安装"（inventoryMissing 时 present 不可知）。
+    return {
+      level: 'info',
+      text: translate(locale, 'lc.deviation.stateUnknown'),
+      detail: translate(locale, 'lc.deviation.stateUnknownDetail'),
     };
   }
   if (entry.intent === 'absent') {

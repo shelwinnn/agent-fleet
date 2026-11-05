@@ -15,6 +15,7 @@ import { mount, unmount, flushSync } from 'svelte';
 import { initLocale, setLocale } from '../src/lib/i18n/index.js';
 import { MockLifecycleBackend } from '../src/lib/api/lifecycleMock.js';
 import { ApiError } from '../src/lib/api/client.js';
+import { desiredPresentUpdate } from '../src/lib/state/lifecycle.js';
 import type { ResourceEvent } from '../src/lib/api/types.js';
 import type { AgentInstanceInventory, LifecycleGateway } from '../src/lib/state/lifecycleGateway.js';
 import Lifecycle from '../src/routes/Lifecycle.svelte';
@@ -346,6 +347,29 @@ describe('实例发现接线：机器级观测模式（KM-50 第二波；契约�
     });
     expect(op.spec.targets[0].env).toBeUndefined(); // 原生 = env 缺省
     expect(op.spec.targets[0].instancePath).toBeUndefined(); // 安装创建新实例，不绑定
+  });
+
+  it('inventoryMissing + 已设期望：偏差卡如实呈现"实际状态未知"，不拿"尚未安装/一致"冒充核对结果', async () => {
+    const backend = backendWithMachineLevelInventory({
+      machine: 'linux-build',
+      environments: [],
+      instances: [],
+      inventoryMissing: true,
+    });
+    // 期望 present@0.56.1 已设定（如上一步安装写入过），但节点从未上报观测
+    await backend.putDesired('linux-build', desiredPresentUpdate('0.56.1', 'npm', '@openai/codex'));
+    await mountPage(backend);
+    await pickMachineLevelMachine();
+    setInput('#lc-user-input', 'alice');
+    await settle();
+
+    const text = body().textContent!;
+    expect(text).toContain('实际状态未知');
+    expect(text).toContain('未知不等于一致');
+    // 不得出现任何"核对结果"：既不判一致，也不判"尚未安装"的偏差
+    expect(text).not.toContain('一致：');
+    expect(text).not.toContain('偏差：');
+    expect(text).not.toContain('这个用户环境尚未安装');
   });
 });
 

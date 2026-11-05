@@ -142,6 +142,8 @@
     present: instances.length > 0,
     version: (selectedInstance ?? instances[0])?.version,
     versionError: (selectedInstance ?? instances[0])?.versionError,
+    // 观测缺失（节点从未上报）：实际状态未知——偏差判定不得把"未知"当"尚未安装"或"一致"。
+    unknown: inventory?.inventoryMissing === true,
   });
 
   // 操作能力判定：安装看所选方式；升级/卸载看所选实例的方式。
@@ -588,13 +590,13 @@
                 {#if instances.length > 1}
                   <p class="text-xs text-muted-foreground">{t('lc.instance.choose')}</p>
                 {/if}
-                {#each instances as inst (instanceKey(inst))}
+                {#each instances as inst, i (instanceKey(inst))}
                   {@const key = instanceKey(inst)}
                   <div class="flex flex-wrap items-center gap-2 rounded-md border p-3 {sel.instance === key ? 'border-primary' : ''}">
                     <input
                       type="radio"
                       name="lc-instance"
-                      id="lc-inst-{key}"
+                      id="lc-inst-{i}"
                       class="size-4 accent-primary"
                       checked={sel.instance === key}
                       onchange={() => {
@@ -602,7 +604,7 @@
                         previewKind = null;
                       }}
                     />
-                    <label for="lc-inst-{key}" class="flex cursor-pointer flex-wrap items-center gap-2">
+                    <label for="lc-inst-{i}" class="flex cursor-pointer flex-wrap items-center gap-2">
                       <span class="font-mono text-xs">{instanceTitle(inst, loc)}</span>
                       <span class="text-xs text-muted-foreground">{inst.executablePath ?? ''}</span>
                       <CapabilityBadge capability={capFor(inst.method)} />
@@ -652,13 +654,13 @@
               {#if instances.length > 1}
                 <p class="text-xs text-muted-foreground">{t('lc.instance.chooseMachine')}</p>
               {/if}
-              {#each instances as inst (instanceKey(inst))}
+              {#each instances as inst, i (instanceKey(inst))}
                 {@const key = instanceKey(inst)}
                 <div class="flex flex-wrap items-center gap-2 rounded-md border p-3 {sel.instance === key ? 'border-primary' : ''}">
                   <input
                     type="radio"
                     name="lc-instance"
-                    id="lc-inst-{key}"
+                    id="lc-inst-{i}"
                     class="size-4 accent-primary"
                     checked={sel.instance === key}
                     onchange={() => {
@@ -666,7 +668,7 @@
                       previewKind = null;
                     }}
                   />
-                  <label for="lc-inst-{key}" class="flex cursor-pointer flex-wrap items-center gap-2">
+                  <label for="lc-inst-{i}" class="flex cursor-pointer flex-wrap items-center gap-2">
                     <span class="font-mono text-xs">{instanceTitle(inst, loc)}</span>
                     <span class="text-xs text-muted-foreground">{inst.executablePath ?? ''}</span>
                   </label>
@@ -693,6 +695,7 @@
       installed={installedView}
       observedAt={inventory?.discoveredAt}
       targetSelected={sel.user !== ''}
+      pickTargetText={userEnumerated ? undefined : t('lc.deviation.pickTargetMachine')}
       now={clock.now}
     />
   {/if}
@@ -833,7 +836,9 @@
             {/if}
           </div>
         {:else if instances.length > 0}
-          <p class="text-xs text-muted-foreground">{t('lc.instance.choose')}</p>
+          <p class="text-xs text-muted-foreground">
+            {userEnumerated ? t('lc.instance.choose') : t('lc.instance.chooseMachine')}
+          </p>
         {/if}
 
       </CardContent>

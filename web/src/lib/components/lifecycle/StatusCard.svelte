@@ -18,15 +18,17 @@
     doc: LifecycleDesiredDocument | null | undefined;
     loading?: boolean;
     error?: unknown;
-    /** 实际安装情况（实例发现；present=false 表示尚未安装）。 */
-    installed: { present: boolean; version?: string; versionError?: string };
+    /** 实际安装情况（实例发现；present=false 表示尚未安装；unknown=true 表示观测缺失、状态未知）。 */
+    installed: { present: boolean; version?: string; versionError?: string; unknown?: boolean };
     observedAt?: string;
     /** 是否已选定环境与用户：未选时不判定偏差，只给中性提示（不拿空选择冒充"尚未安装"）。 */
     targetSelected?: boolean;
+    /** 中性提示文案（按选择模式给定；缺省用通用的"先指定环境与用户"）。 */
+    pickTargetText?: string;
     /** 相对时间基准（页面时钟），与页面其他时间一致刷新。 */
     now?: Date;
   }
-  let { doc, loading = false, error, installed, observedAt, targetSelected = true, now = new Date() }: Props = $props();
+  let { doc, loading = false, error, installed, observedAt, targetSelected = true, pickTargetText, now = new Date() }: Props = $props();
 
   const loc = $derived(i18n.locale);
   const entry: LifecycleEntry | undefined = $derived(desiredEntryFor(doc));
@@ -70,7 +72,7 @@
           <p class="text-xs text-muted-foreground">{deviation.detail}</p>
         {/if}
       {:else}
-        <p class="text-xs text-muted-foreground">{t('lc.deviation.pickTarget')}</p>
+        <p class="text-xs text-muted-foreground">{pickTargetText ?? t('lc.deviation.pickTarget')}</p>
       {/if}
       {#if observedAt}
         <p class="text-xs text-muted-foreground">{t('lc.instance.observedAt', { time: formatRelativeTime(observedAt, now, loc) })}</p>

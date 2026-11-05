@@ -72,7 +72,9 @@ export interface AgentInstanceInventory {
  */
 export function instanceInventoryFromContract(list: LifecycleInstanceList): AgentInstanceInventory {
   const instances: AgentInstance[] = (list.instances ?? [])
-    .filter((i) => i.installed || i.versionError)
+    // installed=false 的条目不是实例（不冒充已装）；versionError 只在 installed 条目上
+    // 表达"已装但版本不可解析"（后端不会给出 installed=false + versionError 的矛盾组合）。
+    .filter((i) => i.installed)
     .map((i) => ({
       env: '',
       user: '',
