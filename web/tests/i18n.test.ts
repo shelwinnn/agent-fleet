@@ -113,12 +113,12 @@ describe('首次语言与切换', () => {
     setLocale('en');
     expect(i18n.locale).toBe('en');
     expect(t('nav.machines')).toBe('Machines');
-    expect(t('app.title')).toBe('agent-fleet console');
+    expect(t('app.title')).toBe('Agent Fleet');
 
     setLocale('zh-CN');
     expect(t('nav.machines')).toBe('机器');
     // 品牌名不翻译（spec：品牌原样保留）
-    expect(t('app.title')).toBe('agent-fleet 控制面');
+    expect(t('app.title')).toBe('Agent Fleet');
   });
 });
 
