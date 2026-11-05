@@ -45,7 +45,7 @@ export function translate(locale: Locale, key: string, params?: MessageParams): 
 
 const zhCN = {
   // ---- 应用外壳 ----
-  'app.title': 'agent-fleet 控制面',
+  'app.title': 'agent-fleet',
   'app.subtitle': '单操作者机群管理',
   'app.stream.open': '实时事件流已连接',
   'app.stream.connecting': '实时事件流连接中',
@@ -71,10 +71,23 @@ const zhCN = {
   // ---- 导航 ----
   'nav.overview': '总览',
   'nav.machines': '机器',
+  'nav.devices': '设备',
+  'nav.apps': '应用',
+  'nav.resources': '资源',
+  'nav.software': '软件',
   'nav.profiles': '配置档',
   'nav.skills': '技能',
   'nav.deployments': '发布',
   'nav.sshInventory': 'SSH 清单',
+  'nav.menu': '菜单',
+  'nav.scope': (p) => `我的 ${p.n} 台`,
+  'nav.scopeAll': '全部设备',
+  'nav.search': '搜索',
+  'nav.attention': '要处理',
+  'nav.help': '帮助',
+  'nav.account': '账号',
+  'nav.collapse': '收起菜单',
+  'nav.expand': '展开菜单',
 
   // ---- Overview 页 ----
   'overview.title': '总览',
@@ -804,7 +817,7 @@ export type MessageKey = keyof typeof zhCN & string;
 /** en 目录：Record<MessageKey, Message> 使缺译/多译都在编译期暴露。 */
 const en: Record<MessageKey, Message> = {
   // ---- App shell ----
-  'app.title': 'agent-fleet console',
+  'app.title': 'agent-fleet',
   'app.subtitle': 'Fleet management for a single operator',
   'app.stream.open': 'Realtime stream connected',
   'app.stream.connecting': 'Realtime stream connecting',
@@ -831,10 +844,23 @@ const en: Record<MessageKey, Message> = {
   // ---- Navigation ----
   'nav.overview': 'Overview',
   'nav.machines': 'Machines',
+  'nav.devices': 'Devices',
+  'nav.apps': 'Apps',
+  'nav.resources': 'Resources',
+  'nav.software': 'Software',
   'nav.profiles': 'Profiles',
   'nav.skills': 'Skills',
   'nav.deployments': 'Deployments',
   'nav.sshInventory': 'SSH Inventory',
+  'nav.menu': 'Menu',
+  'nav.scope': (p) => `My ${p.n} ${selectPlural('en', Number(p.n), 'machine', 'machines')}`,
+  'nav.scopeAll': 'All devices',
+  'nav.search': 'Search',
+  'nav.attention': 'Needs attention',
+  'nav.help': 'Help',
+  'nav.account': 'Account',
+  'nav.collapse': 'Collapse menu',
+  'nav.expand': 'Expand menu',
 
   // ---- Overview page ----
   'overview.title': 'Overview',
