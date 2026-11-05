@@ -809,6 +809,27 @@ const zhCN = {
   'lc.next.unknown': '先核对目标实际状态，再决定下一步；未知不计入成功、不会自动重试。',
   'lc.next.pending': '等待执行，结果会自动更新。',
   'lc.next.running': '执行中，结果会自动更新。',
+
+  // ---- 单机页 ----
+  'host.crumb.devices': '设备',
+  'host.crumb.label': '面包屑',
+  'host.meta.online': '在线',
+  'host.meta.offline': '离线',
+  'host.section.agents': '代理',
+  'host.section.skills': '技能',
+  'host.agents.col.name': '名称',
+  'host.agents.col.version': '版本',
+  'host.agents.col.status': '状态',
+  'host.agents.col.note': '说明',
+  'host.agents.empty': '这台机器上还没有代理',
+  'host.skills.empty': '这台机器上还没有技能',
+  'host.version.none': '无',
+  'host.version.lastSeen': (p) => `上次看到 ${p.version}`,
+  'host.version.lastSeenOnly': '上次看到',
+  'host.status.installed': '已安装',
+  'host.status.absent': '未安装',
+  'host.status.unverified': '未验证',
+  'host.agent.desired': (p) => `期望 ${p.version}`,
 } as const satisfies Record<string, Message>;
 
 
@@ -1625,6 +1646,27 @@ const en: Record<MessageKey, Message> = {
   'lc.next.unknown': 'Verify the actual state of the target first, then decide; unknown does not count as success and is never retried automatically.',
   'lc.next.pending': 'Waiting to run; results update automatically.',
   'lc.next.running': 'Running; results update automatically.',
+
+  // ---- Machine page ----
+  'host.crumb.devices': 'Devices',
+  'host.crumb.label': 'Breadcrumb',
+  'host.meta.online': 'Online',
+  'host.meta.offline': 'Offline',
+  'host.section.agents': 'Agents',
+  'host.section.skills': 'Skills',
+  'host.agents.col.name': 'Name',
+  'host.agents.col.version': 'Version',
+  'host.agents.col.status': 'Status',
+  'host.agents.col.note': 'Note',
+  'host.agents.empty': 'This machine has no agents yet.',
+  'host.skills.empty': 'This machine has no skills yet.',
+  'host.version.none': 'None',
+  'host.version.lastSeen': (p) => `Last seen ${p.version}`,
+  'host.version.lastSeenOnly': 'Last seen',
+  'host.status.installed': 'Installed',
+  'host.status.absent': 'Not installed',
+  'host.status.unverified': 'Unverified',
+  'host.agent.desired': (p) => `Desired ${p.version}`,
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {
