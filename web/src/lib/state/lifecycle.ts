@@ -104,11 +104,15 @@ export function envLabel(env: string | undefined, locale: Locale = 'zh-CN'): str
 }
 
 export function instanceKey(instance: AgentInstance): string {
-  return `${instance.env || 'native'}|${instance.user}|${instance.method}|${instance.package}`;
+  // 路径参与区分（KM-49 P5：目标身份绑定明确实例）：来源未上报的多个观测实例
+  // 只有路径不同，缺路径段会把两个实例折叠成一个。
+  return `${instance.env || 'native'}|${instance.user}|${instance.method}|${instance.package}|${instance.executablePath ?? ''}`;
 }
 
 export function targetIdentityKey(t: LifecycleTarget): string {
-  return `${t.machine}|${t.env || 'native'}|${t.user}|${t.agent}|${t.method}|${t.package}`;
+  // 与后端 LifecycleTarget.Key() 同构（machine|env|user|agent|method|package|instancePath）；
+  // instancePath 空 = 未绑定（执行引擎按进程作用域决定）。
+  return `${t.machine}|${t.env || 'native'}|${t.user}|${t.agent}|${t.method}|${t.package}|${t.instancePath ?? ''}`;
 }
 
 /** 目标的一行身份描述：主机 · 环境 · 用户 · 来源/包（路径单独展示）。 */
@@ -130,6 +134,8 @@ export function buildTarget(input: {
   pkg?: string;
   os?: string;
   arch?: string;
+  /** 绑定的明确安装实例路径（升级/卸载必须绑定；安装创建新实例，不绑定）。 */
+  instancePath?: string;
   capability?: LifecycleCapability;
 }): LifecycleTarget {
   return {
@@ -139,6 +145,7 @@ export function buildTarget(input: {
     agent: CODEX_AGENT,
     method: input.method,
     package: input.pkg ?? CODEX_PACKAGE,
+    ...(input.instancePath ? { instancePath: input.instancePath } : {}),
     os: input.os,
     arch: input.arch,
     capabilityState: input.capability?.state,
@@ -501,9 +508,12 @@ export function instancesFor(
   return (inventory?.instances ?? []).filter((i) => (i.env || '') === env && i.user === user && i.agent === agent);
 }
 
-/** 实例的一行展示身份：来源/包 + 版本（或版本不可解析原因）+ 路径。 */
+/** 实例的一行展示身份：来源/包 + 版本（或版本不可解析原因）+ 路径；来源未上报时如实标注，不猜测。 */
 export function instanceTitle(instance: AgentInstance, locale: Locale = 'zh-CN'): string {
-  const base = `${instance.method} ${instance.package}`;
+  const base =
+    instance.method || instance.package
+      ? `${instance.method} ${instance.package}`.trim()
+      : translate(locale, 'lc.instance.sourceUnknown');
   if (instance.versionError) return `${base} · ${translate(locale, 'lc.instance.versionUnresolved')}`;
   if (instance.version) return `${base} · ${instance.version}`;
   return base;

@@ -4,17 +4,17 @@
  * 浏览器发起的完整真实链路由 T6 收口）。
  *
  * 覆盖：目标选择级联（环境区分原生/WSL、多实例显式选择、"尚未安装"显式状态、
- * 过期清单标注）、阻塞组合无操作入口、安装预览确认（数据保护范围 + 影响变化
- * 重新确认）、检查更新（未知 ≠ 最新）、逐目标四态与重试（仅失败目标、关联原
- * 操作、needsReconfirmation）、停止管理与卸载严格区分、实例发现未接通的诚实
- * 状态、中英文切换。
+ * 过期清单标注）、实例发现接线后的机器级观测模式（用户声明、inventoryMissing
+ * 未知态、来源未知门控）、阻塞组合无操作入口、安装预览确认（数据保护范围 +
+ * 影响变化重新确认）、检查更新（未知 ≠ 最新）、逐目标四态与重试（仅失败目标、
+ * 关联原操作、needsReconfirmation）、停止管理与卸载严格区分、实例清单查询失败
+ * 的诚实状态、中英文切换。
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
 import { initLocale, setLocale } from '../src/lib/i18n/index.js';
 import { MockLifecycleBackend } from '../src/lib/api/lifecycleMock.js';
 import { ApiError } from '../src/lib/api/client.js';
-import { InventoryNotWiredError } from '../src/lib/state/lifecycleGateway.js';
 import type { ResourceEvent } from '../src/lib/api/types.js';
 import type { AgentInstanceInventory, LifecycleGateway } from '../src/lib/state/lifecycleGateway.js';
 import Lifecycle from '../src/routes/Lifecycle.svelte';
@@ -206,15 +206,16 @@ describe('目标选择', () => {
     expect(body().textContent).toContain('不支持固定版本升级'); // binary 的原因如实可见
   });
 
-  it('实例发现未接入时呈现诚实状态，不显示可操作目标', async () => {
+  it('实例清单查询失败时如实呈现原因与重试提示，不出示任何实例', async () => {
     const backend = new MockLifecycleBackend();
     backend.getInstanceInventory = (_m: string): Promise<AgentInstanceInventory> =>
-      Promise.reject(new InventoryNotWiredError());
+      Promise.reject(new ApiError(501, { reason: 'NotImplemented', message: 'lifecycle orchestration is not wired', timestamp: 't' }));
     await mountPage(backend);
     setSelect('#lc-machine', 'linux-build');
     await settle();
-    expect(body().textContent).toContain('实例发现尚未接入控制面');
-    expect(body().textContent).toContain('读取不到这台机器的环境、用户与已装实例');
+    expect(body().textContent).toContain('实例清单读取失败');
+    expect(body().textContent).toContain('lifecycle orchestration is not wired');
+    expect(body().textContent).not.toContain('尚未安装');
   });
 
   it('离线主机给出"未执行"预期说明，仍可提交（提交后不自动执行）', async () => {
@@ -225,6 +226,126 @@ describe('目标选择', () => {
     expect(body().textContent).toContain('不会自动执行');
     // 多实例同样要求显式选择
     expect(body().textContent).toContain('多个 Codex 实例');
+  });
+});
+
+describe('实例发现接线：机器级观测模式（KM-50 第二波；契约无环境/用户/来源归属）', () => {
+  /** 契约映射后的观测实例（env/user/method/package 未上报 → 如实置空）。 */
+  function observedInstance(path: string, version?: string, versionError?: string): AgentInstanceInventory['instances'][number] {
+    return {
+      env: '',
+      user: '',
+      agent: 'codex',
+      method: '',
+      package: '',
+      ...(version ? { version } : {}),
+      ...(versionError ? { versionError } : {}),
+      executablePath: path,
+    };
+  }
+
+  /** 把某台机器的实例清单换成契约映射后的机器级观测形状（environments 为空触发该模式）。 */
+  function backendWithMachineLevelInventory(inventory: AgentInstanceInventory): MockLifecycleBackend {
+    const backend = new MockLifecycleBackend();
+    backend.inventory = { 'linux-build': inventory };
+    return backend;
+  }
+
+  async function pickMachineLevelMachine() {
+    setSelect('#lc-machine', 'linux-build');
+    await settle();
+  }
+
+  it('实例按机器级列出：环境固定原生、用户由操作者声明、多实例必须显式选择', async () => {
+    await mountPage(
+      backendWithMachineLevelInventory({
+        machine: 'linux-build',
+        environments: [],
+        instances: [observedInstance('/opt/prefix1/bin/codex', '0.55.0'), observedInstance('/opt/prefix2/bin/codex', '0.55.0')],
+      }),
+    );
+    await pickMachineLevelMachine();
+
+    // 无枚举模式：环境/用户下拉不出现，改为原生说明 + 用户输入
+    expect(body().querySelector('#lc-env')).toBeNull();
+    expect(body().querySelector('#lc-user')).toBeNull();
+    expect(body().textContent).toContain('执行环境：原生系统');
+    expect(body().textContent).toContain('受管用户清单');
+    expect(body().querySelector('#lc-user-input')).not.toBeNull();
+
+    // 机器级实例清单：来源未上报如实标注，多实例必须显式选择
+    expect(body().textContent).toContain('这台机器上有多个 Codex 实例');
+    expect(body().textContent).toContain('安装来源未上报 · 0.55.0');
+    expect(body().textContent).toContain('/opt/prefix1/bin/codex');
+    expect(body().textContent).toContain('/opt/prefix2/bin/codex');
+
+    // 声明用户后进入操作区；选中实例 → 来源未知：升级/卸载被拒（spec User Story 22）
+    setInput('#lc-user-input', 'alice');
+    body().querySelector<HTMLInputElement>('input[name="lc-instance"]')!.click();
+    flushSync();
+    expect(body().textContent).toContain('这个实例的安装来源未知');
+    expect(body().querySelector('#lc-version-up')).toBeNull();
+    expect(body().textContent).not.toContain('预览并确认');
+  });
+
+  it('inventoryMissing 是显式未知态：未知 ≠ 尚未安装，不列出实例、不 claims 安装状态', async () => {
+    await mountPage(
+      backendWithMachineLevelInventory({ machine: 'linux-build', environments: [], instances: [], inventoryMissing: true }),
+    );
+    await pickMachineLevelMachine();
+
+    expect(body().textContent).toContain('实例状态未知');
+    expect(body().textContent).toContain('无法区分');
+    // 不冒充任何一种已知状态：两种"尚未安装"说明（机器级/用户级）都不出现
+    //（未知态自身的解释文案会提到"尚未安装"一词，属如实说明，不算冒充状态）
+    expect(body().textContent).not.toContain('这台机器的观测里没有任何 Codex 实例');
+    expect(body().textContent).not.toContain('还没有安装 Codex');
+    expect(body().querySelectorAll('input[name="lc-instance"]').length).toBe(0);
+
+    // 未知态仍可声明用户并发起安装（契约允许安装入口；安装方式按能力矩阵门控）
+    setInput('#lc-user-input', 'alice');
+    const npm = buttonByText('npm');
+    expect(npm.disabled).toBe(false);
+    expect(buttonByText('binary').disabled).toBe(true);
+  });
+
+  it('机器级"尚未安装"显式呈现；声明用户进入安装目标身份（env=native、不绑定实例路径）', async () => {
+    const backend = backendWithMachineLevelInventory({
+      machine: 'linux-build',
+      environments: [],
+      instances: [],
+      notInstalled: true,
+    });
+    await mountPage(backend);
+    await pickMachineLevelMachine();
+
+    expect(body().textContent).toContain('尚未安装');
+    expect(body().textContent).toContain('这台机器的观测里没有任何 Codex 实例');
+
+    // 完整安装流：声明用户 → 选方式 → 固定版本 → 预览确认
+    setInput('#lc-user-input', 'alice');
+    buttonByText('npm').click();
+    flushSync();
+    setInput('#lc-version', '0.56.1');
+    buttonByText('预览并确认').click();
+    flushSync();
+    expect(body().textContent).toContain('固定版本 0.56.1');
+    q<HTMLInputElement>('input[id^="lc-ack"]').click();
+    flushSync();
+    buttonByText('确认执行').click();
+    await settle();
+
+    expect(body().textContent).toContain('已创建操作');
+    const op = [...backend.operations.values()][0];
+    expect(op.spec.targets).toHaveLength(1);
+    expect(op.spec.targets[0]).toMatchObject({
+      machine: 'linux-build',
+      user: 'alice', // 操作者声明的用户进入目标身份
+      os: 'linux',
+      arch: 'amd64',
+    });
+    expect(op.spec.targets[0].env).toBeUndefined(); // 原生 = env 缺省
+    expect(op.spec.targets[0].instancePath).toBeUndefined(); // 安装创建新实例，不绑定
   });
 });
 
@@ -482,7 +603,7 @@ describe('评审修复回归', () => {
     await settle();
     const text = body().textContent!;
     expect(text).toContain('应存在：固定版本 0.55.0');
-    expect(text).toContain('先选择执行环境与用户');
+    expect(text).toContain('先指定执行环境与受管用户');
     expect(text).not.toContain('偏差：期望版本 0.55.0，但这个用户环境尚未安装');
   });
 

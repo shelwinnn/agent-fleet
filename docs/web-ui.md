@@ -91,9 +91,15 @@ hash 路由：静态产物可被任意静态服务器托管，不需要服务端
    结果面板如实呈现"确认前不派发"并给出恢复入口。T4 装配缺失（`s.lifecycle == nil`）时端点返回 501，
    页面对失败**如实呈现原因与重试提示**，不以任何兜底数据冒充可用；页面行为的验证用契约形状的
    mock（`web/src/lib/api/lifecycleMock.ts`，仅测试 import）完成，真实链路由 T6 收口（KM-51）。
-10. **实例发现无落地契约（KM-50 登记）**：受管环境/用户/已装实例（路径、来源、版本）尚无 REST 契约。
-    为不编造端点，`RestLifecycleGateway.getInstanceInventory` 显式抛 `InventoryNotWiredError`，
-    页面呈现"实例发现尚未接入控制面"；等价 mock 由测试注入。后端落地契约后接通。
+10. **实例发现已按契约接线（KM-50 第二波更新）**：`GET /api/v1/machines/{name}/lifecycle/instances`
+    （KM-47/KM-49 契约侧）已由 `RestLifecycleGateway.getInstanceInventory` 直连。契约形状是**机器级
+    Codex 实例观测**（路径/版本/安装态），不含受管用户、执行环境与安装来源归属——UI 不猜测：
+    未上报归属的缺口如实置空（映射 `instanceInventoryFromContract`），页面在清单未枚举用户时进入
+    "操作者声明用户"模式（环境固定原生、用户由操作者输入、实例按机器级列出）；`notInstalled`
+    （显式"尚未安装"）与 `inventoryMissing`（节点从未上报，**未知 ≠ 尚未安装**）两种状态区分呈现；
+    来源未上报的实例不给升级/卸载入口（spec User Story 22），安装按能力矩阵门控；升级/卸载目标
+    绑定 `instancePath`（KM-49 P5 目标身份，多实例显式选择）。页面行为的验证仍用契约形状的 mock
+    （`web/src/lib/api/lifecycleMock.ts`，仅测试 import）与 REST 映射单测完成。
 
 ## 核查必改与建议的闭环（KM-25 复核后）
 
