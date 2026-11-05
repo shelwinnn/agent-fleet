@@ -189,6 +189,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/lifecycle/operations/{opId}/retry", s.auth(http.HandlerFunc(s.handleLifecycleRetryOperation)))
 	mux.Handle("GET /api/v1/machines/{name}/lifecycle/desired", s.auth(http.HandlerFunc(s.handleLifecycleGetDesired)))
 	mux.Handle("PUT /api/v1/machines/{name}/lifecycle/desired", s.auth(http.HandlerFunc(s.handleLifecyclePutDesired)))
+	// 实例发现查询（KM-49 修复波/T7 P5 契约侧）：多实例逐条列出、"尚未安装"
+	// 显式表达、inventory 缺失表达"未知 ≠ 未安装"。
+	mux.Handle("GET /api/v1/machines/{name}/lifecycle/instances", s.auth(http.HandlerFunc(s.handleLifecycleInstances)))
 	mux.Handle("GET /api/v1/lifecycle/capabilities", s.auth(http.HandlerFunc(s.handleLifecycleCapabilities)))
 
 	// catch-all：/api 与探针命名空间未匹配时走 §6.4 错误体（KM-21 核查发现 #3：

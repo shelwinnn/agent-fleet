@@ -68,6 +68,8 @@ func execWith(eng Engine) *NodeExecutor {
 		Engines: map[string]Engine{"npm": eng},
 		Policy:  allowPolicy{},
 		Timeout: 30 * time.Second,
+		// 受管用户闸注入替身：测试目标固定为 alice（T7 P5）。
+		RuntimeUser: func() string { return "alice" },
 	})
 }
 
@@ -134,7 +136,8 @@ func TestExecuteEngineErrorIsFailedNotSuccess(t *testing.T) {
 // 且拒绝原因是 unsupported-combo。
 func TestExecuteRefusesBlockedAndUnverifiedCombos(t *testing.T) {
 	eng := &fakeEngine{}
-	x := NewNodeExecutor(NodeExecutorConfig{Engines: map[string]Engine{"npm": eng, "brew": eng}})
+	x := NewNodeExecutor(NodeExecutorConfig{Engines: map[string]Engine{"npm": eng, "brew": eng},
+		RuntimeUser: func() string { return "alice" }})
 	cases := []struct {
 		name   string
 		method string
@@ -414,4 +417,165 @@ func uninstallTarget() TargetSpec {
 	t.Type = domain.LifecycleOpUninstall
 	t.Version = ""
 	return t
+}
+
+// TestRetryPremiseBinding（KM-49 修复波/T7 P4）：确认绑定到具体观测——
+//   - 重发现实测 == 接受版本（操作者确认的观测）→ 前提成立，执行；
+//   - 实测是其他值（确认之后状态又变了）→ 影响再次变化，needs_reconfirmation；
+//   - 未携带接受版本（首派）→ 任何不一致都要求确认（既有行为不变）。
+func TestRetryPremiseBinding(t *testing.T) {
+	t.Run("accepted premise holds, executes", func(t *testing.T) {
+		eng := &fakeEngine{detect: func(_ context.Context, _ Request) (Detected, error) {
+			return Detected{Installed: true, Version: "0.45.0", Method: "npm"}, nil
+		}}
+		tt := upgradeTarget()
+		tt.AcceptedObservedVersion = "0.45.0"
+		rep := execWith(eng).Execute(context.Background(), OpRequest{
+			OpID: "op-p1", Type: domain.LifecycleOpUpgrade, Version: "0.44.0",
+			RediscoveryRequired: true, Targets: []TargetSpec{tt},
+		})
+		if r := rep.Results[0]; r.State != domain.TargetSucceeded {
+			t.Fatalf("premise holds but did not execute: %s/%s (%s)", r.State, r.Reason, r.Message)
+		}
+		if !hasCall(eng, "upgrade") {
+			t.Fatalf("upgrade not executed: %v", eng.calls)
+		}
+		if rep.NeedsReconfirmation {
+			t.Fatal("accepted premise must not re-flag")
+		}
+	})
+	t.Run("state changed again after confirmation re-flags", func(t *testing.T) {
+		eng := &fakeEngine{detect: func(_ context.Context, _ Request) (Detected, error) {
+			return Detected{Installed: true, Version: "0.46.0", Method: "npm"}, nil
+		}}
+		tt := upgradeTarget()
+		tt.AcceptedObservedVersion = "0.45.0"
+		rep := execWith(eng).Execute(context.Background(), OpRequest{
+			OpID: "op-p2", Type: domain.LifecycleOpUpgrade, Version: "0.44.0",
+			RediscoveryRequired: true, Targets: []TargetSpec{tt},
+		})
+		r := rep.Results[0]
+		if r.State != domain.TargetFailed || r.Reason != domain.ReasonVersionMismatch {
+			t.Fatalf("re-changed state = %s/%s, want failed/version-mismatch", r.State, r.Reason)
+		}
+		if !rep.NeedsReconfirmation || !strings.Contains(rep.ReconfirmReason, "0.46.0") {
+			t.Fatalf("re-flag missing: %v/%q", rep.NeedsReconfirmation, rep.ReconfirmReason)
+		}
+		if hasCall(eng, "upgrade") {
+			t.Fatalf("must not execute after unconfirmed state change: %v", eng.calls)
+		}
+	})
+	t.Run("no accepted version flags like before", func(t *testing.T) {
+		eng := &fakeEngine{detect: func(_ context.Context, _ Request) (Detected, error) {
+			return Detected{Installed: true, Version: "0.45.0", Method: "npm"}, nil
+		}}
+		rep := execWith(eng).Execute(context.Background(), OpRequest{
+			OpID: "op-p3", Type: domain.LifecycleOpUpgrade, Version: "0.44.0",
+			RediscoveryRequired: true, Targets: []TargetSpec{upgradeTarget()},
+		})
+		if !rep.NeedsReconfirmation {
+			t.Fatal("first retry without premise must flag on mismatch")
+		}
+	})
+}
+
+func hasCall(eng *fakeEngine, name string) bool {
+	for _, c := range eng.calls {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestUserGate（KM-49 修复波/T7 P5）：目标受管用户与本执行器的运行时用户
+// 不一致时执行前拒绝——引擎按进程环境执行，禁止在错误的用户环境里动程序
+// 本体（系统级安装或提权不默认执行）；一致时正常放行。
+func TestUserGate(t *testing.T) {
+	eng := &fakeEngine{}
+	x := NewNodeExecutor(NodeExecutorConfig{
+		Engines:     map[string]Engine{"npm": eng},
+		Policy:      allowPolicy{},
+		Timeout:     30 * time.Second,
+		RuntimeUser: func() string { return "bob" },
+	})
+	rep := x.Execute(context.Background(), OpRequest{
+		OpID: "op-u1", Type: domain.LifecycleOpInstall, Version: "0.44.0",
+		Targets: []TargetSpec{installTarget()}, // 目标用户 alice ≠ 运行时 bob
+	})
+	r := rep.Results[0]
+	if r.State != domain.TargetFailed || r.Reason != domain.ReasonUnsupportedCombo ||
+		!strings.Contains(r.Message, "does not match this executor runtime user") {
+		t.Fatalf("user mismatch must refuse: %+v", r)
+	}
+	if len(eng.calls) != 0 {
+		t.Fatalf("engine called despite user mismatch: %v", eng.calls)
+	}
+	// 一致 → 放行（执行是替身，只看闸门）。
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-u2", Type: domain.LifecycleOpInstall, Version: "0.44.0",
+		Targets: []TargetSpec{withUser(installTarget(), "bob")},
+	})
+	if rep.Results[0].State != domain.TargetSucceeded {
+		t.Fatalf("matching user must proceed: %+v", rep.Results[0])
+	}
+	// 大小写不敏感（Windows 用户名语义）。
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-u3", Type: domain.LifecycleOpInstall, Version: "0.44.0",
+		Targets: []TargetSpec{withUser(installTarget(), "BOB")},
+	})
+	if rep.Results[0].State != domain.TargetSucceeded {
+		t.Fatalf("user match must be case-insensitive: %+v", rep.Results[0])
+	}
+}
+
+func withUser(t TargetSpec, user string) TargetSpec {
+	t.User = user
+	return t
+}
+
+// TestInstanceBindingGate（KM-49 修复波/T7 P5）：绑定明确实例后，探测到的
+// 实例必须在该实例路径之下；绑定之外的实例是错误环境操作，拒绝。
+func TestInstanceBindingGate(t *testing.T) {
+	eng := &fakeEngine{detect: func(_ context.Context, _ Request) (Detected, error) {
+		return Detected{Installed: true, Version: "0.44.0", Method: "npm",
+			ExecutablePath: "/opt/npm-prefix/bin/codex"}, nil
+	}}
+	x := execWith(eng)
+	tt := installTarget()
+	tt.InstancePath = "/opt/other-prefix"
+	rep := x.Execute(context.Background(), OpRequest{
+		OpID: "op-i1", Type: domain.LifecycleOpUpgrade, Version: "0.44.0",
+		RediscoveryRequired: true, Targets: []TargetSpec{tt},
+	})
+	r := rep.Results[0]
+	if r.State != domain.TargetFailed || r.Reason != domain.ReasonUnsupportedCombo ||
+		!strings.Contains(r.Message, "not under bound instance path") {
+		t.Fatalf("instance outside binding must refuse: %+v", r)
+	}
+	if hasCall(eng, "upgrade") {
+		t.Fatal("must not execute against an instance outside the binding")
+	}
+	// 绑定路径之下 → 前提成立继续执行（替身 upgrade 成功）。
+	tt.InstancePath = "/opt/npm-prefix"
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-i2", Type: domain.LifecycleOpUpgrade, Version: "0.44.0",
+		RediscoveryRequired: true, Targets: []TargetSpec{tt},
+	})
+	if rep.Results[0].State != domain.TargetSucceeded {
+		t.Fatalf("instance under binding must proceed: %+v", rep.Results[0])
+	}
+	// 绑定之下但根目录级前缀碰撞（/opt/npm-prefix-2 vs /opt/npm-prefix）不得误判。
+	eng.detect = func(_ context.Context, _ Request) (Detected, error) {
+		return Detected{Installed: true, Version: "0.44.0", Method: "npm",
+			ExecutablePath: "/opt/npm-prefix-2/bin/codex"}, nil
+	}
+	tt.InstancePath = "/opt/npm-prefix"
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-i3", Type: domain.LifecycleOpUpgrade, Version: "0.44.0",
+		RediscoveryRequired: true, Targets: []TargetSpec{tt},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetFailed {
+		t.Fatalf("prefix boundary must not be fooled by sibling path: %+v", r)
+	}
 }

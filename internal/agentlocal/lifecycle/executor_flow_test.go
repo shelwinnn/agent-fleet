@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,9 @@ func TestExecutorFlowDataProtectionZeroChange(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := e.Publish("@openai/codex", "0.46.0", "codex", "codex-cli 0.46.0"); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.SeedCodexData(); err != nil {
 		t.Fatal(err)
 	}
@@ -49,9 +53,10 @@ func TestExecutorFlowDataProtectionZeroChange(t *testing.T) {
 	}
 
 	x := NewNodeExecutor(NodeExecutorConfig{
-		Engines: map[string]Engine{"npm": newEngine()},
-		Policy:  allowPolicy{},
-		Timeout: 2 * time.Minute,
+		Engines:     map[string]Engine{"npm": newEngine()},
+		Policy:      allowPolicy{},
+		Timeout:     2 * time.Minute,
+		RuntimeUser: func() string { return "alice" },
 	})
 
 	// 安装 0.44.0 → 升级 0.45.0 → 卸载，一次 OpRequest 一个阶段（与控制面
@@ -109,9 +114,10 @@ func TestExecutorFixedVersionSurvivesUpstreamDrift(t *testing.T) {
 		}
 	}
 	x := NewNodeExecutor(NodeExecutorConfig{
-		Engines: map[string]Engine{"npm": newEngine()},
-		Policy:  allowPolicy{},
-		Timeout: 2 * time.Minute,
+		Engines:     map[string]Engine{"npm": newEngine()},
+		Policy:      allowPolicy{},
+		Timeout:     2 * time.Minute,
+		RuntimeUser: func() string { return "alice" },
 	})
 
 	// "创建时"固定 0.44.0；随后上游发布 0.46.0 并把 latest 指过去（模拟执行
@@ -154,9 +160,10 @@ func TestExecutorFailureRecoveryDataProtection(t *testing.T) {
 	}
 
 	x := NewNodeExecutor(NodeExecutorConfig{
-		Engines: map[string]Engine{"npm": newEngine()},
-		Policy:  allowPolicy{},
-		Timeout: 2 * time.Minute,
+		Engines:     map[string]Engine{"npm": newEngine()},
+		Policy:      allowPolicy{},
+		Timeout:     2 * time.Minute,
+		RuntimeUser: func() string { return "alice" },
 	})
 	install := executorCodexTarget(domain.LifecycleOpInstall, "0.44.0")
 	uninstall := executorCodexTarget(domain.LifecycleOpUninstall, "")
@@ -232,5 +239,112 @@ func TestExecutorFailureRecoveryDataProtection(t *testing.T) {
 	}
 	if diffs := before.Diff(after); len(diffs) != 0 {
 		t.Fatalf("user data changed across failure/recovery flow:\n%s", before.Report(after))
+	}
+}
+
+// TestExecutorMultiPrefixInstanceBinding（KM-49 修复波/T7 P5）：两个全局前缀
+// 各有一个 codex 实例时，绑定 Prefix 实例的目标执行必须不触碰 Prefix2 的实例
+// ——"其他实例不受影响"在执行引擎层的多前缀证明。绑定语义：绑定目标来自
+// 实例发现，绑定缺席 = 过期绑定或错误节点工作，执行前拒绝；首次安装发生在
+// 实例缺席时，天然不携带绑定（无可绑定的已发现实例）。
+func TestExecutorMultiPrefixInstanceBinding(t *testing.T) {
+	e := newEnv(t)
+	for _, v := range []string{"0.44.0", "0.45.0", "0.46.0"} {
+		if err := e.Publish("@openai/codex", v, "codex", "codex-cli "+v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 第二前缀先布置一个"其他实例"（同一包、不同版本）。
+	if err := e.InstallDirect(e.Prefix2, "@openai/codex@0.46.0"); err != nil {
+		t.Fatal(err)
+	}
+	otherBefore, err := SnapshotDir(filepath.Join(e.Prefix2, "lib"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := NewNodeExecutor(NodeExecutorConfig{
+		Engines:     map[string]Engine{"npm": newEngine()},
+		Policy:      allowPolicy{},
+		Timeout:     2 * time.Minute,
+		RuntimeUser: func() string { return "alice" },
+	})
+
+	// 步骤 0：实例缺席 → 首次安装不携带绑定（无可绑定的已发现实例）。
+	rep := x.Execute(context.Background(), OpRequest{
+		OpID: "op-mp-0", Type: domain.LifecycleOpInstall, Version: "0.44.0",
+		Targets: []TargetSpec{executorCodexTarget(domain.LifecycleOpInstall, "0.44.0")},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetSucceeded || r.Evidence.ObservedVersion != "0.44.0" {
+		t.Fatalf("unbound install: %s/%s verified=%q (%s)", r.State, r.Reason,
+			r.Evidence.ObservedVersion, r.Message)
+	}
+
+	// 步骤 1/2：绑定 Prefix 实例的升级与卸载（发现后绑定，路径在绑定之下）。
+	for i, f := range []struct {
+		typ, version, want, reason string
+	}{
+		{domain.LifecycleOpUpgrade, "0.45.0", "0.45.0", domain.ReasonVerifiedPresent},
+		{domain.LifecycleOpUninstall, "", "", domain.ReasonVerifiedAbsent},
+	} {
+		tt := executorCodexTarget(f.typ, f.version)
+		tt.InstancePath = e.Prefix
+		rep := x.Execute(context.Background(), OpRequest{
+			OpID:    fmt.Sprintf("op-mp-%d", i+1),
+			Type:    f.typ,
+			Version: f.version,
+			Targets: []TargetSpec{tt},
+		})
+		r := rep.Results[0]
+		if r.State != domain.TargetSucceeded || r.Reason != f.reason || r.Evidence.ObservedVersion != f.want {
+			t.Fatalf("step %d: %s/%s verified=%q (message: %s)", i+1, r.State, r.Reason,
+				r.Evidence.ObservedVersion, r.Message)
+		}
+	}
+
+	// 其他前缀的实例逐字节未动。
+	otherAfter, err := SnapshotDir(filepath.Join(e.Prefix2, "lib"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diffs := otherBefore.Diff(otherAfter); len(diffs) != 0 {
+		t.Fatalf("other prefix instance changed: %s", otherBefore.Report(otherAfter))
+	}
+
+	// 步骤 3：绑定 Prefix2 的目标，但引擎作用域（Prefix）内实例已卸载 →
+	// 绑定缺席，如实拒绝（不静默装进与绑定不一致的作用域）。
+	wrong := executorCodexTarget(domain.LifecycleOpUpgrade, "0.45.0")
+	wrong.InstancePath = e.Prefix2
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-mp-wrong", Type: domain.LifecycleOpUpgrade, Version: "0.45.0",
+		Targets: []TargetSpec{wrong},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetFailed ||
+		r.Reason != domain.ReasonUnsupportedCombo ||
+		!strings.Contains(r.Message, "not present") {
+		t.Fatalf("absent bound instance must refuse rather than install into a foreign scope: %+v", r)
+	}
+
+	// 步骤 4：重建 Prefix 实例后，绑定 Prefix2 的目标 → 探测到的实例在绑定
+	// 之外 → 拒绝（错误节点/错误实例的执行被闸住）。
+	if err := e.InstallDirect(e.Prefix, "@openai/codex@0.44.0"); err != nil {
+		t.Fatal(err)
+	}
+	rep = x.Execute(context.Background(), OpRequest{
+		OpID: "op-mp-wrong2", Type: domain.LifecycleOpUpgrade, Version: "0.45.0",
+		Targets: []TargetSpec{wrong},
+	})
+	if r := rep.Results[0]; r.State != domain.TargetFailed ||
+		r.Reason != domain.ReasonUnsupportedCombo ||
+		!strings.Contains(r.Message, "not under bound instance path") {
+		t.Fatalf("instance outside binding must refuse: %+v", r)
+	}
+
+	// 全程其他前缀逐字节未动。
+	otherFinal, err := SnapshotDir(filepath.Join(e.Prefix2, "lib"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diffs := otherBefore.Diff(otherFinal); len(diffs) != 0 {
+		t.Fatalf("other prefix instance changed after all steps:\n%s", otherBefore.Report(otherFinal))
 	}
 }

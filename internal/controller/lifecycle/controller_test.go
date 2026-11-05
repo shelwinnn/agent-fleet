@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -419,8 +420,11 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 	if !retryReq.RediscoveryRequired {
 		t.Fatal("retry first dispatch must carry rediscovery_required")
 	}
+	if len(retryReq.AcceptedObservedVersions) != 0 {
+		t.Fatalf("first retry dispatch carries no accepted versions yet, got %v", retryReq.AcceptedObservedVersions)
+	}
 	// 节点重发现发现影响变化 → 逐目标 failed(version-mismatch) + 操作级
-	// needs_reconfirmation 置位；同一操作不再派发（目标已落定）。
+	// needs_reconfirmation 置位；证据携带实测版本（确认将绑定到它）。
 	if err := f.ctrl.OnLifecycleResult(f.ctx, ResultMsg{
 		Machine: "m1", OpID: retry.Metadata.Name,
 		IdempotencyKey:      retry.Spec.IdempotencyKey,
@@ -450,9 +454,9 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 	if got := len(f.disp.requests()); got != before {
 		t.Fatalf("dispatch continued after impact change: %d → %d", before, got)
 	}
-	// 操作者重新确认（清除标记、记录确认时刻），然后以新重试操作继续：
-	// 新重试继承重新确认时刻——链上已发生重新确认 → 派发不再携带重发现标记
-	// （同一现实不得再次阻断执行；引擎侧仍有执行后核验兜底）。
+	// 操作者重新确认（清除标记）→ 新重试操作继续：**仍然携带重发现**（T7 P4：
+	// 每次重试都核验当前实际状态），并把确认绑定的观测（0.45.0）作为接受
+	// 版本逐目标带回节点。
 	f.now = f.now.Add(time.Minute)
 	if err := f.ctrl.Confirm(f.ctx, retry.Metadata.Name, f.now); err != nil {
 		t.Fatal(err)
@@ -473,8 +477,53 @@ func TestRetryFirstDispatchCarriesRediscovery(t *testing.T) {
 	if last.OpID != cont.Metadata.Name {
 		t.Fatalf("continuation dispatch op = %s, want %s", last.OpID, cont.Metadata.Name)
 	}
-	if last.RediscoveryRequired {
-		t.Fatal("continuation after reconfirmation must not carry rediscovery (would loop)")
+	if !last.RediscoveryRequired {
+		t.Fatal("every retry must re-discover current state (confirmation is not an exemption)")
+	}
+	key := f.codexTarget("m1").Normalize().Key()
+	if v := last.AcceptedObservedVersions[key]; v != "0.45.0" {
+		t.Fatalf("accepted version = %q, want 0.45.0 (confirmation binds to observed state)", v)
+	}
+	// 确认后状态再变化：节点重发现到 0.46.0（≠ 接受版本 0.45.0）→ 影响再次
+	// 变化，须重新确认——操作级标记再次置位。
+	if err := f.ctrl.OnLifecycleResult(f.ctx, ResultMsg{
+		Machine: "m1", OpID: cont.Metadata.Name,
+		IdempotencyKey:      cont.Spec.IdempotencyKey,
+		NeedsReconfirmation: true,
+		ReconfirmReason:     "rediscovery found codex@0.46.0 before retry",
+		Results: []domain.LifecycleTargetResult{{
+			Target: f.codexTarget("m1"), State: domain.TargetFailed,
+			Reason:   domain.ReasonVersionMismatch,
+			Message:  "rediscovery found codex@0.46.0 before retry, fixed-version intent is 0.44.0",
+			Evidence: &domain.LifecycleEvidence{ObservedVersion: "0.46.0", RecordedAt: f.now},
+		}},
+		FinishedAt: f.now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = f.repo.GetOperation(f.ctx, cont.Metadata.Name)
+	if !got.Status.NeedsReconfirmation {
+		t.Fatal("state changed again after confirmation must require reconfirmation again")
+	}
+	// 再确认 → 续操作绑定最新观测（0.46.0）。
+	f.now = f.now.Add(time.Minute)
+	if err := f.ctrl.Confirm(f.ctx, cont.Metadata.Name, f.now); err != nil {
+		t.Fatal(err)
+	}
+	cont2, err := f.ctrl.Retry(f.ctx, cont.Metadata.Name,
+		[]domain.LifecycleTarget{f.codexTarget("m1")}, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ctrl.ScanOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	last = f.disp.requests()[len(f.disp.requests())-1]
+	if last.OpID != cont2.Metadata.Name {
+		t.Fatalf("continuation dispatch op = %s, want %s", last.OpID, cont2.Metadata.Name)
+	}
+	if v := last.AcceptedObservedVersions[f.codexTarget("m1").Normalize().Key()]; v != "0.46.0" {
+		t.Fatalf("re-confirmation must bind to latest observation: accepted = %q, want 0.46.0", v)
 	}
 }
 
@@ -513,28 +562,12 @@ func TestResultIngestionIdempotentAndRedacted(t *testing.T) {
 	if r.State != domain.TargetSucceeded || r.Evidence.ObservedVersion != "0.44.0" {
 		t.Fatalf("ingested result = %+v", r)
 	}
-	if r.Message == "" || !containsRedacted(r.Message) {
+	if r.Message == "" || !strings.Contains(r.Message, "[redacted]") {
 		t.Fatalf("control-plane redaction missing in %q", r.Message)
 	}
-	if !containsRedacted(r.Evidence.Message) {
+	if !strings.Contains(r.Evidence.Message, "[redacted]") {
 		t.Fatalf("evidence redaction missing in %q", r.Evidence.Message)
 	}
-}
-
-func containsRedacted(s string) bool {
-	for _, marker := range []string{"[redacted]"} {
-		if len(s) > 0 && !func() bool {
-			for i := 0; i+len(marker) <= len(s); i++ {
-				if s[i:i+len(marker)] == marker {
-					return true
-				}
-			}
-			return false
-		}() {
-			return false
-		}
-	}
-	return true
 }
 
 func TestResultMachineMismatchIgnored(t *testing.T) {
@@ -697,7 +730,7 @@ func TestCheckUpdateQueryFailureAndCacheFallback(t *testing.T) {
 	if r.State != domain.TargetFailed || r.Reason != domain.ReasonDiscoveryFailed {
 		t.Fatalf("failed query = %s/%s, want failed/discovery-failed", r.State, r.Reason)
 	}
-	if r.Message == "" || !containsRedacted("x[redacted]") {
+	if r.Message == "" {
 		t.Fatalf("failure detail missing: %q", r.Message)
 	}
 	// 来源不适用（目标方式 brew 在上游来源清单中无对应声明）→ unsupported-combo。
@@ -722,5 +755,104 @@ func TestCheckUpdateQueryFailureAndCacheFallback(t *testing.T) {
 	got2, _ := f.repo.GetOperation(f.ctx, op2.Metadata.Name)
 	if got2.Status.Results[0].Reason != domain.ReasonUnsupportedCombo {
 		t.Fatalf("unsupported source = %s/%s", got2.Status.Results[0].State, got2.Status.Results[0].Reason)
+	}
+}
+
+// TestResultPersistenceFullPathNoSecrets（KM-49 修复波/T7 S1）：完整持久化
+// 路径——节点上报的 message 与证据文本携带多词授权头/凭据，经控制器入库后
+// 读回的记录（message + evidence）必须零泄漏；证据对象按白名单字段重建。
+func TestResultPersistenceFullPathNoSecrets(t *testing.T) {
+	f := newFixture(t)
+	f.seedMachine("m1", true)
+	op := f.createInstall("m1", "0.44.0")
+	if err := f.ctrl.Confirm(f.ctx, op.Metadata.Name, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ctrl.ScanOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ctrl.OnLifecycleResult(f.ctx, ResultMsg{
+		Machine: "m1", OpID: op.Metadata.Name,
+		IdempotencyKey: op.Spec.IdempotencyKey,
+		Results: []domain.LifecycleTargetResult{{
+			Target: f.codexTarget("m1"), State: domain.TargetSucceeded,
+			Reason: domain.ReasonVerifiedPresent,
+			// 节点侧漏过首层脱敏的最坏假设：多词授权头直接到达入库路径。
+			Message: "npm config echoed Authorization: Bearer super-secret-token",
+			Evidence: &domain.LifecycleEvidence{
+				ObservedVersion: "0.44.0", Method: "npm",
+				ExecutablePath: "/usr/local/bin/codex",
+				Message:        "auth: Basic dXNlcjpwYXNz",
+				RecordedAt:     f.now,
+			},
+		}},
+		FinishedAt: f.now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.repo.GetOperation(f.ctx, op.Metadata.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := got.Status.Results[0]
+	for _, stored := range []string{r.Message, r.Evidence.Message} {
+		if strings.Contains(stored, "super-secret-token") || strings.Contains(stored, "dXNlcjpwYXNz") {
+			t.Fatalf("credential persisted: %q / %q", r.Message, r.Evidence.Message)
+		}
+		if !strings.Contains(stored, "[redacted]") {
+			t.Fatalf("expected redaction marker in stored text: %q / %q", r.Message, r.Evidence.Message)
+		}
+	}
+	// 白名单字段照常落库（脱敏不牺牲证据价值）。
+	if r.Evidence.ObservedVersion != "0.44.0" || r.Evidence.ExecutablePath != "/usr/local/bin/codex" {
+		t.Fatalf("whitelisted evidence fields lost: %+v", r.Evidence)
+	}
+}
+
+// TestInstancesProjection（KM-49 修复波/T7 P5 契约侧落地）：实例发现投影——
+// inventory 在但无 codex 条目 → notInstalled 显式表达；多实例（多条目）逐条
+// 投影（路径/版本/安装态/versionError）。
+func TestInstancesProjection(t *testing.T) {
+	f := newFixture(t)
+	f.seedMachine("m1", true)
+
+	// inventory 在、无 codex 条目 → 显式"尚未安装"。
+	f.seedObservation("m1", "linux", "amd64")
+	list, err := f.ctrl.Instances(f.ctx, "m1", "native", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.InventoryMissing || !list.NotInstalled || len(list.Instances) != 0 {
+		t.Fatalf("no codex entries must be explicit notInstalled: %+v", list)
+	}
+
+	// 多实例（inventory 多条目）逐条投影；非 codex 家族不混入。
+	rec := &domain.ObservedStateRecord{Machine: "m1", InventorySeq: 2, RecordedAt: f.now}
+	obs := domain.ObservedState{InventorySeq: 2, Agents: []domain.AgentObservation{
+		{Family: "codex", Version: "0.44.0", ConfigPath: "/opt/prefix1/bin/codex", Installed: true},
+		{Family: "codex", Version: "", ConfigPath: "/opt/prefix2/bin/codex", Installed: true,
+			VersionError: "version read failed"},
+		{Family: "claude", Version: "1.0.0", Installed: true},
+	}}
+	b, _ := json.Marshal(obs)
+	rec.Payload = b
+	if _, err := f.observed.Store(f.ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	list, err = f.ctrl.Instances(f.ctx, "m1", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.NotInstalled || list.InventoryMissing {
+		t.Fatalf("installed instances must not be notInstalled/missing: %+v", list)
+	}
+	if len(list.Instances) != 2 {
+		t.Fatalf("instances = %d, want 2 (multi-instance projection, foreign family excluded)", len(list.Instances))
+	}
+	if list.Instances[0].Version != "0.44.0" || list.Instances[0].Path != "/opt/prefix1/bin/codex" {
+		t.Fatalf("instance[0] = %+v", list.Instances[0])
+	}
+	if list.Instances[1].VersionError == "" {
+		t.Fatalf("version error must surface explicitly: %+v", list.Instances[1])
 	}
 }

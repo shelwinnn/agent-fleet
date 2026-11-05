@@ -221,3 +221,30 @@ func TestLifecycleDesiredAndCapabilitiesEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// TestLifecycleInstancesEndpoint（KM-49 修复波/T7 P5 契约侧落地）：实例发现
+// 查询——未知机器 404；inventory 缺失表达"未知 ≠ 尚未安装"；有 inventory 时
+// 逐实例列出，无 codex 条目 → notInstalled 显式表达。
+func TestLifecycleInstancesEndpoint(t *testing.T) {
+	f := newLifecycleFixture(t)
+	f.do(http.MethodPost, "/api/v1/machines",
+		`{"metadata":{"name":"m1"},"spec":{"managementMode":"agentd"}}`)
+
+	// inventory 缺失：未知，不是"尚未安装"。
+	code, obj := f.do(http.MethodGet, "/api/v1/machines/m1/lifecycle/instances?user=alice", "")
+	if code != http.StatusOK {
+		t.Fatalf("instances: %d %v", code, obj)
+	}
+	if obj["inventoryMissing"] != true || obj["notInstalled"] == true {
+		t.Fatalf("missing inventory must be unknown, not notInstalled: %v", obj)
+	}
+	if obj["user"] != "alice" {
+		t.Fatalf("query echo missing: %v", obj)
+	}
+
+	// 未知机器 → 404。
+	code, _ = f.do(http.MethodGet, "/api/v1/machines/no-such/lifecycle/instances", "")
+	if code != http.StatusNotFound {
+		t.Fatalf("unknown machine: %d", code)
+	}
+}

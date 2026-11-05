@@ -28,6 +28,7 @@ func (s *Server) DispatchLifecycle(_ context.Context, machine string, req lifecy
 	targets := make([]*fleetv1.LifecycleTarget, len(req.Targets))
 	for i, t := range req.Targets {
 		targets[i] = lifecycleTargetToProto(t)
+		targets[i].AcceptedObservedVersion = req.AcceptedObservedVersions[t.Key()]
 	}
 	msg := &fleetv1.ServerToAgent{Payload: &fleetv1.ServerToAgent_ExecuteLifecycleOperation{
 		ExecuteLifecycleOperation: &fleetv1.ExecuteLifecycleOperation{
@@ -54,6 +55,7 @@ func lifecycleTargetToProto(t domain.LifecycleTarget) *fleetv1.LifecycleTarget {
 		Agent:            t.Agent,
 		Method:           t.Method,
 		Package:          t.Package,
+		InstancePath:     t.InstancePath,
 		Os:               t.OS,
 		Arch:             t.Arch,
 		CapabilityState:  t.CapabilityState,
@@ -77,12 +79,13 @@ func lifecycleResultFromProto(machine string, res *fleetv1.LifecycleOperationRes
 	for _, r := range res.GetResults() {
 		out := domain.LifecycleTargetResult{
 			Target: domain.LifecycleTarget{
-				Machine: r.GetTarget().GetMachineId(),
-				Env:     r.GetTarget().GetEnv(),
-				User:    r.GetTarget().GetUser(),
-				Agent:   r.GetTarget().GetAgent(),
-				Method:  r.GetTarget().GetMethod(),
-				Package: r.GetTarget().GetPackage(),
+				Machine:      r.GetTarget().GetMachineId(),
+				Env:          r.GetTarget().GetEnv(),
+				User:         r.GetTarget().GetUser(),
+				Agent:        r.GetTarget().GetAgent(),
+				Method:       r.GetTarget().GetMethod(),
+				Package:      r.GetTarget().GetPackage(),
+				InstancePath: r.GetTarget().GetInstancePath(),
 			},
 			State:   r.GetState(),
 			Reason:  r.GetReason(),
