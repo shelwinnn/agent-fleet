@@ -809,6 +809,17 @@ const zhCN = {
   'lc.next.unknown': '先核对目标实际状态，再决定下一步；未知不计入成功、不会自动重试。',
   'lc.next.pending': '等待执行，结果会自动更新。',
   'lc.next.running': '执行中，结果会自动更新。',
+
+  'skills.lead': '技能装在某台机器的某个代理上。',
+  'skills.addSource': '添加来源',
+  'skills.current': '已是当前',
+  'skills.canUpgradeTo': (p) => `可升到 ${p.revision}`,
+  'skills.upgrade': '升级技能',
+  'skills.sourceName': '来源的名字',
+  'skills.sourceNameMissing': '先写来源的名字',
+  'skills.close': '关闭',
+  'skills.col.agent': '代理',
+  'skills.col.posture': '版本',
 } as const satisfies Record<string, Message>;
 
 
@@ -1625,6 +1636,17 @@ const en: Record<MessageKey, Message> = {
   'lc.next.unknown': 'Verify the actual state of the target first, then decide; unknown does not count as success and is never retried automatically.',
   'lc.next.pending': 'Waiting to run; results update automatically.',
   'lc.next.running': 'Running; results update automatically.',
+
+  'skills.lead': 'A skill is installed on an agent on a machine.',
+  'skills.addSource': 'Add source',
+  'skills.current': 'Already current',
+  'skills.canUpgradeTo': (p) => `Can upgrade to ${p.revision}`,
+  'skills.upgrade': 'Upgrade skill',
+  'skills.sourceName': 'Source name',
+  'skills.sourceNameMissing': 'Enter the source name first.',
+  'skills.close': 'Close',
+  'skills.col.agent': 'Agent',
+  'skills.col.posture': 'Version',
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {
