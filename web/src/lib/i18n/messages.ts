@@ -809,6 +809,28 @@ const zhCN = {
   'lc.next.unknown': '先核对目标实际状态，再决定下一步；未知不计入成功、不会自动重试。',
   'lc.next.pending': '等待执行，结果会自动更新。',
   'lc.next.running': '执行中，结果会自动更新。',
+
+  // ---- 设备页 ----
+  'devices.heading': '设备',
+  'devices.lead': '选择一台机器，查看已安装的代理和技能。',
+  'devices.chip.all': '全部',
+  'devices.chip.online': '在线',
+  'devices.chip.attention': '要处理',
+  'devices.chip.offline': '离线',
+  'devices.col.name': '名称',
+  'devices.col.status': '状态',
+  'devices.col.system': '系统',
+  'devices.col.user': '用户',
+  'devices.col.software': '软件',
+  'devices.col.attention': '要处理',
+  'devices.enroll': '接入机器',
+  'devices.empty': '还没有机器。点击「接入机器」添加机器。',
+  'devices.searchEmpty': '没有匹配的机器',
+  'devices.name': '称呼',
+  'devices.needName': '先写一个称呼',
+  'devices.status.online': '在线',
+  'devices.status.offline': '离线',
+  'devices.submitting': '接入中…',
 } as const satisfies Record<string, Message>;
 
 
@@ -1625,6 +1647,28 @@ const en: Record<MessageKey, Message> = {
   'lc.next.unknown': 'Verify the actual state of the target first, then decide; unknown does not count as success and is never retried automatically.',
   'lc.next.pending': 'Waiting to run; results update automatically.',
   'lc.next.running': 'Running; results update automatically.',
+
+  // ---- Devices ----
+  'devices.heading': 'Devices',
+  'devices.lead': 'Choose a machine to see installed agents and skills.',
+  'devices.chip.all': 'All',
+  'devices.chip.online': 'Online',
+  'devices.chip.attention': 'Needs attention',
+  'devices.chip.offline': 'Offline',
+  'devices.col.name': 'Name',
+  'devices.col.status': 'Status',
+  'devices.col.system': 'System',
+  'devices.col.user': 'User',
+  'devices.col.software': 'Software',
+  'devices.col.attention': 'Needs attention',
+  'devices.enroll': 'Enroll machine',
+  'devices.empty': 'No machines yet. Use "Enroll machine" to add the first one.',
+  'devices.searchEmpty': 'No matching machines',
+  'devices.name': 'Name',
+  'devices.needName': 'Enter a name first',
+  'devices.status.online': 'Online',
+  'devices.status.offline': 'Offline',
+  'devices.submitting': 'Enrolling…',
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {
