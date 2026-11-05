@@ -44,10 +44,10 @@ function mountApp() {
 }
 
 describe('控制台外壳', () => {
-  it('锁头是 agent-fleet，导航有总览、设备、应用、技能，收起后页脚改成展开菜单', () => {
+  it('锁头是 Agent Fleet，导航有总览、设备、应用、技能，收起后页脚改成展开菜单', () => {
     mountApp();
-    expect(document.title).toBe('agent-fleet');
-    expect(document.querySelector('.console-word')?.textContent).toBe('agent-fleet');
+    expect(document.title).toBe('Agent Fleet');
+    expect(document.querySelector('.console-word')?.textContent).toBe('Agent Fleet');
     const logo = document.querySelector('.logo-mark');
     expect(logo?.querySelectorAll('text, tspan').length).toBe(0);
     expect(logo?.textContent?.trim()).toBe('');
@@ -106,7 +106,7 @@ describe('控制台外壳', () => {
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     flushSync();
     expect(document.querySelector('h1')?.textContent?.trim()).toBe('应用');
-    expect(document.querySelector('.console-word')?.textContent).toBe('agent-fleet');
+    expect(document.querySelector('.console-word')?.textContent).toBe('Agent Fleet');
     expect(document.body.textContent).not.toContain('成功');
 
     window.location.hash = '#/lifecycle';

@@ -45,7 +45,7 @@ export function translate(locale: Locale, key: string, params?: MessageParams): 
 
 const zhCN = {
   // ---- 应用外壳 ----
-  'app.title': 'agent-fleet',
+  'app.title': 'Agent Fleet',
   'app.subtitle': '单操作者机群管理',
   'app.stream.open': '实时事件流已连接',
   'app.stream.connecting': '实时事件流连接中',
@@ -817,7 +817,7 @@ export type MessageKey = keyof typeof zhCN & string;
 /** en 目录：Record<MessageKey, Message> 使缺译/多译都在编译期暴露。 */
 const en: Record<MessageKey, Message> = {
   // ---- App shell ----
-  'app.title': 'agent-fleet',
+  'app.title': 'Agent Fleet',
   'app.subtitle': 'Fleet management for a single operator',
   'app.stream.open': 'Realtime stream connected',
   'app.stream.connecting': 'Realtime stream connecting',
