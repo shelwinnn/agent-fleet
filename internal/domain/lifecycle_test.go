@@ -445,3 +445,53 @@ func TestValidateTargetEvidenceRules(t *testing.T) {
 		t.Fatal("evidence message limit must be positive")
 	}
 }
+
+// TestLifecycleTargetKeyIncludesInstancePath（KM-49 修复波/T7 P5 契约侧）：
+// 实例路径参与目标身份——同一来源的两个实例是两个目标；未绑定时键保持
+// 既有形态（6 段，兼容存量行）。
+func TestLifecycleTargetKeyIncludesInstancePath(t *testing.T) {
+	base := LifecycleTarget{Machine: "m1", Env: "native", User: "alice", Agent: "codex",
+		Method: "npm", Package: "@openai/codex"}
+	if got, want := base.Key(), "m1\x1fnative\x1falice\x1fcodex\x1fnpm\x1f@openai/codex\x1f"; got != want {
+		t.Fatalf("unbound key = %q, want %q", got, want)
+	}
+	bound := base
+	bound.InstancePath = " /opt/npm-prefix "
+	if got, want := bound.Normalize().Key(),
+		"m1\x1fnative\x1falice\x1fcodex\x1fnpm\x1f@openai/codex\x1f/opt/npm-prefix"; got != want {
+		t.Fatalf("bound key = %q, want %q（实例路径参与身份且归一化）", got, want)
+	}
+	if bound.Key() == base.Key() {
+		t.Fatal("bound and unbound instances must be distinct targets")
+	}
+}
+
+// TestRedactEvidenceAuthorizationHeaders（KM-49 修复波/T7 S1）：多词授权头
+// 的整个值必须被遮盖——Bearer/Basic/自定义 scheme，键名保留供定位；大小写
+// 与连写形态都要覆盖。
+func TestRedactEvidenceAuthorizationHeaders(t *testing.T) {
+	cases := []struct{ in, mustNotContain string }{
+		{"Authorization: Bearer abc123", "abc123"},
+		{"authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"},
+		{"Proxy-Authorization: NTLM TlRMTVNTUAAD", "TlRMTVNTUAAD"},
+		{"AUTHORIZATION: bearer sk-standin-token", "sk-standin-token"},
+		{"config: {authorization=Bearer long token value}", "long token"},
+	}
+	for _, tc := range cases {
+		got := RedactEvidence(tc.in)
+		if strings.Contains(got, tc.mustNotContain) {
+			t.Errorf("RedactEvidence(%q) = %q, credential %q leaked", tc.in, got, tc.mustNotContain)
+		}
+		if !strings.Contains(got, "[redacted]") {
+			t.Errorf("RedactEvidence(%q) = %q, want redaction marker", tc.in, got)
+		}
+	}
+	// 键名保留：定位信息不丢。
+	if got := RedactEvidence("Authorization: Bearer abc123"); !strings.Contains(strings.ToLower(got), "authorization") {
+		t.Errorf("key name lost: %q", got)
+	}
+	// 非 secrets 的普通文本不受影响。
+	if got := RedactEvidence("installed @openai/codex@0.44.0"); got != "installed @openai/codex@0.44.0" {
+		t.Errorf("benign text altered: %q", got)
+	}
+}

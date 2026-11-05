@@ -20,6 +20,8 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -82,11 +84,21 @@ type TargetSpec struct {
 	Arch string
 	// Executables 是程序入口名（定位可执行文件用，如 ["codex"]）。
 	Executables []string
+	// InstancePath 是绑定的明确安装实例（安装根/前缀；参与身份，契约见
+	// LifecycleTarget.instance_path）。非空时执行前验证：探测到的实例必须
+	// 在该路径之下——绑定到别的实例是错误环境操作，拒绝。
+	InstancePath string
+	// AcceptedObservedVersion 是执行前提（KM-49 修复波/T7 P4：确认绑定到
+	// 具体观测）。仅重试首派携带；重发现实测 == 本值 → 前提成立可执行；
+	// 实测是其他值 → 影响再次变化，重新上报 needs_reconfirmation。
+	AcceptedObservedVersion string
 }
 
-// Key 返回目标身份键（与 domain.LifecycleTarget.Key 同构：\x1f 分隔）。
+// Key 返回目标身份键（与 domain.LifecycleTarget.Key 同构：\x1f 分隔，含
+// InstancePath 身份段——KM-47 契约扩展后两端的键必须逐段一致）。
 func (t TargetSpec) Key() string {
-	return strings.Join([]string{t.Machine, normalizeEnv(t.Env), t.User, t.Agent, t.Method, t.Package}, "\x1f")
+	return strings.Join([]string{t.Machine, normalizeEnv(t.Env), t.User, t.Agent,
+		t.Method, t.Package, t.InstancePath}, "\x1f")
 }
 
 // TargetOutcome 是一个目标的执行结果（domain 状态机常量，白名单原因）。
@@ -99,6 +111,10 @@ type TargetOutcome struct {
 	Message   string
 	Evidence  domain.LifecycleEvidence
 
+	// Spec 是目标身份原件（跨包只读）：宿主上报必须逐段回显身份——控制面
+	// 按目标身份键对位落库，结果不带身份会被按"未知目标"丢弃（T7 修复波
+	// 发现的断链点）。
+	Spec           TargetSpec
 	needsReconfirm bool
 }
 
@@ -139,6 +155,9 @@ type NodeExecutorConfig struct {
 	Timeout time.Duration
 	// Now 供测试注入时钟。
 	Now func() time.Time
+	// RuntimeUser 是运行时用户查询（T7 P5 受管用户闸）；nil 用系统实现，
+	// 测试注入替身。
+	RuntimeUser func() string
 	// Log 供诊断；可为 nil。
 	Log Logger
 }
@@ -152,12 +171,13 @@ type Logger interface {
 // NodeExecutor 是节点侧执行引擎：无状态地执行一个 OpRequest，逐目标返回
 // domain 状态机结果。串行化（队列/去重/outbox）由宿主（agentd daemon）负责。
 type NodeExecutor struct {
-	engines map[string]Engine
-	policy  CapabilityPolicy
-	env     string
-	timeout time.Duration
-	now     func() time.Time
-	log     Logger
+	engines     map[string]Engine
+	policy      CapabilityPolicy
+	env         string
+	timeout     time.Duration
+	now         func() time.Time
+	runtimeUser func() string
+	log         Logger
 }
 
 // NewNodeExecutor 装配节点执行引擎。
@@ -174,14 +194,29 @@ func NewNodeExecutor(cfg NodeExecutorConfig) *NodeExecutor {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &NodeExecutor{
-		engines: cfg.Engines,
-		policy:  cfg.Policy,
-		env:     cfg.Env,
-		timeout: cfg.Timeout,
-		now:     cfg.Now,
-		log:     cfg.Log,
+	if cfg.RuntimeUser == nil {
+		cfg.RuntimeUser = currentRuntimeUser
 	}
+	return &NodeExecutor{
+		engines:     cfg.Engines,
+		policy:      cfg.Policy,
+		env:         cfg.Env,
+		timeout:     cfg.Timeout,
+		now:         cfg.Now,
+		runtimeUser: cfg.RuntimeUser,
+		log:         cfg.Log,
+	}
+}
+
+// currentRuntimeUser 返回本进程的运行时用户名（T7 P5 受管用户闸的默认实现）。
+// 系统查询失败返回空串——闸门对未知运行时用户放行（由安装根权限边界兜底），
+// 绝不伪造一个用户名去拒绝所有执行。
+func currentRuntimeUser() string {
+	u, err := user.Current()
+	if err != nil || u == nil {
+		return ""
+	}
+	return u.Username
 }
 
 // Execute 执行整份操作并返回逐目标结果。它不返回 error：每个目标的失败都是
@@ -192,6 +227,10 @@ func (x *NodeExecutor) Execute(ctx context.Context, op OpRequest) Report {
 	rep := Report{OpID: op.OpID, FinishedAt: x.now().UTC()}
 	for _, t := range op.Targets {
 		out := x.executeTarget(ctx, op, t)
+		// 身份回执（T7 修复波发现的断链点）：结果必须携带目标原件，proto
+		// 上报逐段回显——控制面按目标身份键对位落库，缺身份的结果会被按
+		// "未知目标"丢弃。
+		out.Spec = t
 		if out.needsReconfirm {
 			// 闸门标记只随上报置操作级 needs_reconfirmation；目标自身以
 			// failed(version-mismatch) 落定（本尝试未执行、未变更任何东西）。
@@ -212,6 +251,12 @@ func (x *NodeExecutor) executeTarget(ctx context.Context, op OpRequest, t Target
 	if normalizeEnv(t.Env) != x.env {
 		return refuse(key, fmt.Sprintf("target env %q does not match this executor env %q", t.Env, x.env))
 	}
+	// 1b) 受管用户匹配（T7 P5）：引擎按进程环境执行（spec：系统级安装或提权
+	// 不默认执行），目标用户与本执行器的运行时用户不一致时拒绝——禁止在错误
+	// 的用户环境里动程序本体。
+	if run := x.runtimeUser(); run != "" && !strings.EqualFold(run, t.User) {
+		return refuse(key, fmt.Sprintf("target user %q does not match this executor runtime user %q", t.User, run))
+	}
 	// 2) 卸载必须有已识别来源（创建时已强制；执行前再闸一道——防绕过）。
 	// 先于引擎查找：来源未识别时给出更精确的拒绝原因。
 	if op.Type == domain.LifecycleOpUninstall && (t.Method == "" || t.Package == "") {
@@ -231,12 +276,33 @@ func (x *NodeExecutor) executeTarget(ctx context.Context, op OpRequest, t Target
 	if err := x.policy.Check(runOS, runArch, t.Method); err != nil {
 		return refuse(key, err.Error())
 	}
+	// 3b) 实例绑定（T7 P5）：目标绑定了明确安装实例时，探测到的实例必须在
+	// 该实例路径之下——对绑定之外的实例执行是错误环境操作，拒绝（多实例
+	// 场景"其他实例不受影响"的执行侧保障）。绑定缺席（过期绑定/错误节点
+	// 工作）或探测不到可执行路径（无法核验绑定）一律拒绝，不静默装进与
+	// 绑定不一致的作用域。
+	var boundDetect *Detected
+	if t.InstancePath != "" {
+		det, err := eng.Detect(ctx, requestOf(t))
+		if err != nil {
+			return failDiscovery(key, redact(err.Error()))
+		}
+		if !det.Installed {
+			return refuse(key, fmt.Sprintf("bound instance at %q is not present; refusing to execute into a scope that may differ from the binding", t.InstancePath))
+		}
+		if !underInstancePath(det.ExecutablePath, t.InstancePath) {
+			return refuse(key, fmt.Sprintf("detected instance %q is not under bound instance path %q",
+				det.ExecutablePath, t.InstancePath))
+		}
+		// 探测结果留给重发现闸复用（绑定场景每目标只探测一次）。
+		boundDetect = &det
+	}
 	// 5) 重试首派：先重新发现实际状态（spec story 30）。影响变化的目标按
 	// failed(version-mismatch) 落定（本次尝试没有执行、也没有改变任何东西），
 	// 同时置操作级 needs_reconfirmation——操作者重新确认后的继续经新重试操作
 	// 派发（逐目标状态机没有 running/pending 回退边，同一操作无法二次派发）。
 	if op.RediscoveryRequired {
-		out, reconfirmWhy, proceed := x.rediscover(ctx, op, t, eng)
+		out, reconfirmWhy, proceed := x.rediscover(ctx, op, t, eng, boundDetect)
 		if !proceed {
 			return out
 		}
@@ -275,11 +341,19 @@ func (x *NodeExecutor) executeTarget(ctx context.Context, op OpRequest, t Target
 //     替换操作者不知道的版本，须重新确认）；目标保持 pending；
 //   - uninstall 已缺席 → succeeded(verified-absent)；
 //   - 其余（install/upgrade 缺席、uninstall 在场）→ 前提成立，继续执行。
-func (x *NodeExecutor) rediscover(ctx context.Context, op OpRequest, t TargetSpec, eng Engine) (TargetOutcome, string, bool) {
+//
+// rediscover 的探测可复用实例绑定闸已做的结果（boundDetect 非 nil 时不再
+// 二次探测——同一目标一次探测服务两道闸）。
+func (x *NodeExecutor) rediscover(ctx context.Context, op OpRequest, t TargetSpec, eng Engine,
+	boundDetect *Detected) (TargetOutcome, string, bool) {
 	key := t.Key()
-	det, err := eng.Detect(ctx, requestOf(t))
-	if err != nil {
-		return failDiscovery(key, redact(err.Error())), "", false
+	det := boundDetect
+	if det == nil {
+		d, err := eng.Detect(ctx, requestOf(t))
+		if err != nil {
+			return failDiscovery(key, redact(err.Error())), "", false
+		}
+		det = &d
 	}
 	switch op.Type {
 	case domain.LifecycleOpInstall, domain.LifecycleOpUpgrade:
@@ -292,6 +366,12 @@ func (x *NodeExecutor) rediscover(ctx context.Context, op OpRequest, t TargetSpe
 				Message:  "pre-execution rediscovery: instance already at requested fixed version " + op.Version,
 				Evidence: x.evidenceOf(t, det.Version, det.ExecutablePath, "already at requested version"),
 			}, "", false
+		}
+		// 确认绑定到具体观测（T7 P4）：实测 == 操作者重新确认时接受的版本
+		// → 前提成立（操作者已接受"从该版本改到固定版本"），执行；实测是
+		// 其他值 → 确认之后状态又变了，必须重新确认。
+		if t.AcceptedObservedVersion != "" && det.Version == t.AcceptedObservedVersion {
+			return TargetOutcome{}, "", true
 		}
 		return TargetOutcome{}, fmt.Sprintf(
 			"rediscovery found %s@%s before retry, fixed-version intent is %s; operator reconfirmation required",
@@ -354,6 +434,19 @@ func requestOf(t TargetSpec) Request {
 		// 平台声明沿用 catalog 语义：npm 包跨平台，不另设限制；
 		// 平台准入由 CapabilityPolicy 与环境/平台一致性检查承担。
 	}
+}
+
+// underInstancePath 报告 p 是否落在 root 之下（含等于；路径清洗后做段级
+// 前缀比较，Windows 大小写不敏感）。p 为空返回 false——无法核验不是放行理由。
+func underInstancePath(p, root string) bool {
+	if p == "" || root == "" {
+		return false
+	}
+	p, root = filepath.Clean(p), filepath.Clean(root)
+	if runtime.GOOS == "windows" {
+		p, root = strings.ToLower(p), strings.ToLower(root)
+	}
+	return p == root || strings.HasPrefix(p, root+string(filepath.Separator))
 }
 
 func normalizeEnv(env string) string {

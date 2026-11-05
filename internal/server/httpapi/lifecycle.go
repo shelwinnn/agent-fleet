@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	lifecyclectl "github.com/shelwinnn/agent-fleet/internal/controller/lifecycle"
 	"github.com/shelwinnn/agent-fleet/internal/domain"
 )
 
@@ -22,6 +23,8 @@ type LifecycleAPI interface {
 	GetDesired(ctx context.Context, machine string) (*domain.LifecycleDesiredRecord, error)
 	PutDesired(ctx context.Context, machine string, update domain.LifecycleDesired) (*domain.LifecycleDesiredRecord, bool, error)
 	Capabilities() []domain.LifecycleCapability
+	// Instances 实例发现查询（KM-49 修复波/T7 P5 契约侧落地；nil 控制器时 501）。
+	Instances(ctx context.Context, machine, env, user string) (*lifecyclectl.LifecycleInstanceList, error)
 }
 
 // SetLifecycle 装配生命周期编排控制器。nil 时端点返回 501。
@@ -160,6 +163,24 @@ func (s *Server) handleLifecyclePutDesired(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, lifecycleDesiredView(rec))
+}
+
+// handleLifecycleInstances 是实例发现查询（KM-49 修复波/T7 P5 契约侧落地）：
+// 返回该机 Codex 实例清单，"尚未安装"显式表达；未知机器 404。
+func (s *Server) handleLifecycleInstances(w http.ResponseWriter, r *http.Request) {
+	if s.lifecycle == nil {
+		writeError(w, http.StatusNotImplemented, domain.ReasonNotImplemented,
+			"lifecycle orchestration is not wired", nil)
+		return
+	}
+	q := r.URL.Query()
+	list, err := s.lifecycle.Instances(r.Context(), r.PathValue("name"),
+		q.Get("env"), q.Get("user"))
+	if err != nil {
+		writeLifecycleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) handleLifecycleCapabilities(w http.ResponseWriter, _ *http.Request) {

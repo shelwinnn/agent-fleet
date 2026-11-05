@@ -37,9 +37,10 @@ func lifecycleHostSetup(t *testing.T) (*lifecycleExecutor, chan *fleetv1.Lifecyc
 	t.Helper()
 	eng := &countingEngine{}
 	node := lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
-		Engines: map[string]lifecycle.Engine{"npm": eng},
-		Policy:  allowAllPolicy{},
-		Timeout: 5 * time.Second,
+		Engines:     map[string]lifecycle.Engine{"npm": eng},
+		Policy:      allowAllPolicy{},
+		Timeout:     5 * time.Second,
+		RuntimeUser: func() string { return "alice" },
 	})
 	x := newLifecycleExecutor("ws-1", t.TempDir(), node, quietLogger())
 	msgs := make(chan *fleetv1.LifecycleOperationResult, 8)
@@ -87,6 +88,13 @@ func TestLifecycleHostQueueDedupeAndOutboxReplay(t *testing.T) {
 			res.GetResults()[0].GetState() != domain.TargetSucceeded {
 			t.Fatalf("worker result mismatch: %+v", res)
 		}
+		// 身份逐段回显（KM-49 修复波/T7 断链修复）：控制面按目标身份键对位，
+		// 缺 Target 的结果会被按"未知目标"丢弃。
+		tgt := res.GetResults()[0].GetTarget()
+		if tgt.GetMachineId() != "ws-1" || tgt.GetUser() != "alice" ||
+			tgt.GetMethod() != "npm" || tgt.GetPackage() != "@openai/codex" {
+			t.Fatalf("target identity not echoed: %+v", tgt)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no result from worker")
 	}
@@ -114,9 +122,10 @@ func TestLifecycleHostOutboxSurvivesRestart(t *testing.T) {
 	eng := &countingEngine{}
 	newHost := func() *lifecycleExecutor {
 		node := lifecycle.NewNodeExecutor(lifecycle.NodeExecutorConfig{
-			Engines: map[string]lifecycle.Engine{"npm": eng},
-			Policy:  allowAllPolicy{},
-			Timeout: 5 * time.Second,
+			Engines:     map[string]lifecycle.Engine{"npm": eng},
+			Policy:      allowAllPolicy{},
+			Timeout:     5 * time.Second,
+			RuntimeUser: func() string { return "alice" },
 		})
 		return newLifecycleExecutor("ws-1", dir, node, quietLogger())
 	}

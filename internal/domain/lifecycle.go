@@ -108,6 +108,11 @@ type LifecycleTarget struct {
 	Agent   string `json:"agent"`
 	Method  string `json:"method"`
 	Package string `json:"package"`
+	// InstancePath 是绑定的明确安装实例（安装根/前缀路径；spec：最小目标身份
+	// 含"明确安装实例"，多实例时必须显式选择）。参与身份键；空 = 未绑定具体
+	// 实例（执行引擎按其进程作用域决定，引擎遇多实例会显式失败）。
+	// KM-49 修复波（T7 P5 契约侧）：目标身份补实例路径。
+	InstancePath string `json:"instancePath,omitempty"`
 	// OS/Arch 是创建时从机器台账取得的平台事实（不参与身份），用于能力矩阵
 	// 判定与审计："当时以为是哪个平台"。
 	OS   string `json:"os,omitempty"`
@@ -129,12 +134,15 @@ func (t LifecycleTarget) Normalize() LifecycleTarget {
 	t.Agent = strings.TrimSpace(t.Agent)
 	t.Method = strings.TrimSpace(t.Method)
 	t.Package = strings.TrimSpace(t.Package)
+	t.InstancePath = strings.TrimSpace(t.InstancePath)
 	return t
 }
 
-// Key 返回目标身份键（单元分隔符拼接，避免字段值碰撞）。
+// Key 返回目标身份键（单元分隔符拼接，避免字段值碰撞）。InstancePath 参与
+// 身份（KM-49 修复波/T7 P5：多实例必须显式选择）；未绑定为空段——npm 单
+// 作用域等场景的既有键保持稳定。
 func (t LifecycleTarget) Key() string {
-	return strings.Join([]string{t.Machine, t.Env, t.User, t.Agent, t.Method, t.Package}, "\x1f")
+	return strings.Join([]string{t.Machine, t.Env, t.User, t.Agent, t.Method, t.Package, t.InstancePath}, "\x1f")
 }
 
 // Validate 校验目标身份的必填项（spec：最小目标身份 + 卸载按已识别来源）。
@@ -174,12 +182,19 @@ const MaxEvidenceMessageLen = 2000
 
 // sensitiveRe 抹掉证据文本里 token 形态的值（npm 配置/授权头可能回显）。
 // 值统一替换为 [redacted]；键名保留供定位。
-var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|password|secret|_auth)(\s*[=:]\s*)("[^"]*"|\S+)`)
+var sensitiveRe = regexp.MustCompile(`(?i)(token|authorization|auth|password|secret)(\s*[=:]\s*)("[^"]*"|\S+)`)
+
+// authHeaderRe 遮盖 HTTP 风格授权头的**整个值**（KM-49 修复波/T7 S1：首版
+// 只遮 key=value 形态，`Authorization: Bearer <token>` 的多词值里 scheme 之后的
+// 凭据会漏网——逐行把头值整体替换，不区分 Bearer/Basic/自定义 scheme；键
+// 覆盖 authorization/auth 及 proxy- 前缀形态，"author:" 这类良性前缀不受影响）。
+var authHeaderRe = regexp.MustCompile(`(?i)((?:proxy-)?auth(?:orization)?\s*[:=]\s*)[^\r\n]*`)
 
 // RedactEvidence 是证据文本的统一脱敏（KM-47 契约：message 限长脱敏，写入前
 // 由上报方执行）。节点侧（上报前）与控制面（入库前兜底）共用同一实现——
-// 脱敏规则只有一份，不会漂移。
+// 脱敏规则只有一份，不会漂移。两趟：授权头整值遮盖 → 通用 key=value 遮盖。
 func RedactEvidence(s string) string {
+	s = authHeaderRe.ReplaceAllString(s, "$1[redacted]")
 	return sensitiveRe.ReplaceAllString(s, "$1$2[redacted]")
 }
 

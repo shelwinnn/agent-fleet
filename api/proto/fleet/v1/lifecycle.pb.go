@@ -53,6 +53,14 @@ type LifecycleTarget struct {
 	Agent     string                 `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`     // 如 "codex"
 	Method    string                 `protobuf:"bytes,5,opt,name=method,proto3" json:"method,omitempty"`   // 安装方式/来源（能力矩阵合法取值：npm|brew|…，binary 已阻塞）
 	Package   string                 `protobuf:"bytes,6,opt,name=package,proto3" json:"package,omitempty"` // 如 "@openai/codex"
+	// 绑定的明确安装实例（安装根/前缀路径）。参与目标身份（KM-49 修复波/T7 P5
+	// 契约侧：多实例必须显式选择）；空 = 未绑定，执行引擎按进程作用域决定。
+	InstancePath string `protobuf:"bytes,11,opt,name=instance_path,json=instancePath,proto3" json:"instance_path,omitempty"`
+	// 执行前提，不参与身份键（KM-49 修复波/T7 P4：确认绑定到具体观测）。重试
+	// 首派逐目标携带"操作者重新确认时接受的当前实际版本"；节点重发现时：
+	// 实测 == 本值 → 前提成立可执行；实测既不等于固定版本也不等于本值 →
+	// 影响再次变化，重新上报 needs_reconfirmation。
+	AcceptedObservedVersion string `protobuf:"bytes,12,opt,name=accepted_observed_version,json=acceptedObservedVersion,proto3" json:"accepted_observed_version,omitempty"`
 	// 创建时从机器台账取得并快照的平台事实（不参与身份），供能力判定与审计。
 	Os   string `protobuf:"bytes,7,opt,name=os,proto3" json:"os,omitempty"`
 	Arch string `protobuf:"bytes,8,opt,name=arch,proto3" json:"arch,omitempty"`
@@ -131,6 +139,20 @@ func (x *LifecycleTarget) GetMethod() string {
 func (x *LifecycleTarget) GetPackage() string {
 	if x != nil {
 		return x.Package
+	}
+	return ""
+}
+
+func (x *LifecycleTarget) GetInstancePath() string {
+	if x != nil {
+		return x.InstancePath
+	}
+	return ""
+}
+
+func (x *LifecycleTarget) GetAcceptedObservedVersion() string {
+	if x != nil {
+		return x.AcceptedObservedVersion
 	}
 	return ""
 }
@@ -581,7 +603,7 @@ var File_fleet_v1_lifecycle_proto protoreflect.FileDescriptor
 
 const file_fleet_v1_lifecycle_proto_rawDesc = "" +
 	"\n" +
-	"\x18fleet/v1/lifecycle.proto\x12\bfleet.v1\"\x9a\x02\n" +
+	"\x18fleet/v1/lifecycle.proto\x12\bfleet.v1\"\xfb\x02\n" +
 	"\x0fLifecycleTarget\x12\x1d\n" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\tR\tmachineId\x12\x10\n" +
@@ -589,7 +611,9 @@ const file_fleet_v1_lifecycle_proto_rawDesc = "" +
 	"\x04user\x18\x03 \x01(\tR\x04user\x12\x14\n" +
 	"\x05agent\x18\x04 \x01(\tR\x05agent\x12\x16\n" +
 	"\x06method\x18\x05 \x01(\tR\x06method\x12\x18\n" +
-	"\apackage\x18\x06 \x01(\tR\apackage\x12\x0e\n" +
+	"\apackage\x18\x06 \x01(\tR\apackage\x12#\n" +
+	"\rinstance_path\x18\v \x01(\tR\finstancePath\x12:\n" +
+	"\x19accepted_observed_version\x18\f \x01(\tR\x17acceptedObservedVersion\x12\x0e\n" +
 	"\x02os\x18\a \x01(\tR\x02os\x12\x12\n" +
 	"\x04arch\x18\b \x01(\tR\x04arch\x12)\n" +
 	"\x10capability_state\x18\t \x01(\tR\x0fcapabilityState\x12+\n" +

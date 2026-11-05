@@ -43,7 +43,9 @@ func lifecycleTargetsOf(machineID string, msg *fleetv1.ExecuteLifecycleOperation
 			Method: t.GetMethod(), Package: t.GetPackage(),
 			Version: spec.GetVersion(), Env: t.GetEnv(),
 			OS: t.GetOs(), Arch: t.GetArch(),
-			Executables: codexExecutables(t.GetAgent()),
+			InstancePath:            t.GetInstancePath(),
+			AcceptedObservedVersion: t.GetAcceptedObservedVersion(),
+			Executables:             codexExecutables(t.GetAgent()),
 		})
 	}
 	return targets
@@ -72,6 +74,16 @@ func lifecycleReportToProto(rep *lifecycle.Report) *fleetv1.LifecycleOperationRe
 			State:   r.State,
 			Reason:  r.Reason,
 			Message: r.Message,
+			// 身份逐段回显（KM-49 修复波/T7 断链修复）：控制面按目标身份键
+			// 对位落库——缺 Target 的结果会被按"未知目标"丢弃，P4 的确认
+			// 绑定循环也随之断链。
+			Target: &fleetv1.LifecycleTarget{
+				MachineId: r.Spec.Machine, Env: r.Spec.Env,
+				User: r.Spec.User, Agent: r.Spec.Agent,
+				Method: r.Spec.Method, Package: r.Spec.Package,
+				InstancePath: r.Spec.InstancePath,
+				Os:           r.Spec.OS, Arch: r.Spec.Arch,
+			},
 		}
 		item.Evidence = &fleetv1.LifecycleEvidence{
 			ObservedVersion: r.Evidence.ObservedVersion,

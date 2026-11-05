@@ -37,6 +37,7 @@ func TestLifecycleContractPathsRegistered(t *testing.T) {
 	doc := loadContract(t)
 	for _, path := range []string{
 		"/api/v1/machines/{name}/lifecycle/desired",
+		"/api/v1/machines/{name}/lifecycle/instances",
 		"/api/v1/lifecycle/operations",
 		"/api/v1/lifecycle/operations/{opId}",
 		"/api/v1/lifecycle/operations/{opId}/confirm",
