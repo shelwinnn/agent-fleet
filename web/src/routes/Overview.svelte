@@ -119,9 +119,6 @@
       <h1 class="console-page-title">{t('overview.title')}</h1>
       <p class="overview-lead">{t('overview.lead')}</p>
     </div>
-    <button type="button" class="overview-primary" onclick={() => navigate('/lifecycle')}>
-      {t('overview.openCodex')}
-    </button>
   </header>
 
   {#if machinesLoadError}
@@ -223,24 +220,6 @@
     font-size: 14px;
   }
 
-  .overview-primary {
-    flex: none;
-    height: 36px;
-    padding: 0 16px;
-    border: none;
-    border-radius: 4px;
-    background: #1a73e8;
-    color: #fff;
-    font: inherit;
-    font-size: 14px;
-    cursor: pointer;
-  }
-
-  .overview-primary:hover {
-    background: #1967d2;
-  }
-
-  .overview-primary:focus-visible,
   .overview-count:focus-visible,
   .overview-link:focus-visible {
     outline: 2px solid #1a73e8;

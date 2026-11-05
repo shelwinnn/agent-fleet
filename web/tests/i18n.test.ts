@@ -187,7 +187,7 @@ describe('动态内容跟随所选语言', () => {
     expect(en).toContain('Needs attention');
     expect(en).toContain('Unknown or stale');
     expect(en).toContain('Can update');
-    expect(en).toContain('Open Codex');
+    expect(en).not.toContain('Open Codex');
     expect(en).not.toContain('要处理');
 
     setLocale('zh-CN');
@@ -195,7 +195,7 @@ describe('动态内容跟随所选语言', () => {
     expect(zh).toContain('要处理');
     expect(zh).toContain('未知或过期');
     expect(zh).toContain('可以更新');
-    expect(zh).toContain('打开 Codex');
+    expect(zh).not.toContain('打开 Codex');
     expect(zh).not.toContain('Needs attention');
     // 两语言都不允许出现消息 key 泄漏（形如 ns.name 的裸 key）
     for (const body of [en, zh]) {

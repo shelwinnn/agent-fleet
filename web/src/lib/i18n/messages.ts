@@ -821,7 +821,6 @@ const zhCN = {
   'overview.handle.status': '状态',
   'overview.updates.title': '可以更新',
   'overview.updates.change': '变化',
-  'overview.openCodex': '打开 Codex',
 } as const satisfies Record<string, Message>;
 
 
@@ -1650,7 +1649,6 @@ const en: Record<MessageKey, Message> = {
   'overview.handle.status': 'Status',
   'overview.updates.title': 'Can update',
   'overview.updates.change': 'Change',
-  'overview.openCodex': 'Open Codex',
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {

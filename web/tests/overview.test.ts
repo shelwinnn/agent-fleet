@@ -53,7 +53,7 @@ function unknownVersionMachine(): Machine {
 }
 
 describe('总览', () => {
-  it('空数据仍显示四个计数、两张表和打开 Codex', () => {
+  it('空数据仍显示四个计数和两张表', () => {
     mountOverview(new FleetStore());
     const text = document.body.textContent ?? '';
     for (const label of ['设备', '在线', '失败', '版本未知']) {
@@ -61,7 +61,7 @@ describe('总览', () => {
     }
     expect(text).toContain('要处理');
     expect(text).toContain('可以更新');
-    expect(text).toContain('打开 Codex');
+    expect(text).not.toContain('打开 Codex');
     expect(text).toContain('先处理失败和未知。可以更新的列在下面。');
 
     const handle = document.getElementById('overview-handle')?.closest('section');
@@ -75,16 +75,11 @@ describe('总览', () => {
     expect(updates?.querySelector('tbody')?.children.length).toBe(0);
   });
 
-  it('设备进入机器列表，打开 Codex 进入代理页', () => {
+  it('设备进入机器列表', () => {
     mountOverview(new FleetStore());
     buttonByText('设备').click();
     flushSync();
     expect(window.location.hash).toBe('#/machines');
-
-    window.location.hash = '#/';
-    buttonByText('打开 Codex').click();
-    flushSync();
-    expect(window.location.hash).toBe('#/lifecycle');
   });
 
   it('没有版本的机器用现有未知色，不画成已确认一致', () => {

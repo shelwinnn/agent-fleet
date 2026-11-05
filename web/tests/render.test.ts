@@ -115,7 +115,7 @@ describe('页面渲染（状态呈现证据）', () => {
     }
     expect(body).toContain('要处理');
     expect(body).toContain('可以更新');
-    expect(body).toContain('打开 Codex');
+    expect(body).not.toContain('打开 Codex');
     expect(body).toContain('未知或过期'); // drift 三态里的 Unknown
     expect(body).toContain('ws-drift-demo');
     expect(body).not.toContain('已确认一致'); // 该机是 Unknown，绝不能被渲染成一致
