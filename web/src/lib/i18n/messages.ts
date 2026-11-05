@@ -809,6 +809,19 @@ const zhCN = {
   'lc.next.unknown': '先核对目标实际状态，再决定下一步；未知不计入成功、不会自动重试。',
   'lc.next.pending': '等待执行，结果会自动更新。',
   'lc.next.running': '执行中，结果会自动更新。',
+
+  'overview.lead': '先处理失败和未知。可以更新的列在下面。',
+  'overview.count.devices': '设备',
+  'overview.count.online': '在线',
+  'overview.count.failed': '失败',
+  'overview.count.versionUnknown': '版本未知',
+  'overview.handle.title': '要处理',
+  'overview.handle.agent': '代理',
+  'overview.handle.detail': '说明',
+  'overview.handle.status': '状态',
+  'overview.updates.title': '可以更新',
+  'overview.updates.change': '变化',
+  'overview.openCodex': '打开 Codex',
 } as const satisfies Record<string, Message>;
 
 
@@ -1625,6 +1638,19 @@ const en: Record<MessageKey, Message> = {
   'lc.next.unknown': 'Verify the actual state of the target first, then decide; unknown does not count as success and is never retried automatically.',
   'lc.next.pending': 'Waiting to run; results update automatically.',
   'lc.next.running': 'Running; results update automatically.',
+
+  'overview.lead': 'Handle failures and unknowns first. What can be updated is listed below.',
+  'overview.count.devices': 'Devices',
+  'overview.count.online': 'Online',
+  'overview.count.failed': 'Failed',
+  'overview.count.versionUnknown': 'Version unknown',
+  'overview.handle.title': 'Needs attention',
+  'overview.handle.agent': 'Agent',
+  'overview.handle.detail': 'Explanation',
+  'overview.handle.status': 'Status',
+  'overview.updates.title': 'Can update',
+  'overview.updates.change': 'Change',
+  'overview.openCodex': 'Open Codex',
 };
 
 export const catalogs: Record<Locale, Record<string, Message>> = {

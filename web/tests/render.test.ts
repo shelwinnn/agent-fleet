@@ -107,13 +107,15 @@ describe('页面渲染（状态呈现证据）', () => {
     }
   });
 
-  it('Overview 渲染六张卡片与"需关注"表，且明确区分未知与一致', () => {
+  it('Overview 渲染四个计数与要处理、可以更新，且未知不显示为一致', () => {
     const store = seededStore();
     const { body } = render(Overview, { props: { store } });
-    for (const card of ['机器总数', 'daemon 在线', 'SSH 可达', '已漂移', '降级', '活跃发布']) {
+    for (const card of ['设备', '在线', '失败', '版本未知']) {
       expect(body).toContain(card);
     }
-    expect(body).toContain('需要关注的机器');
+    expect(body).toContain('要处理');
+    expect(body).toContain('可以更新');
+    expect(body).toContain('打开 Codex');
     expect(body).toContain('未知或过期'); // drift 三态里的 Unknown
     expect(body).toContain('ws-drift-demo');
     expect(body).not.toContain('已确认一致'); // 该机是 Unknown，绝不能被渲染成一致
