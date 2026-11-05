@@ -17,6 +17,7 @@ import {
   failedResults,
   impactFingerprint,
   instanceKey,
+  instanceTitle,
   instancesFor,
   isExactVersion,
   isOperationSettled,
@@ -26,6 +27,7 @@ import {
   needsReconfirmationView,
   nextStepLabel,
   operationProgress,
+  targetIdentityKey,
   targetReasonLabel,
   targetResultViews,
   upstreamFailureLabel,
@@ -42,6 +44,7 @@ import {
 } from '../src/lib/api/lifecycleMock.js';
 import { translate } from '../src/lib/i18n/messages.js';
 import type { LifecycleOperation, LifecycleTarget } from '../src/lib/api/types.js';
+import type { AgentInstance } from '../src/lib/state/lifecycleGateway.js';
 
 const zh = 'zh-CN' as const;
 const en = 'en' as const;
@@ -248,6 +251,18 @@ describe('期望状态偏差（与上游更新分开展示）', () => {
     // 停止管理文案绝不能出现"卸载"语义
     expect(v.detail).not.toContain('卸载');
   });
+
+  it('观测缺失（inventoryMissing）时实际状态未知：不判偏差，未知 ≠ 一致 ≠ 尚未安装', () => {
+    const present = desiredPresentUpdate('0.56.0', 'npm', '@openai/codex').entries[CODEX_AGENT];
+    const v = deviationView(present, { present: false, unknown: true }, zh);
+    expect(v.level).toBe('info');
+    expect(v.text).toContain('实际状态未知');
+    expect(v.detail).toContain('未知不等于一致');
+    const absent = desiredAbsentUpdate('npm', '@openai/codex').entries[CODEX_AGENT];
+    const enView = deviationView(absent, { present: false, unknown: true }, en);
+    expect(enView.level).toBe('info');
+    expect(enView.text).toContain('unknown');
+  });
 });
 
 describe('影响指纹与重新确认', () => {
@@ -298,6 +313,35 @@ describe('实例选择辅助', () => {
       capabilityState: 'supported',
     });
     expect(t.env).toBeUndefined(); // 空 env = native，字段可缺省
+    expect(t.instancePath).toBeUndefined(); // 安装创建新实例，不绑定路径
+  });
+
+  it('目标身份绑定明确实例：instancePath 参与身份键（KM-49 P5，与后端 Key() 同构）', () => {
+    const base = { machine: 'm1', env: '', user: 'alice', agent: 'codex', method: 'npm', package: '@openai/codex' };
+    expect(targetIdentityKey(base)).toBe('m1|native|alice|codex|npm|@openai/codex|');
+    expect(targetIdentityKey({ ...base, instancePath: '/opt/prefix1/bin/codex' })).toBe(
+      'm1|native|alice|codex|npm|@openai/codex|/opt/prefix1/bin/codex',
+    );
+    const bound = buildTarget({ machine: 'm1', env: '', user: 'alice', method: 'npm', instancePath: '/opt/prefix1/bin/codex' });
+    expect(bound.instancePath).toBe('/opt/prefix1/bin/codex');
+  });
+
+  it('实例身份键含路径：来源未上报的多个观测实例靠路径区分，不折叠成一个', () => {
+    const a: AgentInstance = { env: '', user: '', agent: 'codex', method: '', package: '', version: '0.55.0', executablePath: '/opt/prefix1/bin/codex' };
+    const b: AgentInstance = { ...a, executablePath: '/opt/prefix2/bin/codex' };
+    expect(instanceKey(a)).not.toBe(instanceKey(b));
+    const noPath: AgentInstance = { env: '', user: '', agent: 'codex', method: '', package: '', version: '0.55.0' };
+    expect(instanceKey(noPath)).toBe(instanceKey({ ...noPath, executablePath: undefined })); // 缺省键与显式 undefined 同键
+    expect(instanceKey(a)).not.toBe(instanceKey(noPath));
+  });
+
+  it('来源未上报的实例标题如实标注，不猜测来源', () => {
+    const observed: AgentInstance = { env: '', user: '', agent: 'codex', method: '', package: '', version: '0.55.0', executablePath: '/opt/bin/codex' };
+    expect(instanceTitle(observed, zh)).toContain('安装来源未上报');
+    expect(instanceTitle(observed, zh)).toContain('0.55.0');
+    expect(instanceTitle(observed, en)).toContain('Install source not reported');
+    const known: AgentInstance = { env: '', user: 'ops', agent: 'codex', method: 'npm', package: '@openai/codex', version: '0.55.0' };
+    expect(instanceTitle(known, zh)).toBe('npm @openai/codex · 0.55.0');
   });
 });
 

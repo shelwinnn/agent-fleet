@@ -426,6 +426,12 @@ export interface LifecycleTarget {
   agent: string;
   method: string;
   package: string;
+  /**
+   * 绑定的明确安装实例（安装根/前缀路径）。参与目标身份（KM-49 修复波/T7 P5
+   * 契约侧：多实例时必须显式选择）；空 = 未绑定，执行引擎按进程作用域决定
+   * （遇多实例显式失败，不静默替换）。
+   */
+  instancePath?: string;
   /** 创建时从机器台账快照的平台事实（不参与身份）。 */
   os?: string;
   arch?: string;
@@ -434,6 +440,37 @@ export interface LifecycleTarget {
 }
 
 export type LifecycleCapabilityState = 'supported' | 'unverified' | 'blocked';
+
+/** 实例发现查询的逐实例条目（KM-49 修复波/T7 P5 契约侧；与 OpenAPI LifecycleInstance 同构）。 */
+export interface LifecycleInstanceObserved {
+  /** agent 家族（如 "codex"）。 */
+  agent?: string;
+  /** 实测版本；installed=false 时缺省。 */
+  version?: string;
+  /** 实例路径（程序入口或配置位置，来自节点采集）。 */
+  path?: string;
+  installed: boolean;
+  /** 版本读取失败的显式原因（"读取失败" ≠ "未安装"）。 */
+  versionError?: string;
+}
+
+/**
+ * 实例发现查询结果（GET /api/v1/machines/{name}/lifecycle/instances；与
+ * OpenAPI LifecycleInstanceList 同构）。"尚未安装"是显式状态（notInstalled），
+ * 不是错误；inventoryMissing = 节点从未上报观测——未知 ≠ 尚未安装。
+ */
+export interface LifecycleInstanceList {
+  machine: string;
+  /** 查询的执行环境（空 = native）；当前服务端原样回显。 */
+  env?: string;
+  /** 查询的受管用户；当前服务端原样回显。 */
+  user?: string;
+  /** 尚未安装（显式表达；与"查询失败"严格区分）。 */
+  notInstalled: boolean;
+  /** 该机尚无观测 inventory（agentd 从未上报）：实例状态未知。 */
+  inventoryMissing?: boolean;
+  instances: LifecycleInstanceObserved[];
+}
 
 /** 逐目标证据（不含秘密）。observedVersion 是操作后重新发现并独立核验的实测版本。 */
 export interface LifecycleEvidence {

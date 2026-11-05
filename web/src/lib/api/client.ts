@@ -16,6 +16,7 @@ import type {
   LifecycleCapabilityList,
   LifecycleDesiredDocument,
   LifecycleDesiredUpdate,
+  LifecycleInstanceList,
   LifecycleOperation,
   LifecycleOperationCreateRequest,
   LifecycleRetryRequest,
@@ -347,6 +348,19 @@ export class FleetClient {
   /** 查询生命周期能力矩阵（supported 在 T8 真机证据前为空集；unverified 不标支持）。 */
   getLifecycleCapabilities = (opts?: RequestOptions) =>
     this.json<LifecycleCapabilityList>('GET', '/api/v1/lifecycle/capabilities', undefined, opts);
+
+  /**
+   * 实例发现查询（KM-49 修复波/T7 P5 契约侧）：机器级 Codex 实例清单（路径、
+   * 版本、安装态）。"尚未安装"是显式状态（notInstalled）；inventoryMissing =
+   * 节点从未上报观测——未知 ≠ 尚未安装。未知机器 404 走 ApiError。
+   */
+  getLifecycleInstances = (name: string, opts?: RequestOptions) =>
+    this.json<LifecycleInstanceList>(
+      'GET',
+      `/api/v1/machines/${encodeURIComponent(name)}/lifecycle/instances`,
+      undefined,
+      opts,
+    );
 
   /**
    * 检查上游可用版本（T3/KM-48 契约，逐来源含失败记录与缓存回退）。

@@ -104,11 +104,16 @@ export function envLabel(env: string | undefined, locale: Locale = 'zh-CN'): str
 }
 
 export function instanceKey(instance: AgentInstance): string {
-  return `${instance.env || 'native'}|${instance.user}|${instance.method}|${instance.package}`;
+  // 路径参与区分（KM-49 P5：目标身份绑定明确实例）：来源未上报的多个观测实例
+  // 只有路径不同，缺路径段会把两个实例折叠成一个。
+  return `${instance.env || 'native'}|${instance.user}|${instance.method}|${instance.package}|${instance.executablePath ?? ''}`;
 }
 
 export function targetIdentityKey(t: LifecycleTarget): string {
-  return `${t.machine}|${t.env || 'native'}|${t.user}|${t.agent}|${t.method}|${t.package}`;
+  // 段序与后端 LifecycleTarget.Key()（domain/lifecycle.go，含 instancePath）一致；
+  // 分隔符（|）与空 env → native 归一是 UI 本地约定（后端用 \x1f 且不归一）：
+  // 本键只在 UI 内做影响指纹与去重，不与后端键直接比较。instancePath 空 = 未绑定。
+  return `${t.machine}|${t.env || 'native'}|${t.user}|${t.agent}|${t.method}|${t.package}|${t.instancePath ?? ''}`;
 }
 
 /** 目标的一行身份描述：主机 · 环境 · 用户 · 来源/包（路径单独展示）。 */
@@ -130,6 +135,8 @@ export function buildTarget(input: {
   pkg?: string;
   os?: string;
   arch?: string;
+  /** 绑定的明确安装实例路径（升级/卸载必须绑定；安装创建新实例，不绑定）。 */
+  instancePath?: string;
   capability?: LifecycleCapability;
 }): LifecycleTarget {
   return {
@@ -139,6 +146,7 @@ export function buildTarget(input: {
     agent: CODEX_AGENT,
     method: input.method,
     package: input.pkg ?? CODEX_PACKAGE,
+    ...(input.instancePath ? { instancePath: input.instancePath } : {}),
     os: input.os,
     arch: input.arch,
     capabilityState: input.capability?.state,
@@ -430,11 +438,13 @@ export interface DeviationView {
 
 /**
  * 期望意图 vs 实际观测的偏差。实际观测来自实例发现：installedVersion 为
- * undefined 且无实例 = 尚未安装；versionError = 已装但版本不可解析（未知 ≠ 一致）。
+ * undefined 且无实例 = 尚未安装；versionError = 已装但版本不可解析（未知 ≠ 一致）；
+ * unknown = 节点从未上报观测（inventoryMissing）——实际状态未知，不判定偏差
+ * （未知 ≠ 一致，也 ≠ 尚未安装）。
  */
 export function deviationView(
   entry: LifecycleEntry | undefined,
-  installed: { version?: string; versionError?: string; present: boolean },
+  installed: { version?: string; versionError?: string; present: boolean; unknown?: boolean },
   locale: Locale = 'zh-CN',
 ): DeviationView {
   if (!entry) {
@@ -449,6 +459,15 @@ export function deviationView(
       level: 'info',
       text: translate(locale, 'lc.deviation.unmanaged'),
       detail: translate(locale, 'lc.deviation.unmanagedDetail'),
+    };
+  }
+  if (installed.unknown) {
+    // absent/present 意图都需要实际观测才能核对；观测缺失时如实说"未知"，
+    // 绝不把 present=false 当成"尚未安装"（inventoryMissing 时 present 不可知）。
+    return {
+      level: 'info',
+      text: translate(locale, 'lc.deviation.stateUnknown'),
+      detail: translate(locale, 'lc.deviation.stateUnknownDetail'),
     };
   }
   if (entry.intent === 'absent') {
@@ -501,9 +520,12 @@ export function instancesFor(
   return (inventory?.instances ?? []).filter((i) => (i.env || '') === env && i.user === user && i.agent === agent);
 }
 
-/** 实例的一行展示身份：来源/包 + 版本（或版本不可解析原因）+ 路径。 */
+/** 实例的一行展示身份：来源/包 + 版本（或版本不可解析原因）+ 路径；来源未上报时如实标注，不猜测。 */
 export function instanceTitle(instance: AgentInstance, locale: Locale = 'zh-CN'): string {
-  const base = `${instance.method} ${instance.package}`;
+  const base =
+    instance.method || instance.package
+      ? `${instance.method} ${instance.package}`.trim()
+      : translate(locale, 'lc.instance.sourceUnknown');
   if (instance.versionError) return `${base} · ${translate(locale, 'lc.instance.versionUnresolved')}`;
   if (instance.version) return `${base} · ${instance.version}`;
   return base;

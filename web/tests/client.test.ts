@@ -198,4 +198,53 @@ describe('生命周期端点（KM-47 / T3 契约路径）', () => {
     await client.checkUpstreamVersions('codex');
     expect(String(fetchMock.mock.calls[3]?.[0])).toBe('http://cp:7788/api/v1/agents/codex/upstream-versions/check');
   });
+
+  it('实例发现接线：GET /machines/{name}/lifecycle/instances；契约映射把缺口如实置空（KM-50 第二波）', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        machine: 'ws-1',
+        notInstalled: false,
+        instances: [
+          { agent: 'codex', version: '0.55.0', path: '/opt/prefix1/bin/codex', installed: true },
+          { agent: 'codex', path: '/opt/prefix2/bin/codex', installed: true, versionError: 'version read failed' },
+          { agent: 'codex', installed: false },
+        ],
+      }),
+    );
+    const client = new FleetClient({ fetch: fetchMock });
+    const gw = new RestLifecycleGateway(client);
+    const inv = await gw.getInstanceInventory('ws 1');
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/v1/machines/ws%201/lifecycle/instances');
+    expect(init.method).toBe('GET');
+    // 契约是机器级观测：不枚举环境/用户，也无来源归属——映射置空，不猜测。
+    expect(inv.machine).toBe('ws-1');
+    expect(inv.environments).toEqual([]);
+    // installed=false 的条目不冒充实例；观测到两条（版本可解析 / 版本读取失败）。
+    expect(inv.instances).toHaveLength(2);
+    expect(inv.instances[0]).toEqual({
+      env: '', user: '', agent: 'codex', method: '', package: '', version: '0.55.0', executablePath: '/opt/prefix1/bin/codex',
+    });
+    expect(inv.instances[1]).toEqual({
+      env: '', user: '', agent: 'codex', method: '', package: '', versionError: 'version read failed', executablePath: '/opt/prefix2/bin/codex',
+    });
+    expect(inv.notInstalled).toBeUndefined();
+    expect(inv.inventoryMissing).toBeUndefined();
+  });
+
+  it('实例发现：notInstalled 与 inventoryMissing 显式透传（未知 ≠ 尚未安装）', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes('m-missing')
+        ? jsonResponse({ machine: 'm-missing', notInstalled: false, inventoryMissing: true, instances: [] })
+        : jsonResponse({ machine: 'm-none', notInstalled: true, instances: [] }),
+    );
+    const client = new FleetClient({ fetch: fetchMock });
+    const gw = new RestLifecycleGateway(client);
+    const missing = await gw.getInstanceInventory('m-missing');
+    expect(missing.inventoryMissing).toBe(true);
+    expect(missing.notInstalled).toBeUndefined();
+    const none = await gw.getInstanceInventory('m-none');
+    expect(none.notInstalled).toBe(true);
+    expect(none.instances).toEqual([]);
+  });
 });

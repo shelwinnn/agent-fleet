@@ -12,7 +12,6 @@
   import { ApiError } from '$lib/api/client';
   import type { LifecycleOperationType, LifecycleTarget, Machine, ResourceEvent } from '$lib/api/types.js';
   import type { LifecycleGateway, AgentInstanceInventory } from '$lib/state/lifecycleGateway.js';
-  import { InventoryNotWiredError } from '$lib/state/lifecycleGateway.js';
   import type { UpstreamRowView } from '$lib/state/lifecycle.js';
   import {
     CODEX_AGENT,
@@ -73,7 +72,6 @@
   let inventory = $state<AgentInstanceInventory | undefined>(undefined);
   let inventoryLoading = $state(false);
   let inventoryError = $state<unknown>(undefined);
-  let inventoryNotWired = $state(false);
   let desired = $state<Awaited<ReturnType<LifecycleGateway['getDesired']>> | undefined>(undefined);
   let desiredLoading = $state(false);
   let desiredError = $state<unknown>(undefined);
@@ -122,15 +120,30 @@
   const machineOffline = $derived(machineView ? machineView.agentd.connected !== 'True' : false);
   const os = $derived(inventory?.os ?? machine?.status?.os);
   const arch = $derived(inventory?.arch ?? machine?.status?.arch);
+  /**
+   * 清单是否提供受管用户/环境枚举。契约的实例发现是机器级观测（KM-50 第二波
+   * 接线），不含归属：environments 为空时进入"操作者声明用户"模式——执行环境
+   * 固定原生、用户由操作者输入，实例按机器级列出（观测未上报归属，不按用户
+   * 过滤、不猜测归属）。
+   */
+  const userEnumerated = $derived((inventory?.environments?.length ?? 0) > 0);
   const envOptions = $derived(inventory?.environments ?? []);
   const userOptions = $derived(envOptions.find((e) => (e.env || '') === sel.env)?.users ?? []);
-  const instances = $derived(instancesFor(inventory, sel.env, sel.user, CODEX_AGENT));
+  const instances = $derived(
+    inventory
+      ? userEnumerated
+        ? instancesFor(inventory, sel.env, sel.user, CODEX_AGENT)
+        : inventory.instances.filter((i) => i.agent === CODEX_AGENT)
+      : [],
+  );
   const selectedInstance = $derived(instances.find((i) => instanceKey(i) === sel.instance) ?? null);
   const offerings = $derived(methodOfferings(capabilities, os, arch));
   const installedView = $derived({
     present: instances.length > 0,
     version: (selectedInstance ?? instances[0])?.version,
     versionError: (selectedInstance ?? instances[0])?.versionError,
+    // 观测缺失（节点从未上报）：实际状态未知——偏差判定不得把"未知"当"尚未安装"或"一致"。
+    unknown: inventory?.inventoryMissing === true,
   });
 
   // 操作能力判定：安装看所选方式；升级/卸载看所选实例的方式。
@@ -153,13 +166,11 @@
   async function loadInventory(name: string) {
     inventoryLoading = true;
     inventoryError = undefined;
-    inventoryNotWired = false;
     try {
       inventory = await gateway.getInstanceInventory(name);
     } catch (err) {
       inventory = undefined;
-      if (err instanceof InventoryNotWiredError) inventoryNotWired = true;
-      else inventoryError = err;
+      inventoryError = err;
     } finally {
       inventoryLoading = false;
     }
@@ -240,6 +251,11 @@
     sel.instance = '';
     previewKind = null;
   }
+  /** 操作者声明受管用户（清单未枚举用户时的模式）：目标身份随之变化，预览指纹重算、需重新确认。 */
+  function declareUser(value: string) {
+    sel.user = value.trim();
+    previewKind = null;
+  }
 
   // ---- 上游检查 ----
   async function checkUpstream() {
@@ -280,6 +296,8 @@
           user: sel.user,
           method: selectedInstance.method,
           pkg: selectedInstance.package,
+          // 升级/卸载绑定明确实例（KM-49 P5 目标身份）；来源未上报时该入口已被门控拒绝。
+          instancePath: selectedInstance.executablePath,
           os,
           arch,
           capability: capabilityFor(capabilities, os, arch, selectedInstance.method),
@@ -507,18 +525,13 @@
       {/if}
 
       {#if sel.machine}
-        {#if inventoryNotWired}
-          <div class="rounded-md border border-dashed p-4" role="status">
-            <p class="text-sm font-medium">{t('lc.env.inventoryUnavailable')}</p>
-            <p class="mt-1 text-xs text-muted-foreground">{t('lc.env.inventoryUnavailableDetail')}</p>
-          </div>
-        {:else if inventoryError !== undefined}
+        {#if inventoryError !== undefined}
           <div class="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive" role="alert">
             {t('lc.env.loadFailed')}{failureText(inventoryError, loc)} {t('error.loadRetryHint')}
           </div>
         {:else if inventoryLoading}
           <AsyncState loading rows={2} />
-        {:else if inventory}
+        {:else if inventory && userEnumerated}
           <div class="grid gap-3 sm:grid-cols-2">
             <div class="grid gap-1">
               <Label for="lc-env" class="text-xs">{t('lc.env.label')}</Label>
@@ -577,13 +590,13 @@
                 {#if instances.length > 1}
                   <p class="text-xs text-muted-foreground">{t('lc.instance.choose')}</p>
                 {/if}
-                {#each instances as inst (instanceKey(inst))}
+                {#each instances as inst, i (instanceKey(inst))}
                   {@const key = instanceKey(inst)}
                   <div class="flex flex-wrap items-center gap-2 rounded-md border p-3 {sel.instance === key ? 'border-primary' : ''}">
                     <input
                       type="radio"
                       name="lc-instance"
-                      id="lc-inst-{key}"
+                      id="lc-inst-{i}"
                       class="size-4 accent-primary"
                       checked={sel.instance === key}
                       onchange={() => {
@@ -591,7 +604,7 @@
                         previewKind = null;
                       }}
                     />
-                    <label for="lc-inst-{key}" class="flex cursor-pointer flex-wrap items-center gap-2">
+                    <label for="lc-inst-{i}" class="flex cursor-pointer flex-wrap items-center gap-2">
                       <span class="font-mono text-xs">{instanceTitle(inst, loc)}</span>
                       <span class="text-xs text-muted-foreground">{inst.executablePath ?? ''}</span>
                       <CapabilityBadge capability={capFor(inst.method)} />
@@ -603,6 +616,68 @@
                     {t('lc.instance.versionUnresolvedHint')}
                   </p>
                 {/if}
+              {/if}
+            </div>
+          {/if}
+        {:else if inventory}
+          <!-- 机器级观测模式（契约未枚举环境/用户归属）：环境固定原生，用户由操作者
+               声明；实例按机器级如实列出——归属未知就不按用户过滤、不猜测来源。 -->
+          <p class="text-xs text-muted-foreground">{t('lc.env.nativeOnly')}</p>
+          <div class="grid gap-1">
+            <Label for="lc-user-input" class="text-xs">{t('lc.env.user')}</Label>
+            <Input
+              id="lc-user-input"
+              class="w-56"
+              value={sel.user}
+              oninput={(e) => declareUser(e.currentTarget.value)}
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p class="text-xs text-muted-foreground">{t('lc.env.userInputHint')}</p>
+          </div>
+
+          {#if inventory.inventoryMissing}
+            <!-- 未知 ≠ 尚未安装：节点从未上报观测，不列出实例、不 claims 安装状态 -->
+            <div class="rounded-md border border-dashed p-4" role="status">
+              <p class="text-sm font-medium">{t('lc.instance.unknownState')}</p>
+              <p class="mt-1 text-xs text-muted-foreground">{t('lc.instance.unknownStateHint')}</p>
+            </div>
+          {:else if instances.length === 0}
+            <!-- 观测在场但没有任何 codex 实例：显式"尚未安装"（机器级事实） -->
+            <div class="flex flex-wrap items-center gap-2 rounded-md border border-dashed p-3" role="status">
+              <StateBadge tone="muted" label={t('lc.instance.none')} />
+              <span class="text-xs text-muted-foreground">{t('lc.instance.noneMachineHint')}</span>
+            </div>
+          {:else}
+            <div class="grid gap-2">
+              <div class="text-xs font-medium text-muted-foreground">{t('lc.instance.label')}</div>
+              {#if instances.length > 1}
+                <p class="text-xs text-muted-foreground">{t('lc.instance.chooseMachine')}</p>
+              {/if}
+              {#each instances as inst, i (instanceKey(inst))}
+                {@const key = instanceKey(inst)}
+                <div class="flex flex-wrap items-center gap-2 rounded-md border p-3 {sel.instance === key ? 'border-primary' : ''}">
+                  <input
+                    type="radio"
+                    name="lc-instance"
+                    id="lc-inst-{i}"
+                    class="size-4 accent-primary"
+                    checked={sel.instance === key}
+                    onchange={() => {
+                      sel.instance = key;
+                      previewKind = null;
+                    }}
+                  />
+                  <label for="lc-inst-{i}" class="flex cursor-pointer flex-wrap items-center gap-2">
+                    <span class="font-mono text-xs">{instanceTitle(inst, loc)}</span>
+                    <span class="text-xs text-muted-foreground">{inst.executablePath ?? ''}</span>
+                  </label>
+                </div>
+              {/each}
+              {#if selectedInstance?.versionError}
+                <p class="text-xs text-amber-700 dark:text-amber-300">
+                  {t('lc.instance.versionUnresolvedHint')}
+                </p>
               {/if}
             </div>
           {/if}
@@ -620,6 +695,7 @@
       installed={installedView}
       observedAt={inventory?.discoveredAt}
       targetSelected={sel.user !== ''}
+      pickTargetText={userEnumerated ? undefined : t('lc.deviation.pickTargetMachine')}
       now={clock.now}
     />
   {/if}
@@ -711,7 +787,12 @@
           <div class="grid gap-2">
             <div class="text-xs font-medium text-muted-foreground">{t('lc.action.pickInstance')}</div>
             <p class="font-mono text-xs">{instanceTitle(selectedInstance, loc)} · {selectedInstance.executablePath ?? ''}</p>
-            {#if !activeSupported}
+            {#if !selectedInstance.method}
+              <!-- 来源未知：拒绝卸载/升级并说明原因（spec User Story 22）；机器级观测未上报安装来源时如实缺省 -->
+              <div class="rounded-md border border-dashed p-3" role="status">
+                <p class="text-sm font-medium">{t('lc.action.uninstallSourceUnknown')}</p>
+              </div>
+            {:else if !activeSupported}
               <!-- 未验证/blocked/能力未知：如实展示状态与原因，不提供操作入口（T7 P7） -->
               <div class="rounded-md border border-dashed p-3" role="status">
                 <p class="text-sm font-medium">{gate?.title}</p>
@@ -721,11 +802,6 @@
                 {#if activeCapability?.state === 'unverified'}
                   <p class="mt-1 text-xs text-muted-foreground">{t('lc.cap.unverifiedHint')}</p>
                 {/if}
-              </div>
-            {:else if !selectedInstance.method}
-              <!-- 来源未知：拒绝卸载/升级并说明原因（spec User Story 22） -->
-              <div class="rounded-md border border-dashed p-3" role="status">
-                <p class="text-sm font-medium">{t('lc.action.uninstallSourceUnknown')}</p>
               </div>
             {:else}
               <div class="grid gap-1">
@@ -760,7 +836,9 @@
             {/if}
           </div>
         {:else if instances.length > 0}
-          <p class="text-xs text-muted-foreground">{t('lc.instance.choose')}</p>
+          <p class="text-xs text-muted-foreground">
+            {userEnumerated ? t('lc.instance.choose') : t('lc.instance.chooseMachine')}
+          </p>
         {/if}
 
       </CardContent>
